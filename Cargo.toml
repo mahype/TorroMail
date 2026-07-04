@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/donnymail-core",
+    "crates/donnymail-mcp",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["DonnyMail contributors"]
+repository = "https://example.invalid/donnymail"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
