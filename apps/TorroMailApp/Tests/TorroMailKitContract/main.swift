@@ -10,52 +10,65 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 
 let model = TorroMailModel.preview()
 
+// Decisions, not options: the sidebar carries accounts plus exactly two
+// general destinations (Settings, Log). There is no Diagnostics surface.
 require(
-    model.sidebarItems.map(\.label)
-        == ["Work", "Personal", "AI Clients", "General Settings", "Audit Log", "Diagnostics"],
-    "accounts must be primary navigation before global settings"
-)
-require(
-    model.sidebarGroups.map(\.label) == ["Accounts", "General"],
-    "sidebar should visually separate mail accounts from general settings"
-)
-require(
-    model.sidebarGroups[0].items.map(\.label) == ["Work", "Personal"],
-    "account rows should live in their own sidebar group"
-)
-require(
-    model.sidebarGroups[1].items.map(\.label) == ["AI Clients", "General Settings", "Audit Log", "Diagnostics"],
-    "global settings should live below the account group"
+    model.accounts.map(\.name) == ["Work", "Personal"],
+    "accounts are the primary navigation"
 )
 require(
     model.selectedSidebarItem == .account("work"),
     "first account should be selected by default"
 )
+
+// Status only on exception: healthy accounts stay quiet, unverified ones ask
+// for attention.
 require(
-    TorroMailAccountSection.allCases.map(\.label)
-        == ["Overview", "Connection", "Permissions", "Search & Cache", "Mailboxes", "Pending Actions", "Advanced"],
-    "account-specific settings must stay inside account detail sections"
+    !model.accounts[0].connectionState.needsAttention,
+    "a connected account must not demand attention"
 )
 require(
-    model.generalSettings.startMcpServerWithApp,
-    "MCP server should start with TorroMail by default"
+    model.accounts[1].connectionState.needsAttention,
+    "an untested connection must ask for attention"
 )
 require(
-    model.generalSettings.mcpLifecycleSummary == "Starts with TorroMail",
-    "MCP lifecycle summary should be user-facing"
+    model.accounts[0].pendingActions.count == 1,
+    "pending approvals belong to their account"
 )
 
-let account = model.selectedAccount
+// The one lifecycle decision: start at login. Executable and transport are
+// internal details and never user-facing.
 require(
-    account.permissions.summary == "Read body, Drafts, Mark, Move",
-    "selected account should own permission state"
+    model.generalSettings.launchAtLogin,
+    "launch at login is the default"
 )
 require(
-    account.searchCache.summary == "Headers cached, body index off",
-    "selected account should own search/cache state"
+    model.generalSettings.mcpExecutable == "torromail-mcp",
+    "supervisor knows its executable without exposing it in the UI"
 )
-require(account.pendingActions.count == 1, "selected account should own pending actions")
 
+// Account lifecycle stays in the GUI: add selects the new account, remove
+// falls back to the first remaining one.
+model.addAccount(name: "Club", email: "club@example.org", provider: .imapSmtp, loginMethod: .password)
+require(model.accounts.count == 3, "wizard adds an account")
+guard case let .account(newID) = model.selectedSidebarItem else {
+    require(false, "adding an account selects it")
+    fatalError("unreachable")
+}
+require(newID == model.accounts[2].id, "adding an account selects it")
+require(
+    model.accounts[2].connectionState == .notConfigured,
+    "a fresh account starts unconfigured"
+)
+
+model.removeAccount(id: newID)
+require(model.accounts.count == 2, "remove deletes the configuration")
+require(
+    model.selectedSidebarItem == .account("work"),
+    "removing the selected account falls back to the first account"
+)
+
+// MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(
     executableName: "torromail-mcp",
     workspaceRoot: "/repo"
@@ -65,8 +78,12 @@ require(
     "MCP executable should be resolved from the dev workspace before PATH"
 )
 require(
-    MCPServerStatus.notFound("torromail-mcp").label == "Executable not found",
-    "MCP server status should expose readable lifecycle state"
+    !MCPServerStatus.notFound("torromail-mcp").isRunning,
+    "a missing executable is not a running server"
+)
+require(
+    MCPServerStatus.running("torromail-mcp").isRunning,
+    "running state should be observable"
 )
 
-print("TorroMailKit navigation contract passed")
+print("TorroMailKit control-surface contract passed")

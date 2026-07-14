@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "TorroMailApp",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v14)
     ],
@@ -15,7 +16,10 @@ let package = Package(
         .target(name: "TorroMailKit"),
         .executableTarget(
             name: "TorroMailApp",
-            dependencies: ["TorroMailKit"]
+            dependencies: ["TorroMailKit"],
+            resources: [
+                .process("Resources")
+            ]
         ),
         .executableTarget(
             name: "TorroMailKitContract",

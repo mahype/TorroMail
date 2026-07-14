@@ -1,0 +1,94 @@
+/* Sidebar */
+"Accounts" = "Konten";
+"Settings" = "Einstellungen";
+"Log" = "Protokoll";
+"Add Account" = "Konto hinzufügen";
+"New Account" = "Neues Konto";
+"No account selected" = "Kein Konto ausgewählt";
+
+/* Connection */
+"Connection" = "Verbindung";
+"Provider" = "Anbieter";
+"Login" = "Anmeldung";
+"Password" = "Passwort";
+"OAuth" = "OAuth";
+"IMAP Server" = "IMAP-Server";
+"SMTP Server" = "SMTP-Server";
+"Username" = "Benutzername";
+"Sign In…" = "Anmelden…";
+"Test Connection" = "Verbindung testen";
+"Connected" = "Verbunden";
+"Needs test" = "Test erforderlich";
+"Not configured" = "Nicht eingerichtet";
+
+/* Permissions */
+"Permissions" = "Berechtigungen";
+"Read headers" = "Kopfzeilen lesen";
+"Read body" = "Inhalte lesen";
+"Attachments" = "Anhänge";
+"Drafts" = "Entwürfe";
+"Send" = "Senden";
+"Mark" = "Markieren";
+"Move" = "Verschieben";
+"Delete" = "Löschen";
+"Permanent delete" = "Endgültig löschen";
+"What connected assistants may do with this account. Send, move, and delete always require your confirmation." = "Was verbundene Assistenten mit diesem Konto tun dürfen. Senden, Verschieben und Löschen erfordern immer deine Bestätigung.";
+
+/* Folders */
+"Folders" = "Ordner";
+"Folders the assistant may access." = "Ordner, auf die der Assistent zugreifen darf.";
+
+/* Search & Cache */
+"Search & Cache" = "Suche & Cache";
+"Local cache" = "Lokaler Cache";
+"Cache level" = "Cache-Stufe";
+"Metadata" = "Metadaten";
+"Headers" = "Kopfzeilen";
+"Bodies" = "Inhalte";
+"Full text" = "Volltext";
+"Full text index" = "Volltextindex";
+"Attachment index" = "Anhang-Index";
+"Storage" = "Speicher";
+"More caching makes search faster but stores mail content on this Mac." = "Mehr Cache beschleunigt die Suche, speichert aber E-Mail-Inhalte auf diesem Mac.";
+
+/* Pending actions */
+"Pending Actions" = "Ausstehende Aktionen";
+"Approve" = "Freigeben";
+"Reject" = "Ablehnen";
+"Actions an assistant prepared and is waiting for you to approve." = "Aktionen, die ein Assistent vorbereitet hat und die auf deine Freigabe warten.";
+
+/* Account removal */
+"Remove Account…" = "Konto entfernen …";
+"Remove Account" = "Konto entfernen";
+"Remove “%@”?" = "„%@“ entfernen?";
+"This only removes the configuration from TorroMail. Your mail stays on the server." = "Entfernt nur die Konfiguration aus TorroMail. Deine E-Mails bleiben auf dem Server.";
+
+/* Settings */
+"Start at login" = "Beim Anmelden starten";
+"TorroMail and its MCP server start automatically in the background." = "TorroMail und der MCP-Server starten automatisch im Hintergrund.";
+"MCP Server" = "MCP-Server";
+"Running" = "Läuft";
+"Starting" = "Startet";
+"Stopped" = "Gestoppt";
+"Error" = "Fehler";
+"Start" = "Starten";
+"Stop" = "Stoppen";
+"MCP executable “%@” not found." = "MCP-Programm „%@“ nicht gefunden.";
+"AI Clients" = "KI-Clients";
+"Add to Claude Desktop" = "Zu Claude Desktop hinzufügen";
+"Copy Config Snippet" = "Konfiguration kopieren";
+"Connect an assistant so it can use your mail through TorroMail." = "Verbinde einen Assistenten, damit er deine E-Mails über TorroMail nutzen kann.";
+
+/* Log */
+"Time" = "Zeit";
+"Client" = "Client";
+"Account" = "Konto";
+"Event" = "Ereignis";
+"Result" = "Ergebnis";
+"Export…" = "Exportieren …";
+
+/* Wizard */
+"Display Name" = "Anzeigename";
+"Email" = "E-Mail";
+"Cancel" = "Abbrechen";
+"Add" = "Hinzufügen";

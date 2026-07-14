@@ -37,6 +37,19 @@ The native macOS app is allowed to exist, but its role is setup and control:
 If UI work is requested, keep it clear, minimal, and operational. It should feel
 like a precise control surface, not like a mail inbox.
 
+## UI Principles
+
+- Decisions, not options: every visible control is either a user decision or a
+  required action. If the user cannot decide or act on it, it does not belong
+  in the UI.
+- Status only on exception: healthy state stays quiet (at most a colored dot);
+  errors and pending approvals surface where they occur.
+- Technical details (transport, executable paths, internal queue or module
+  state) belong in logs, never in the UI. There is no Diagnostics screen.
+- The sidebar stays minimal: accounts (name + email only), Settings, Log.
+- User-facing strings are localized. English is the development language;
+  German lives in `apps/TorroMailApp/Sources/TorroMailApp/Resources/de.lproj`.
+
 ## Architecture
 
 - `crates/torromail-core`: portable Rust domain model for accounts, policies,

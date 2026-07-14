@@ -1,5 +1,27 @@
-import TorroMailKit
 import SwiftUI
+import TorroMailKit
+
+/// Localized user-facing string. English keys are the development language;
+/// translations live in `Resources/<lang>.lproj/Localizable.strings`.
+private func L(_ key: String) -> String {
+    NSLocalizedString(key, bundle: .module, comment: "")
+}
+
+private func label(for method: LoginMethod) -> String {
+    switch method {
+    case .password: L("Password")
+    case .oauth: L("OAuth")
+    }
+}
+
+private func label(for mode: CacheMode) -> String {
+    switch mode {
+    case .metadata: L("Metadata")
+    case .headers: L("Headers")
+    case .body: L("Bodies")
+    case .fullText: L("Full text")
+    }
+}
 
 @main
 struct TorroMailApp: App {
@@ -11,14 +33,14 @@ struct TorroMailApp: App {
             TorroMailRootView()
                 .environmentObject(model)
                 .environmentObject(mcpSupervisor)
-                .frame(minWidth: 1240, minHeight: 740)
+                .frame(minWidth: 1080, minHeight: 660)
                 .task {
-                    mcpSupervisor.startIfNeeded(settings: model.generalSettings)
+                    mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                 }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Account") {
+                Button(L("New Account")) {
                     model.beginAccountWizard()
                 }
                 .keyboardShortcut("n")
@@ -33,46 +55,55 @@ private struct TorroMailRootView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: sidebarSelection) {
-                Section(model.sidebarGroups[0].label) {
+                Section(L("Accounts")) {
                     ForEach(model.accounts) { account in
                         AccountSidebarRow(account: account)
-                        .tag(TorroMailSidebarSelection.account(account.id))
+                            .tag(TorroMailSidebarSelection.account(account.id))
+                            .badge(account.pendingActions.count)
                     }
                 }
 
-                Section(model.sidebarGroups[1].label) {
-                    ForEach(model.sidebarGroups[1].items) { item in
-                        SidebarRow(item.selection, item.label, item.symbol)
-                    }
+                Section {
+                    Label(L("Settings"), systemImage: "gearshape")
+                        .tag(TorroMailSidebarSelection.settings)
+                    Label(L("Log"), systemImage: "list.bullet.rectangle")
+                        .tag(TorroMailSidebarSelection.log)
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 430)
+            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
             .navigationTitle("TorroMail")
             .toolbar {
                 Button {
                     model.beginAccountWizard()
                 } label: {
-                    Label("Add Account", systemImage: "plus")
+                    Label(L("Add Account"), systemImage: "plus")
                 }
             }
         } detail: {
-            switch model.selectedSidebarItem {
-            case .account:
-                AccountDetailView(account: model.bindingForSelectedAccount())
-            case .aiClients:
-                AIClientsView()
-            case .generalSettings:
-                GeneralSettingsView()
-            case .auditLog:
-                AuditLogView()
-            case .diagnostics:
-                DiagnosticsView()
-            }
+            detailView
         }
         .sheet(isPresented: $model.showAccountWizard) {
             AccountWizardView()
                 .environmentObject(model)
+        }
+    }
+
+    @ViewBuilder
+    private var detailView: some View {
+        switch model.selectedSidebarItem {
+        case let .account(accountID):
+            if let index = model.accounts.firstIndex(where: { $0.id == accountID }) {
+                AccountDetailView(account: $model.accounts[index])
+                    .id(accountID)
+            } else {
+                Text(L("No account selected"))
+                    .foregroundStyle(.secondary)
+            }
+        case .settings:
+            SettingsView()
+        case .log:
+            LogView()
         }
     }
 
@@ -82,9 +113,6 @@ private struct TorroMailRootView: View {
             set: { selection in
                 guard let selection else { return }
                 model.selectedSidebarItem = selection
-                if case .account = selection {
-                    model.selectedAccountSection = .overview
-                }
             }
         )
     }
@@ -94,19 +122,9 @@ private struct AccountSidebarRow: View {
     var account: MailAccount
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(.quaternary)
-                Image(systemName: "envelope")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(width: 30, height: 30)
-
-            VStack(alignment: .leading, spacing: 3) {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(account.name)
-                    .font(.body)
                     .fontWeight(.medium)
                     .lineLimit(1)
                 Text(account.email)
@@ -114,286 +132,174 @@ private struct AccountSidebarRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("\(account.provider.rawValue) · \(account.imapStatus)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
             }
 
             Spacer(minLength: 8)
+
+            // Quiet when healthy: the dot only appears when the connection
+            // needs the user's attention.
+            if account.connectionState.needsAttention {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: 8, height: 8)
+            }
         }
-        .padding(.vertical, 6)
-    }
-}
-
-private struct SidebarRow: View {
-    var selection: TorroMailSidebarSelection
-    var title: String
-    var symbol: String
-
-    init(_ selection: TorroMailSidebarSelection, _ title: String, _ symbol: String) {
-        self.selection = selection
-        self.title = title
-        self.symbol = symbol
-    }
-
-    var body: some View {
-        Label(title, systemImage: symbol)
-            .padding(.vertical, 2)
-            .tag(selection)
+        .padding(.vertical, 4)
     }
 }
 
 private struct AccountDetailView: View {
     @EnvironmentObject private var model: TorroMailModel
     @Binding var account: MailAccount
+    // Transient until Keychain storage lands; never persisted.
+    @State private var password = ""
+    @State private var confirmRemoval = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            AccountHeaderView(account: account)
-                .padding([.horizontal, .top], 24)
-                .padding(.bottom, 16)
-
-            Picker("Section", selection: $model.selectedAccountSection) {
-                ForEach(TorroMailAccountSection.allCases) { section in
-                    Text(section.label).tag(section)
-                }
+        Form {
+            connectionSection
+            permissionsSection
+            foldersSection
+            cacheSection
+            if !account.pendingActions.isEmpty {
+                pendingSection
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 24)
-            .padding(.bottom, 12)
-
-            Divider()
-
-            ScrollView {
-                Group {
-                    switch model.selectedAccountSection {
-                    case .overview:
-                        AccountOverviewView(account: account)
-                    case .connection:
-                        AccountConnectionView(account: $account)
-                    case .permissions:
-                        AccountPermissionsView(permissions: $account.permissions)
-                    case .searchCache:
-                        AccountSearchCacheView(searchCache: $account.searchCache)
-                    case .mailboxes:
-                        AccountMailboxesView(account: $account)
-                    case .pendingActions:
-                        AccountPendingActionsView(account: account)
-                    case .advanced:
-                        AccountAdvancedView(account: $account)
-                    }
+            Section {
+                Button(L("Remove Account…"), role: .destructive) {
+                    confirmRemoval = true
                 }
-                .padding(24)
             }
         }
+        .formStyle(.grouped)
         .navigationTitle(account.name)
+        .navigationSubtitle(account.email)
+        .confirmationDialog(
+            String(format: L("Remove “%@”?"), account.name),
+            isPresented: $confirmRemoval,
+            titleVisibility: .visible
+        ) {
+            Button(L("Remove Account"), role: .destructive) {
+                model.removeAccount(id: account.id)
+            }
+        } message: {
+            Text(L("This only removes the configuration from TorroMail. Your mail stays on the server."))
+        }
     }
-}
 
-private struct AccountHeaderView: View {
-    var account: MailAccount
-
-    var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(account.name)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text(account.email)
-                    .foregroundStyle(.secondary)
-                Text("\(account.provider.rawValue) · \(account.loginMethod.rawValue) · \(account.imapStatus)")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+    private var connectionSection: some View {
+        Section(L("Connection")) {
+            Picker(L("Provider"), selection: $account.provider) {
+                ForEach(Provider.allCases) { provider in
+                    Text(provider.rawValue).tag(provider)
+                }
+            }
+            Picker(L("Login"), selection: $account.loginMethod) {
+                ForEach(LoginMethod.allCases) { method in
+                    Text(label(for: method)).tag(method)
+                }
             }
 
-            Spacer()
+            if account.loginMethod == .password {
+                TextField(L("IMAP Server"), text: $account.imapHost, prompt: Text(verbatim: "imap.example.com"))
+                TextField(L("SMTP Server"), text: $account.smtpHost, prompt: Text(verbatim: "smtp.example.com"))
+                TextField(L("Username"), text: $account.username)
+                SecureField(L("Password"), text: $password)
+            }
 
             HStack {
-                Button {
-                } label: {
-                    Label("Test", systemImage: "checkmark.circle")
+                ConnectionStatusBadge(state: account.connectionState)
+                Spacer()
+                if account.loginMethod == .oauth {
+                    Button(L("Sign In…")) {}
                 }
-                Button {
-                } label: {
-                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                }
+                Button(L("Test Connection")) {}
             }
         }
     }
-}
 
-private struct AccountOverviewView: View {
-    var account: MailAccount
-
-    var body: some View {
-        Form {
-            Section("Status") {
-                LabeledContent("Connection", value: account.imapStatus)
-                LabeledContent("Authentication", value: account.oauthStatus)
-                LabeledContent("Mailboxes", value: account.selectedMailboxes.sorted().joined(separator: ", "))
-            }
-
-            Section("Access") {
-                LabeledContent("Permissions", value: account.permissions.summary)
-                LabeledContent("Search", value: account.searchCache.summary)
-                LabeledContent("Pending Actions", value: account.pendingActions.count.formatted())
-            }
-
-            Section("Next Actions") {
-                HStack {
-                    Button {
-                    } label: {
-                        Label("Review Permissions", systemImage: "switch.2")
-                    }
-                    Button {
-                    } label: {
-                        Label("Open Cache", systemImage: "magnifyingglass")
-                    }
-                }
-            }
+    private var permissionsSection: some View {
+        Section {
+            Toggle(L("Read headers"), isOn: $account.permissions.readHeaders)
+            Toggle(L("Read body"), isOn: $account.permissions.readBody)
+            Toggle(L("Attachments"), isOn: $account.permissions.attachments)
+            Toggle(L("Drafts"), isOn: $account.permissions.drafts)
+            Toggle(L("Send"), isOn: $account.permissions.send)
+            Toggle(L("Mark"), isOn: $account.permissions.mark)
+            Toggle(L("Move"), isOn: $account.permissions.move)
+            Toggle(L("Delete"), isOn: $account.permissions.delete)
+            Toggle(L("Permanent delete"), isOn: $account.permissions.permanentDelete)
+        } header: {
+            Text(L("Permissions"))
+        } footer: {
+            Text(L("What connected assistants may do with this account. Send, move, and delete always require your confirmation."))
         }
-        .formStyle(.grouped)
     }
-}
 
-private struct AccountConnectionView: View {
-    @Binding var account: MailAccount
-
-    var body: some View {
-        Form {
-            Section("Provider") {
-                Picker("Provider", selection: $account.provider) {
-                    ForEach(Provider.allCases) { provider in
-                        Text(provider.rawValue).tag(provider)
-                    }
-                }
-                Picker("Login", selection: $account.loginMethod) {
-                    ForEach(LoginMethod.allCases) { method in
-                        Text(method.rawValue).tag(method)
-                    }
-                }
+    private var foldersSection: some View {
+        Section {
+            ForEach(["INBOX", "Archive", "Sent", "Trash"], id: \.self) { name in
+                mailboxToggle(name)
             }
-
-            Section("Connection") {
-                LabeledContent("IMAP", value: account.imapStatus)
-                LabeledContent("SMTP", value: account.smtpStatus)
-                LabeledContent("OAuth", value: account.oauthStatus)
-                HStack {
-                    Button {
-                    } label: {
-                        Label("Autodiscover", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-                    Button {
-                    } label: {
-                        Label("OAuth", systemImage: "safari")
-                    }
-                    Button {
-                    } label: {
-                        Label("Test", systemImage: "checkmark.circle")
-                    }
-                }
-            }
+        } header: {
+            Text(L("Folders"))
+        } footer: {
+            Text(L("Folders the assistant may access."))
         }
-        .formStyle(.grouped)
     }
-}
 
-private struct AccountPermissionsView: View {
-    @Binding var permissions: PermissionSet
-
-    var body: some View {
-        Form {
-            Section("Read") {
-                Toggle("Read headers", isOn: $permissions.readHeaders)
-                Toggle("Read body", isOn: $permissions.readBody)
-                Toggle("Attachments", isOn: $permissions.attachments)
-            }
-
-            Section("Write") {
-                Toggle("Drafts", isOn: $permissions.drafts)
-                Toggle("Send", isOn: $permissions.send)
-                Toggle("Mark", isOn: $permissions.mark)
-                Toggle("Move", isOn: $permissions.move)
-            }
-
-            Section("Delete") {
-                Toggle("Delete", isOn: $permissions.delete)
-                Toggle("Permanent delete", isOn: $permissions.permanentDelete)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-private struct AccountSearchCacheView: View {
-    @Binding var searchCache: SearchCacheSettings
-
-    var body: some View {
-        Form {
-            Section("Policy") {
-                Toggle("Local cache", isOn: $searchCache.localCacheEnabled)
-                Picker("Cache policy", selection: $searchCache.cacheMode) {
+    private var cacheSection: some View {
+        Section {
+            Toggle(L("Local cache"), isOn: $account.searchCache.localCacheEnabled)
+            if account.searchCache.localCacheEnabled {
+                Picker(L("Cache level"), selection: $account.searchCache.cacheMode) {
                     ForEach(CacheMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+                        Text(label(for: mode)).tag(mode)
                     }
                 }
-                Toggle("Full text index", isOn: $searchCache.indexBodies)
-                Toggle("Attachment index", isOn: $searchCache.indexAttachments)
+                Toggle(L("Full text index"), isOn: $account.searchCache.indexBodies)
+                Toggle(L("Attachment index"), isOn: $account.searchCache.indexAttachments)
+                LabeledContent(L("Storage")) {
+                    Text(account.searchCache.storage)
+                    Button(L("Delete")) {}
+                }
             }
+        } header: {
+            Text(L("Search & Cache"))
+        } footer: {
+            Text(L("More caching makes search faster but stores mail content on this Mac."))
+        }
+    }
 
-            Section("Status") {
-                LabeledContent("Storage", value: searchCache.storage)
-                LabeledContent("Last Sync", value: searchCache.lastSync)
+    private var pendingSection: some View {
+        Section {
+            ForEach(account.pendingActions) { action in
                 HStack {
-                    Button {
-                    } label: {
-                        Label("Rebuild", systemImage: "arrow.clockwise")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(action.subject)
+                            .fontWeight(.medium)
+                        Text(verbatim: "\(action.toolCall) → \(action.recipient)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    Button(role: .destructive) {
-                    } label: {
-                        Label("Delete Index", systemImage: "trash")
-                    }
+                    Spacer()
+                    Text(action.expiresIn)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button(L("Reject"), role: .destructive) {}
+                    Button(L("Approve")) {}
+                        .buttonStyle(.borderedProminent)
                 }
+                .padding(.vertical, 2)
             }
+        } header: {
+            Text(L("Pending Actions"))
+        } footer: {
+            Text(L("Actions an assistant prepared and is waiting for you to approve."))
         }
-        .formStyle(.grouped)
-    }
-}
-
-private struct AccountMailboxesView: View {
-    @Binding var account: MailAccount
-
-    var body: some View {
-        Form {
-            Section("Included") {
-                MailboxToggle("INBOX", account: $account)
-                MailboxToggle("Archive", account: $account)
-                MailboxToggle("Sent", account: $account)
-                MailboxToggle("Trash", account: $account)
-            }
-
-            Section("Mapping") {
-                LabeledContent("Archive", value: "Archive")
-                LabeledContent("Sent", value: "Sent")
-                LabeledContent("Trash", value: "Trash")
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-private struct MailboxToggle: View {
-    var name: String
-    @Binding var account: MailAccount
-
-    init(_ name: String, account: Binding<MailAccount>) {
-        self.name = name
-        self._account = account
     }
 
-    var body: some View {
+    private func mailboxToggle(_ name: String) -> some View {
         Toggle(
             name,
             isOn: Binding(
@@ -410,187 +316,135 @@ private struct MailboxToggle: View {
     }
 }
 
-private struct AccountPendingActionsView: View {
-    var account: MailAccount
+private struct ConnectionStatusBadge: View {
+    var state: ConnectionState
 
     var body: some View {
-        if account.pendingActions.isEmpty {
-            ContentUnavailableView("No Pending Actions", systemImage: "checkmark.circle")
-        } else {
-            Table(account.pendingActions) {
-                TableColumn("Tool", value: \.toolCall)
-                TableColumn("Subject", value: \.subject)
-                TableColumn("Recipient", value: \.recipient)
-                TableColumn("Messages") { action in
-                    Text(action.affectedMessages.formatted())
-                }
-                TableColumn("Expires", value: \.expiresIn)
-            }
-            .frame(minHeight: 280)
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(text)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .connected: .green
+        case .needsTest: .orange
+        case .notConfigured: .gray
+        case .failed: .red
+        }
+    }
+
+    private var text: String {
+        switch state {
+        case .connected: L("Connected")
+        case .needsTest: L("Needs test")
+        case .notConfigured: L("Not configured")
+        case let .failed(message): message
         }
     }
 }
 
-private struct AccountAdvancedView: View {
-    @Binding var account: MailAccount
-
-    var body: some View {
-        Form {
-            Section("Provider") {
-                LabeledContent("Account ID", value: account.id)
-                LabeledContent("Provider", value: account.provider.rawValue)
-                LabeledContent("Secret Store", value: "Keychain")
-            }
-
-            Section("Support") {
-                TextEditor(text: $account.notes)
-                    .frame(minHeight: 120)
-                HStack {
-                    Button {
-                    } label: {
-                        Label("Export", systemImage: "square.and.arrow.up")
-                    }
-                    Button {
-                    } label: {
-                        Label("Reset Adapter", systemImage: "arrow.counterclockwise")
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-private struct AIClientsView: View {
-    @EnvironmentObject private var model: TorroMailModel
-
-    var body: some View {
-        Form {
-            Section("Clients") {
-                ForEach(model.aiClients) { client in
-                    LabeledContent {
-                        Text(client.status)
-                    } label: {
-                        VStack(alignment: .leading) {
-                            Text(client.name)
-                            Text(client.approvalProfile)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-
-            Section("Setup") {
-                HStack {
-                    Button {
-                    } label: {
-                        Label("Install", systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                    } label: {
-                        Label("Copy Snippet", systemImage: "doc.on.doc")
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .padding(24)
-        .navigationTitle("AI Clients")
-    }
-}
-
-private struct GeneralSettingsView: View {
+private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
         Form {
-            Section("MCP Server") {
-                Toggle("Start with TorroMail", isOn: $model.generalSettings.startMcpServerWithApp)
-                    .onChange(of: model.generalSettings.startMcpServerWithApp) { _, enabled in
-                        if enabled {
-                            mcpSupervisor.startIfNeeded(settings: model.generalSettings)
-                        } else {
+            Section {
+                Toggle(L("Start at login"), isOn: $model.generalSettings.launchAtLogin)
+            } footer: {
+                Text(L("TorroMail and its MCP server start automatically in the background."))
+            }
+
+            Section(L("MCP Server")) {
+                HStack {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 10, height: 10)
+                    Text(statusText)
+                    Spacer()
+                    if mcpSupervisor.status.isRunning {
+                        Button(L("Stop")) {
                             mcpSupervisor.stop()
                         }
+                    } else {
+                        Button(L("Start")) {
+                            mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
+                        }
                     }
-                LabeledContent("Lifecycle", value: model.generalSettings.mcpLifecycleSummary)
-                LabeledContent("Status", value: mcpSupervisor.status.label)
-                LabeledContent("Detail", value: mcpSupervisor.status.detail)
-                LabeledContent("Transport", value: model.generalSettings.transport)
-                LabeledContent("Executable", value: model.generalSettings.executable)
-                HStack {
-                    Button {
-                        mcpSupervisor.startIfNeeded(settings: model.generalSettings)
-                    } label: {
-                        Label("Start", systemImage: "play")
-                    }
-                    Button {
-                        mcpSupervisor.stop()
-                    } label: {
-                        Label("Stop", systemImage: "stop")
-                    }
+                }
+                if let errorDetail {
+                    Text(errorDetail)
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
 
-            Section("App") {
-                LabeledContent("Configuration", value: "Managed by GUI")
-                LabeledContent("Secrets", value: "Keychain")
+            Section {
+                Button(L("Add to Claude Desktop")) {}
+                Button(L("Copy Config Snippet")) {}
+            } header: {
+                Text(L("AI Clients"))
+            } footer: {
+                Text(L("Connect an assistant so it can use your mail through TorroMail."))
             }
         }
         .formStyle(.grouped)
-        .padding(24)
-        .navigationTitle("General Settings")
+        .navigationTitle(L("Settings"))
+    }
+
+    private var statusColor: Color {
+        switch mcpSupervisor.status {
+        case .running: .green
+        case .starting: .orange
+        case .stopped: .gray
+        case .notFound, .failed: .red
+        }
+    }
+
+    private var statusText: String {
+        switch mcpSupervisor.status {
+        case .running: L("Running")
+        case .starting: L("Starting")
+        case .stopped: L("Stopped")
+        case .notFound, .failed: L("Error")
+        }
+    }
+
+    private var errorDetail: String? {
+        switch mcpSupervisor.status {
+        case let .notFound(name):
+            String(format: L("MCP executable “%@” not found."), name)
+        case let .failed(message):
+            message
+        default:
+            nil
+        }
     }
 }
 
-private struct AuditLogView: View {
+private struct LogView: View {
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         Table(model.audit) {
-            TableColumn("Time", value: \.time)
-            TableColumn("Client", value: \.client)
-            TableColumn("Account", value: \.account)
-            TableColumn("Event", value: \.event)
-            TableColumn("Result", value: \.result)
+            TableColumn(L("Time"), value: \.time)
+            TableColumn(L("Client"), value: \.client)
+            TableColumn(L("Account"), value: \.account)
+            TableColumn(L("Event"), value: \.event)
+            TableColumn(L("Result"), value: \.result)
         }
-        .navigationTitle("Audit Log")
-    }
-}
-
-private struct DiagnosticsView: View {
-    var body: some View {
-        Form {
-            Section("Core") {
-                LabeledContent("Rust Core", value: "Ready")
-                LabeledContent("Mail Backend", value: "Adapter Pending")
-                LabeledContent("MCP Supervision", value: "App-managed")
-            }
-
-            Section("Queues") {
-                LabeledContent("IMAP", value: "Idle")
-                LabeledContent("SMTP", value: "Idle")
-                LabeledContent("Indexer", value: "Paused")
-            }
-
-            Section("Support") {
-                HStack {
-                    Button {
-                    } label: {
-                        Label("Export Diagnostics", systemImage: "square.and.arrow.up")
-                    }
-                    Button {
-                    } label: {
-                        Label("Open Logs", systemImage: "doc.text.magnifyingglass")
-                    }
-                }
+        .navigationTitle(L("Log"))
+        .toolbar {
+            Button {
+            } label: {
+                Label(L("Export…"), systemImage: "square.and.arrow.up")
             }
         }
-        .formStyle(.grouped)
-        .padding(24)
-        .navigationTitle("Diagnostics")
     }
 }
 
@@ -599,40 +453,23 @@ private struct AccountWizardView: View {
     @EnvironmentObject private var model: TorroMailModel
     @State private var name = ""
     @State private var email = ""
-    @State private var provider = Provider.gmail
-    @State private var loginMethod = LoginMethod.oauth
+    @State private var provider = Provider.imapSmtp
+    @State private var loginMethod = LoginMethod.password
 
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("Account") {
-                    TextField("Display Name", text: $name)
-                    TextField("Email", text: $email)
-                    Picker("Provider", selection: $provider) {
+                Section(L("New Account")) {
+                    TextField(L("Display Name"), text: $name)
+                    TextField(L("Email"), text: $email)
+                    Picker(L("Provider"), selection: $provider) {
                         ForEach(Provider.allCases) { provider in
                             Text(provider.rawValue).tag(provider)
                         }
                     }
-                    Picker("Login", selection: $loginMethod) {
+                    Picker(L("Login"), selection: $loginMethod) {
                         ForEach(LoginMethod.allCases) { method in
-                            Text(method.rawValue).tag(method)
-                        }
-                    }
-                }
-
-                Section("Setup") {
-                    HStack {
-                        Button {
-                        } label: {
-                            Label("Autodiscover", systemImage: "antenna.radiowaves.left.and.right")
-                        }
-                        Button {
-                        } label: {
-                            Label("OAuth", systemImage: "safari")
-                        }
-                        Button {
-                        } label: {
-                            Label("Test", systemImage: "checkmark.circle")
+                            Text(label(for: method)).tag(method)
                         }
                     }
                 }
@@ -641,10 +478,10 @@ private struct AccountWizardView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) {
+                Button(L("Cancel"), role: .cancel) {
                     dismiss()
                 }
-                Button("Add") {
+                Button(L("Add")) {
                     model.addAccount(
                         name: name,
                         email: email,
@@ -658,6 +495,6 @@ private struct AccountWizardView: View {
             }
             .padding()
         }
-        .frame(width: 560, height: 420)
+        .frame(width: 480, height: 340)
     }
 }

@@ -3,65 +3,8 @@ import SwiftUI
 
 public enum TorroMailSidebarSelection: Hashable {
     case account(String)
-    case aiClients
-    case generalSettings
-    case auditLog
-    case diagnostics
-}
-
-public struct TorroMailSidebarItem: Identifiable, Hashable {
-    public var id: String
-    public var label: String
-    public var symbol: String
-    public var selection: TorroMailSidebarSelection
-
-    public init(
-        id: String,
-        label: String,
-        symbol: String,
-        selection: TorroMailSidebarSelection
-    ) {
-        self.id = id
-        self.label = label
-        self.symbol = symbol
-        self.selection = selection
-    }
-}
-
-public struct TorroMailSidebarGroup: Identifiable, Hashable {
-    public var id: String
-    public var label: String
-    public var items: [TorroMailSidebarItem]
-
-    public init(id: String, label: String, items: [TorroMailSidebarItem]) {
-        self.id = id
-        self.label = label
-        self.items = items
-    }
-}
-
-public enum TorroMailAccountSection: String, CaseIterable, Identifiable {
-    case overview
-    case connection
-    case permissions
-    case searchCache
-    case mailboxes
-    case pendingActions
-    case advanced
-
-    public var id: Self { self }
-
-    public var label: String {
-        switch self {
-        case .overview: "Overview"
-        case .connection: "Connection"
-        case .permissions: "Permissions"
-        case .searchCache: "Search & Cache"
-        case .mailboxes: "Mailboxes"
-        case .pendingActions: "Pending Actions"
-        case .advanced: "Advanced"
-        }
-    }
+    case settings
+    case log
 }
 
 public enum Provider: String, CaseIterable, Identifiable, Hashable {
@@ -73,20 +16,33 @@ public enum Provider: String, CaseIterable, Identifiable, Hashable {
     public var id: Self { self }
 }
 
-public enum LoginMethod: String, CaseIterable, Identifiable, Hashable {
-    case password = "Password"
-    case oauth = "OAuth"
+public enum LoginMethod: CaseIterable, Identifiable, Hashable {
+    case password
+    case oauth
 
     public var id: Self { self }
 }
 
-public enum CacheMode: String, CaseIterable, Identifiable, Hashable {
-    case metadata = "Metadata"
-    case headers = "Headers"
-    case body = "Body Cache"
-    case fullText = "Full Text"
+public enum CacheMode: CaseIterable, Identifiable, Hashable {
+    case metadata
+    case headers
+    case body
+    case fullText
 
     public var id: Self { self }
+}
+
+/// Connection health of one account. The UI stays quiet while everything is
+/// fine and only surfaces states that need the user's attention.
+public enum ConnectionState: Hashable {
+    case notConfigured
+    case needsTest
+    case connected
+    case failed(String)
+
+    public var needsAttention: Bool {
+        self != .connected
+    }
 }
 
 public struct PermissionSet: Hashable {
@@ -121,21 +77,6 @@ public struct PermissionSet: Hashable {
         self.delete = delete
         self.permanentDelete = permanentDelete
     }
-
-    public var summary: String {
-        let enabled = [
-            readBody ? "Read body" : nil,
-            attachments ? "Attachments" : nil,
-            drafts ? "Drafts" : nil,
-            send ? "Send" : nil,
-            mark ? "Mark" : nil,
-            move ? "Move" : nil,
-            delete ? "Delete" : nil,
-            permanentDelete ? "Permanent delete" : nil
-        ].compactMap { $0 }
-
-        return enabled.isEmpty ? "Headers only" : enabled.joined(separator: ", ")
-    }
 }
 
 public struct SearchCacheSettings: Hashable {
@@ -144,32 +85,19 @@ public struct SearchCacheSettings: Hashable {
     public var indexBodies: Bool
     public var indexAttachments: Bool
     public var storage: String
-    public var lastSync: String
 
     public init(
         localCacheEnabled: Bool = true,
         cacheMode: CacheMode = .metadata,
         indexBodies: Bool = false,
         indexAttachments: Bool = false,
-        storage: String = "0 MB",
-        lastSync: String = "Never"
+        storage: String = "0 MB"
     ) {
         self.localCacheEnabled = localCacheEnabled
         self.cacheMode = cacheMode
         self.indexBodies = indexBodies
         self.indexAttachments = indexAttachments
         self.storage = storage
-        self.lastSync = lastSync
-    }
-
-    public var summary: String {
-        let cache = switch cacheMode {
-        case .metadata: "Metadata cached"
-        case .headers: "Headers cached"
-        case .body: "Bodies cached"
-        case .fullText: "Full-text cache"
-        }
-        return "\(cache), body index \(indexBodies ? "on" : "off")"
     }
 }
 
@@ -207,14 +135,14 @@ public struct MailAccount: Identifiable, Hashable {
     public var email: String
     public var provider: Provider
     public var loginMethod: LoginMethod
-    public var imapStatus: String
-    public var smtpStatus: String
-    public var oauthStatus: String
+    public var imapHost: String
+    public var smtpHost: String
+    public var username: String
+    public var connectionState: ConnectionState
     public var selectedMailboxes: Set<String>
     public var permissions: PermissionSet
     public var searchCache: SearchCacheSettings
     public var pendingActions: [PendingAction]
-    public var notes: String
 
     public init(
         id: String,
@@ -222,62 +150,47 @@ public struct MailAccount: Identifiable, Hashable {
         email: String,
         provider: Provider,
         loginMethod: LoginMethod,
-        imapStatus: String,
-        smtpStatus: String,
-        oauthStatus: String,
-        selectedMailboxes: Set<String>,
-        permissions: PermissionSet,
-        searchCache: SearchCacheSettings,
-        pendingActions: [PendingAction] = [],
-        notes: String = ""
+        imapHost: String = "",
+        smtpHost: String = "",
+        username: String = "",
+        connectionState: ConnectionState = .notConfigured,
+        selectedMailboxes: Set<String> = ["INBOX"],
+        permissions: PermissionSet = PermissionSet(),
+        searchCache: SearchCacheSettings = SearchCacheSettings(),
+        pendingActions: [PendingAction] = []
     ) {
         self.id = id
         self.name = name
         self.email = email
         self.provider = provider
         self.loginMethod = loginMethod
-        self.imapStatus = imapStatus
-        self.smtpStatus = smtpStatus
-        self.oauthStatus = oauthStatus
+        self.imapHost = imapHost
+        self.smtpHost = smtpHost
+        self.username = username
+        self.connectionState = connectionState
         self.selectedMailboxes = selectedMailboxes
         self.permissions = permissions
         self.searchCache = searchCache
         self.pendingActions = pendingActions
-        self.notes = notes
     }
-}
 
-public struct AIClient: Identifiable, Hashable {
-    public var id: String
-    public var name: String
-    public var status: String
-    public var approvalProfile: String
-
-    public init(id: String, name: String, status: String, approvalProfile: String) {
-        self.id = id
-        self.name = name
-        self.status = status
-        self.approvalProfile = approvalProfile
+    public var needsAttention: Bool {
+        connectionState.needsAttention || !pendingActions.isEmpty
     }
 }
 
 public struct GeneralSettings: Hashable {
-    public var startMcpServerWithApp: Bool
-    public var transport: String
-    public var executable: String
+    /// The one lifecycle decision the user makes: TorroMail (and with it the
+    /// MCP server) starts automatically at login. Everything else is derived.
+    public var launchAtLogin: Bool
 
-    public init(
-        startMcpServerWithApp: Bool = true,
-        transport: String = "stdio",
-        executable: String = "torromail-mcp"
-    ) {
-        self.startMcpServerWithApp = startMcpServerWithApp
-        self.transport = transport
-        self.executable = executable
-    }
+    /// Internal: which executable the supervisor launches. Never shown in the
+    /// UI — diagnostics belong in the log.
+    public var mcpExecutable: String
 
-    public var mcpLifecycleSummary: String {
-        startMcpServerWithApp ? "Starts with TorroMail" : "Manual start"
+    public init(launchAtLogin: Bool = true, mcpExecutable: String = "torromail-mcp") {
+        self.launchAtLogin = launchAtLogin
+        self.mcpExecutable = mcpExecutable
     }
 }
 
@@ -288,24 +201,9 @@ public enum MCPServerStatus: Hashable {
     case notFound(String)
     case failed(String)
 
-    public var label: String {
-        switch self {
-        case .stopped: "Stopped"
-        case .starting: "Starting"
-        case .running: "Running"
-        case .notFound: "Executable not found"
-        case .failed: "Failed"
-        }
-    }
-
-    public var detail: String {
-        switch self {
-        case .stopped: "TorroMail is not supervising an MCP process."
-        case .starting: "TorroMail is starting the local MCP process."
-        case let .running(path): path
-        case let .notFound(name): name
-        case let .failed(message): message
-        }
+    public var isRunning: Bool {
+        if case .running = self { return true }
+        return false
     }
 }
 
@@ -373,24 +271,19 @@ public final class MCPServerSupervisor: ObservableObject {
         self.status = status
     }
 
-    public func startIfNeeded(settings: GeneralSettings) {
-        guard settings.startMcpServerWithApp else {
-            stop()
-            return
-        }
-
+    public func start(executableName: String) {
         if process?.isRunning == true {
             return
         }
 
         status = .starting
         let locator = MCPExecutableLocator(
-            executableName: settings.executable,
+            executableName: executableName,
             workspaceRoot: FileManager.default.currentDirectoryPath
         )
 
         guard let command = locator.resolve() else {
-            status = .notFound(settings.executable)
+            status = .notFound(executableName)
             return
         }
 
@@ -455,74 +348,22 @@ public struct AuditEntry: Identifiable, Hashable {
 public final class TorroMailModel: ObservableObject {
     @Published public var accounts: [MailAccount]
     @Published public var selectedSidebarItem: TorroMailSidebarSelection
-    @Published public var selectedAccountSection: TorroMailAccountSection
     @Published public var showAccountWizard: Bool
-    @Published public var aiClients: [AIClient]
     @Published public var generalSettings: GeneralSettings
     @Published public var audit: [AuditEntry]
 
     public init(
         accounts: [MailAccount],
         selectedSidebarItem: TorroMailSidebarSelection,
-        selectedAccountSection: TorroMailAccountSection = .overview,
         showAccountWizard: Bool = false,
-        aiClients: [AIClient],
         generalSettings: GeneralSettings,
         audit: [AuditEntry]
     ) {
         self.accounts = accounts
         self.selectedSidebarItem = selectedSidebarItem
-        self.selectedAccountSection = selectedAccountSection
         self.showAccountWizard = showAccountWizard
-        self.aiClients = aiClients
         self.generalSettings = generalSettings
         self.audit = audit
-    }
-
-    public var sidebarItems: [TorroMailSidebarItem] {
-        sidebarGroups.flatMap(\.items)
-    }
-
-    public var sidebarGroups: [TorroMailSidebarGroup] {
-        let accountItems = accounts.map { account in
-            TorroMailSidebarItem(
-                id: "account-\(account.id)",
-                label: account.name,
-                symbol: "envelope",
-                selection: .account(account.id)
-            )
-        }
-        let generalItems = [
-            TorroMailSidebarItem(id: "ai-clients", label: "AI Clients", symbol: "person.2.badge.gearshape", selection: .aiClients),
-            TorroMailSidebarItem(id: "general-settings", label: "General Settings", symbol: "gearshape", selection: .generalSettings),
-            TorroMailSidebarItem(id: "audit-log", label: "Audit Log", symbol: "list.bullet.rectangle", selection: .auditLog),
-            TorroMailSidebarItem(id: "diagnostics", label: "Diagnostics", symbol: "waveform.path.ecg", selection: .diagnostics)
-        ]
-
-        return [
-            TorroMailSidebarGroup(id: "accounts", label: "Accounts", items: accountItems),
-            TorroMailSidebarGroup(id: "general", label: "General", items: generalItems)
-        ]
-    }
-
-    public var selectedAccount: MailAccount {
-        guard case let .account(accountID) = selectedSidebarItem,
-              let account = accounts.first(where: { $0.id == accountID })
-        else {
-            return accounts[0]
-        }
-        return account
-    }
-
-    public func bindingForSelectedAccount() -> Binding<MailAccount> {
-        Binding(
-            get: { self.selectedAccount },
-            set: { updated in
-                if let index = self.accounts.firstIndex(where: { $0.id == updated.id }) {
-                    self.accounts[index] = updated
-                }
-            }
-        )
     }
 
     public func beginAccountWizard() {
@@ -536,17 +377,22 @@ public final class TorroMailModel: ObservableObject {
             email: email,
             provider: provider,
             loginMethod: loginMethod,
-            imapStatus: "Needs Test",
-            smtpStatus: "Needs Test",
-            oauthStatus: loginMethod == .oauth ? "Pending" : "Off",
-            selectedMailboxes: ["INBOX"],
-            permissions: PermissionSet(),
-            searchCache: SearchCacheSettings(),
-            pendingActions: []
+            username: email,
+            connectionState: .notConfigured
         )
         accounts.append(account)
         selectedSidebarItem = .account(account.id)
-        selectedAccountSection = .overview
+    }
+
+    public func removeAccount(id: String) {
+        accounts.removeAll { $0.id == id }
+        if case let .account(selectedID) = selectedSidebarItem, selectedID == id {
+            if let first = accounts.first {
+                selectedSidebarItem = .account(first.id)
+            } else {
+                selectedSidebarItem = .settings
+            }
+        }
     }
 }
 
@@ -560,9 +406,10 @@ extension TorroMailModel {
                     email: "work@example.com",
                     provider: .microsoft,
                     loginMethod: .oauth,
-                    imapStatus: "Connected",
-                    smtpStatus: "Connected",
-                    oauthStatus: "Keychain",
+                    imapHost: "outlook.office365.com",
+                    smtpHost: "smtp.office365.com",
+                    username: "work@example.com",
+                    connectionState: .connected,
                     selectedMailboxes: ["INBOX", "Archive", "Sent"],
                     permissions: PermissionSet(
                         readBody: true,
@@ -572,8 +419,7 @@ extension TorroMailModel {
                     ),
                     searchCache: SearchCacheSettings(
                         cacheMode: .headers,
-                        storage: "42 MB",
-                        lastSync: "Today 10:41"
+                        storage: "42 MB"
                     ),
                     pendingActions: [
                         PendingAction(
@@ -593,29 +439,11 @@ extension TorroMailModel {
                     email: "me@example.net",
                     provider: .imapSmtp,
                     loginMethod: .password,
-                    imapStatus: "Needs Test",
-                    smtpStatus: "Not Configured",
-                    oauthStatus: "Off",
-                    selectedMailboxes: ["INBOX"],
-                    permissions: PermissionSet(),
-                    searchCache: SearchCacheSettings()
+                    username: "me@example.net",
+                    connectionState: .needsTest
                 )
             ],
             selectedSidebarItem: .account("work"),
-            aiClients: [
-                AIClient(
-                    id: "claude",
-                    name: "Claude Desktop",
-                    status: "Configured",
-                    approvalProfile: "Confirm risky actions"
-                ),
-                AIClient(
-                    id: "codex",
-                    name: "Codex",
-                    status: "Available",
-                    approvalProfile: "Read-only until approved"
-                )
-            ],
             generalSettings: GeneralSettings(),
             audit: [
                 AuditEntry(
