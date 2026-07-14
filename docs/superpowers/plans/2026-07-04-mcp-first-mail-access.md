@@ -2,24 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn DonnyMail into an MCP-first local mail access layer that can retrieve configured mail safely without becoming a human-facing mail client.
+**Goal:** Turn TorroMail into an MCP-first local mail access layer that can retrieve configured mail safely without becoming a human-facing mail client.
 
 **Architecture:** Keep Rust as the source of truth for mail domain state, policy checks, search sessions, pending actions, and MCP tool execution. Add provider adapters behind explicit traits so fixture-backed tests and real IMAP retrieval use the same service boundary. Keep the SwiftUI app as a minimal setup/control surface for accounts, permissions, MCP lifecycle, pending approvals, audit, and diagnostics only.
 
-**Tech Stack:** Rust 2024 workspace, `serde`, `serde_json`, provider traits in `donnymail-core`, JSON-RPC line server in `donnymail-mcp`, SwiftPM/SwiftUI configuration app.
+**Tech Stack:** Rust 2024 workspace, `serde`, `serde_json`, provider traits in `torromail-core`, JSON-RPC line server in `torromail-mcp`, SwiftPM/SwiftUI configuration app.
 
 ---
 
 ## File Structure
 
-- `crates/donnymail-core/src/lib.rs`: keep existing exports and add message models, provider traits, fixture provider, and `MailAccessService`.
-- `crates/donnymail-core/tests/core_contract.rs`: extend contracts for MCP-safe search/read behavior and product-boundary invariants.
-- `crates/donnymail-mcp/Cargo.toml`: add JSON parsing dependencies.
-- `crates/donnymail-mcp/src/lib.rs`: replace tool-list-only facade with JSON-RPC `tools/call` routing into an injected service.
-- `crates/donnymail-mcp/tests/tool_contract.rs`: assert tool calls execute and forbidden admin mutations remain absent.
-- `apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift`: rename user-facing copy from mail-client language to control-surface language and add appearance intent.
-- `apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift`: reduce the app shell to status/setup/control views with semantic colors and no mail-reader surface.
-- `apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift`: assert the app model remains setup/control-only.
+- `crates/torromail-core/src/lib.rs`: keep existing exports and add message models, provider traits, fixture provider, and `MailAccessService`.
+- `crates/torromail-core/tests/core_contract.rs`: extend contracts for MCP-safe search/read behavior and product-boundary invariants.
+- `crates/torromail-mcp/Cargo.toml`: add JSON parsing dependencies.
+- `crates/torromail-mcp/src/lib.rs`: replace tool-list-only facade with JSON-RPC `tools/call` routing into an injected service.
+- `crates/torromail-mcp/tests/tool_contract.rs`: assert tool calls execute and forbidden admin mutations remain absent.
+- `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`: rename user-facing copy from mail-client language to control-surface language and add appearance intent.
+- `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`: reduce the app shell to status/setup/control views with semantic colors and no mail-reader surface.
+- `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`: assert the app model remains setup/control-only.
 - `docs/architecture.md`: update after implementation with the actual service boundaries.
 
 ## Product Boundary
@@ -31,15 +31,15 @@ This plan must not add an inbox, message list for human browsing, conversation v
 ### Task 1: Core Mail Models And Fixture Provider
 
 **Files:**
-- Modify: `crates/donnymail-core/src/lib.rs`
-- Test: `crates/donnymail-core/tests/core_contract.rs`
+- Modify: `crates/torromail-core/src/lib.rs`
+- Test: `crates/torromail-core/tests/core_contract.rs`
 
 - [ ] **Step 1: Write failing tests for search/read models**
 
-Add this test to `crates/donnymail-core/tests/core_contract.rs`:
+Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
 ```rust
-use donnymail_core::{
+use torromail_core::{
     FixtureMailProvider, MailProvider, StoredMessage,
 };
 
@@ -81,13 +81,13 @@ fn fixture_provider_searches_and_reads_messages_without_ui_state() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p donnymail-core fixture_provider_searches_and_reads_messages_without_ui_state`
+Run: `cargo test -p torromail-core fixture_provider_searches_and_reads_messages_without_ui_state`
 
 Expected: FAIL because `FixtureMailProvider`, `MailProvider`, and `StoredMessage` do not exist.
 
 - [ ] **Step 3: Implement the minimal core models and provider**
 
-Add these public types near `SearchHit` in `crates/donnymail-core/src/lib.rs`:
+Add these public types near `SearchHit` in `crates/torromail-core/src/lib.rs`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,7 +205,7 @@ impl MailProvider for FixtureMailProvider {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p donnymail-core fixture_provider_searches_and_reads_messages_without_ui_state`
+Run: `cargo test -p torromail-core fixture_provider_searches_and_reads_messages_without_ui_state`
 
 Expected: PASS.
 
@@ -214,7 +214,7 @@ Expected: PASS.
 If the workspace is inside a Git repository:
 
 ```bash
-git add crates/donnymail-core/src/lib.rs crates/donnymail-core/tests/core_contract.rs
+git add crates/torromail-core/src/lib.rs crates/torromail-core/tests/core_contract.rs
 git commit -m "feat: add mail provider fixture"
 ```
 
@@ -223,15 +223,15 @@ git commit -m "feat: add mail provider fixture"
 ### Task 2: Policy-Enforced Mail Access Service
 
 **Files:**
-- Modify: `crates/donnymail-core/src/lib.rs`
-- Test: `crates/donnymail-core/tests/core_contract.rs`
+- Modify: `crates/torromail-core/src/lib.rs`
+- Test: `crates/torromail-core/tests/core_contract.rs`
 
 - [ ] **Step 1: Write failing tests for policy enforcement**
 
-Add this test to `crates/donnymail-core/tests/core_contract.rs`:
+Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
 ```rust
-use donnymail_core::{
+use torromail_core::{
     FixtureMailProvider, MailAccessService, StoredMessage,
 };
 
@@ -266,13 +266,13 @@ fn mail_access_service_enforces_search_and_body_policy() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p donnymail-core mail_access_service_enforces_search_and_body_policy`
+Run: `cargo test -p torromail-core mail_access_service_enforces_search_and_body_policy`
 
 Expected: FAIL because `MailAccessService` does not exist.
 
 - [ ] **Step 3: Implement `MailAccessService`**
 
-Add this type after `FixtureMailProvider` in `crates/donnymail-core/src/lib.rs`:
+Add this type after `FixtureMailProvider` in `crates/torromail-core/src/lib.rs`:
 
 ```rust
 pub struct MailAccessService<'a, P: MailProvider> {
@@ -336,14 +336,14 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
 
 - [ ] **Step 4: Run core tests**
 
-Run: `cargo test -p donnymail-core`
+Run: `cargo test -p torromail-core`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/donnymail-core/src/lib.rs crates/donnymail-core/tests/core_contract.rs
+git add crates/torromail-core/src/lib.rs crates/torromail-core/tests/core_contract.rs
 git commit -m "feat: enforce mail access policy"
 ```
 
@@ -352,13 +352,13 @@ git commit -m "feat: enforce mail access policy"
 ### Task 3: MCP JSON-RPC Tool Calls
 
 **Files:**
-- Modify: `crates/donnymail-mcp/Cargo.toml`
-- Modify: `crates/donnymail-mcp/src/lib.rs`
-- Test: `crates/donnymail-mcp/tests/tool_contract.rs`
+- Modify: `crates/torromail-mcp/Cargo.toml`
+- Modify: `crates/torromail-mcp/src/lib.rs`
+- Test: `crates/torromail-mcp/tests/tool_contract.rs`
 
 - [ ] **Step 1: Add failing MCP call tests**
 
-Add this test to `crates/donnymail-mcp/tests/tool_contract.rs`:
+Add this test to `crates/torromail-mcp/tests/tool_contract.rs`:
 
 ```rust
 #[test]
@@ -387,26 +387,26 @@ fn mcp_server_rejects_unknown_tool_calls() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p donnymail-mcp mcp_server_executes_fixture_backed_mail_search`
+Run: `cargo test -p torromail-mcp mcp_server_executes_fixture_backed_mail_search`
 
 Expected: FAIL because `LineMcpServer::fixture` and `tools/call` routing do not exist.
 
 - [ ] **Step 3: Add dependencies**
 
-In `crates/donnymail-mcp/Cargo.toml`, keep the existing `donnymail-core` dependency and add `serde_json`:
+In `crates/torromail-mcp/Cargo.toml`, keep the existing `torromail-core` dependency and add `serde_json`:
 
 ```toml
 [dependencies]
-donnymail-core = { path = "../donnymail-core" }
+torromail-core = { path = "../torromail-core" }
 serde_json = "1"
 ```
 
 - [ ] **Step 4: Implement fixture-backed `tools/call` routing**
 
-In `crates/donnymail-mcp/src/lib.rs`, import JSON and core types:
+In `crates/torromail-mcp/src/lib.rs`, import JSON and core types:
 
 ```rust
-use donnymail_core::{
+use torromail_core::{
     AccountId, Capability, FixtureMailProvider, MailAccessService, Policy, PolicyEngine,
     SearchSessionStore, StoredMessage,
 };
@@ -426,7 +426,7 @@ impl LineMcpServer {
 
         if line.contains(r#""method":"initialize""#) || line.contains(r#""method": "initialize""#) {
             return format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"DonnyMail","version":"0.1.0"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"TorroMail","version":"0.1.0"}}}}}}"#
             );
         }
 
@@ -524,7 +524,7 @@ fn json_rpc_error(id: &str, code: i64, message: &str) -> String {
 }
 ```
 
-Expose `SearchHit::subject()` in `crates/donnymail-core/src/lib.rs`:
+Expose `SearchHit::subject()` in `crates/torromail-core/src/lib.rs`:
 
 ```rust
 pub fn subject(&self) -> &str {
@@ -534,14 +534,14 @@ pub fn subject(&self) -> &str {
 
 - [ ] **Step 5: Run MCP tests**
 
-Run: `cargo test -p donnymail-mcp`
+Run: `cargo test -p torromail-mcp`
 
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/donnymail-core/src/lib.rs crates/donnymail-mcp/Cargo.toml crates/donnymail-mcp/src/lib.rs crates/donnymail-mcp/tests/tool_contract.rs
+git add crates/torromail-core/src/lib.rs crates/torromail-mcp/Cargo.toml crates/torromail-mcp/src/lib.rs crates/torromail-mcp/tests/tool_contract.rs
 git commit -m "feat: execute MCP mail search"
 ```
 
@@ -550,16 +550,16 @@ git commit -m "feat: execute MCP mail search"
 ### Task 4: Real Provider Boundary For IMAP Configuration
 
 **Files:**
-- Modify: `crates/donnymail-core/src/lib.rs`
-- Create: `crates/donnymail-core/src/imap_provider.rs`
-- Test: `crates/donnymail-core/tests/core_contract.rs`
+- Modify: `crates/torromail-core/src/lib.rs`
+- Create: `crates/torromail-core/src/imap_provider.rs`
+- Test: `crates/torromail-core/tests/core_contract.rs`
 
 - [ ] **Step 1: Write a provider-boundary test without network**
 
-Add this test to `crates/donnymail-core/tests/core_contract.rs`:
+Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
 ```rust
-use donnymail_core::{ImapProviderConfig, SecretRef};
+use torromail_core::{ImapProviderConfig, SecretRef};
 
 #[test]
 fn imap_provider_config_keeps_secrets_out_of_debug_output() {
@@ -568,24 +568,24 @@ fn imap_provider_config_keeps_secrets_out_of_debug_output() {
         "imap.example.com",
         993,
         "work@example.com",
-        SecretRef::new("keychain://donnymail/work"),
+        SecretRef::new("keychain://torromail/work"),
     );
 
     let debug = format!("{config:?}");
     assert!(debug.contains("imap.example.com"));
-    assert!(!debug.contains("keychain://donnymail/work"));
+    assert!(!debug.contains("keychain://torromail/work"));
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p donnymail-core imap_provider_config_keeps_secrets_out_of_debug_output`
+Run: `cargo test -p torromail-core imap_provider_config_keeps_secrets_out_of_debug_output`
 
 Expected: FAIL because `ImapProviderConfig` and `SecretRef` do not exist.
 
 - [ ] **Step 3: Add module and types**
 
-Create `crates/donnymail-core/src/imap_provider.rs`:
+Create `crates/torromail-core/src/imap_provider.rs`:
 
 ```rust
 use std::fmt;
@@ -639,7 +639,7 @@ impl ImapProviderConfig {
 }
 ```
 
-Expose it from `crates/donnymail-core/src/lib.rs`:
+Expose it from `crates/torromail-core/src/lib.rs`:
 
 ```rust
 pub mod imap_provider;
@@ -648,14 +648,14 @@ pub use imap_provider::{ImapProviderConfig, SecretRef};
 
 - [ ] **Step 4: Run core tests**
 
-Run: `cargo test -p donnymail-core`
+Run: `cargo test -p torromail-core`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/donnymail-core/src/lib.rs crates/donnymail-core/src/imap_provider.rs crates/donnymail-core/tests/core_contract.rs
+git add crates/torromail-core/src/lib.rs crates/torromail-core/src/imap_provider.rs crates/torromail-core/tests/core_contract.rs
 git commit -m "feat: add IMAP provider boundary"
 ```
 
@@ -664,17 +664,17 @@ git commit -m "feat: add IMAP provider boundary"
 ### Task 5: SwiftUI Control Surface Guardrails
 
 **Files:**
-- Modify: `apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift`
-- Modify: `apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift`
-- Test: `apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift`
+- Modify: `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`
+- Modify: `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`
+- Test: `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`
 
 - [ ] **Step 1: Write failing Swift contract checks**
 
-Add these checks to `apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift`:
+Add these checks to `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`:
 
 ```swift
 require(
-    DonnyMailProductBoundary.disallowedUserMailSurfaces == [
+    TorroMailProductBoundary.disallowedUserMailSurfaces == [
         "Inbox UI",
         "Message reader",
         "Thread browser",
@@ -684,23 +684,23 @@ require(
 )
 
 require(
-    DonnyMailProductBoundary.allowedAppRole == "Setup, consent, MCP lifecycle, status, audit, and diagnostics",
+    TorroMailProductBoundary.allowedAppRole == "Setup, consent, MCP lifecycle, status, audit, and diagnostics",
     "app role should be control-surface only"
 )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract`
+Run: `swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract`
 
-Expected: FAIL because `DonnyMailProductBoundary` does not exist.
+Expected: FAIL because `TorroMailProductBoundary` does not exist.
 
 - [ ] **Step 3: Add product-boundary model**
 
-Add this type to `apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift`:
+Add this type to `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`:
 
 ```swift
-public enum DonnyMailProductBoundary {
+public enum TorroMailProductBoundary {
     public static let allowedAppRole = "Setup, consent, MCP lifecycle, status, audit, and diagnostics"
 
     public static let disallowedUserMailSurfaces = [
@@ -714,10 +714,10 @@ public enum DonnyMailProductBoundary {
 
 - [ ] **Step 4: Update visible app copy**
 
-In `apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift`, replace mail-client-style titles with control-surface copy:
+In `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`, replace mail-client-style titles with control-surface copy:
 
 ```swift
-.navigationTitle("DonnyMail Control")
+.navigationTitle("TorroMail Control")
 ```
 
 Use labels such as:
@@ -744,8 +744,8 @@ Text("Compose")
 Run:
 
 ```bash
-swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract
-swift build --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build
+swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
 Expected: PASS.
@@ -753,7 +753,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift
+git add apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift apps/TorroMailApp/Tests/TorroMailKitContract/main.swift
 git commit -m "feat: guard SwiftUI control surface"
 ```
 
@@ -762,33 +762,33 @@ git commit -m "feat: guard SwiftUI control surface"
 ### Task 6: Light And Dark Control-Surface Theme
 
 **Files:**
-- Modify: `apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift`
-- Modify: `apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift`
-- Test: `apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift`
+- Modify: `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`
+- Modify: `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`
+- Test: `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`
 
 - [ ] **Step 1: Write failing theme contract checks**
 
-Add this to `apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift`:
+Add this to `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`:
 
 ```swift
-require(DonnyMailAppearance.spacingUnit == 8, "spacing should use an 8-point base")
-require(DonnyMailAppearance.supportsLightMode, "light mode should be supported")
-require(DonnyMailAppearance.supportsDarkMode, "dark mode should be supported")
-require(DonnyMailAppearance.usesSemanticColors, "theme should use semantic colors")
+require(TorroMailAppearance.spacingUnit == 8, "spacing should use an 8-point base")
+require(TorroMailAppearance.supportsLightMode, "light mode should be supported")
+require(TorroMailAppearance.supportsDarkMode, "dark mode should be supported")
+require(TorroMailAppearance.usesSemanticColors, "theme should use semantic colors")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract`
+Run: `swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract`
 
-Expected: FAIL because `DonnyMailAppearance` does not exist.
+Expected: FAIL because `TorroMailAppearance` does not exist.
 
 - [ ] **Step 3: Add appearance contract**
 
-Add this to `apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift`:
+Add this to `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`:
 
 ```swift
-public enum DonnyMailAppearance {
+public enum TorroMailAppearance {
     public static let spacingUnit = 8
     public static let supportsLightMode = true
     public static let supportsDarkMode = true
@@ -798,7 +798,7 @@ public enum DonnyMailAppearance {
 
 - [ ] **Step 4: Apply semantic colors in SwiftUI**
 
-In `apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift`, prefer semantic styles:
+In `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`, prefer semantic styles:
 
 ```swift
 .foregroundStyle(.primary)
@@ -811,7 +811,7 @@ Use spacing values derived from the 8-point base:
 
 ```swift
 private enum Layout {
-    static let unit: CGFloat = CGFloat(DonnyMailAppearance.spacingUnit)
+    static let unit: CGFloat = CGFloat(TorroMailAppearance.spacingUnit)
     static let small: CGFloat = unit
     static let medium: CGFloat = unit * 2
     static let large: CGFloat = unit * 3
@@ -823,8 +823,8 @@ private enum Layout {
 Run:
 
 ```bash
-swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract
-swift build --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build
+swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
 Expected: PASS.
@@ -832,7 +832,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/DonnyMailApp/Sources/DonnyMailKit/DonnyMailKit.swift apps/DonnyMailApp/Sources/DonnyMailApp/DonnyMailApp.swift apps/DonnyMailApp/Tests/DonnyMailKitContract/main.swift
+git add apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift apps/TorroMailApp/Tests/TorroMailKitContract/main.swift
 git commit -m "feat: add control surface appearance contract"
 ```
 
@@ -850,7 +850,7 @@ git commit -m "feat: add control surface appearance contract"
 Ensure these exact statements remain true in the docs:
 
 ```markdown
-DonnyMail is not a general-purpose mail client.
+TorroMail is not a general-purpose mail client.
 The native macOS app is a configuration and control surface.
 MCP clients can search and read within policy, prepare risky actions, and inspect read-only admin state.
 ```
@@ -861,9 +861,9 @@ Run:
 
 ```bash
 cargo test
-cargo build -p donnymail-mcp
-swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract
-swift build --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build
+cargo build -p torromail-mcp
+swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
 Expected: all commands complete successfully.
@@ -896,4 +896,4 @@ Two execution options:
 1. **Subagent-Driven (recommended)** - dispatch a fresh subagent per task, review between tasks, fast iteration.
 2. **Inline Execution** - execute tasks in this session using `superpowers:executing-plans`, with checkpoints after each task.
 
-Before execution, fix the Git workspace state. `/Users/wagesve/Dev/Apps/DonnyImap` currently has no `.git` directory, so commits cannot be created there until the project is initialized as a repository or moved into the correct repository path.
+Before execution, ensure the Git workspace state is clean. The project lives at `/Users/wagesve/Dev/Apps/TorroMail` and is initialized as a Git repository, so task commits can be created there directly.

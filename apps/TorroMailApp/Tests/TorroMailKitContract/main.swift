@@ -1,4 +1,4 @@
-import DonnyMailKit
+import TorroMailKit
 import Foundation
 
 func require(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -8,7 +8,7 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
-let model = DonnyMailModel.preview()
+let model = TorroMailModel.preview()
 
 require(
     model.sidebarItems.map(\.label)
@@ -32,16 +32,16 @@ require(
     "first account should be selected by default"
 )
 require(
-    DonnyMailAccountSection.allCases.map(\.label)
+    TorroMailAccountSection.allCases.map(\.label)
         == ["Overview", "Connection", "Permissions", "Search & Cache", "Mailboxes", "Pending Actions", "Advanced"],
     "account-specific settings must stay inside account detail sections"
 )
 require(
     model.generalSettings.startMcpServerWithApp,
-    "MCP server should start with DonnyMail by default"
+    "MCP server should start with TorroMail by default"
 )
 require(
-    model.generalSettings.mcpLifecycleSummary == "Starts with DonnyMail",
+    model.generalSettings.mcpLifecycleSummary == "Starts with TorroMail",
     "MCP lifecycle summary should be user-facing"
 )
 
@@ -57,16 +57,16 @@ require(
 require(account.pendingActions.count == 1, "selected account should own pending actions")
 
 let locator = MCPExecutableLocator(
-    executableName: "donnymail-mcp",
+    executableName: "torromail-mcp",
     workspaceRoot: "/repo"
 )
 require(
-    locator.candidatePaths == ["/repo/target/debug/donnymail-mcp", "donnymail-mcp"],
+    locator.candidatePaths == ["/repo/target/debug/torromail-mcp", "torromail-mcp"],
     "MCP executable should be resolved from the dev workspace before PATH"
 )
 require(
-    MCPServerStatus.notFound("donnymail-mcp").label == "Executable not found",
+    MCPServerStatus.notFound("torromail-mcp").label == "Executable not found",
     "MCP server status should expose readable lifecycle state"
 )
 
-print("DonnyMailKit navigation contract passed")
+print("TorroMailKit navigation contract passed")

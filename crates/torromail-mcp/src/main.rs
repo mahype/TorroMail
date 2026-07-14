@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 
-use donnymail_mcp::{LineMcpServer, ToolCatalog};
+use torromail_mcp::{LineMcpServer, ToolCatalog};
 
 fn main() -> io::Result<()> {
     if std::env::args().any(|argument| argument == "--list-tools") {

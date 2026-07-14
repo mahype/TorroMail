@@ -1,8 +1,8 @@
-# DonnyMail Account-Centered UI Design
+# TorroMail Account-Centered UI Design
 
 Status: Superseded historical design.
 
-This document predates the current product clarification. DonnyMail is an
+This document predates the current product clarification. TorroMail is an
 MCP-first local mail access layer, not a general-purpose mail client. The native
 macOS app remains limited to setup, consent, MCP lifecycle, status, audit, and
 diagnostics. Do not use this document to justify adding an inbox, message
@@ -10,7 +10,7 @@ reader, thread browser, or daily-use mail UI.
 
 ## Decision
 
-DonnyMail will use the account-centered layout from mockup option A. The primary entry point is the list of mail accounts. Selecting an account opens all account-specific configuration in one detail area. Global settings stay secondary and separate.
+TorroMail will use the account-centered layout from mockup option A. The primary entry point is the list of mail accounts. Selecting an account opens all account-specific configuration in one detail area. Global settings stay secondary and separate.
 
 ## Product Principle
 
@@ -51,18 +51,18 @@ The top account page should not show every setting at once. It shows status summ
 Global sections are limited to settings that are not naturally owned by one mail account:
 
 - AI Clients: configured MCP clients, client-specific authentication/approval variation, snippets or automatic installation, and the actual local process path.
-- General Settings: whether DonnyMail launches the local MCP server with the app, startup behavior, local IPC transport, update policy, and app-wide privacy defaults.
+- General Settings: whether TorroMail launches the local MCP server with the app, startup behavior, local IPC transport, update policy, and app-wide privacy defaults.
 - Audit Log: cross-account activity with filtering by account, client, tool, and result.
 - Diagnostics: health checks, logs, export diagnostics, local daemon status, and adapter state.
 
 ## MCP Server Lifecycle
 
-The local MCP server should start and stop with the DonnyMail app by default. Users should not need to run `cargo run -p donnymail-mcp` or any separate process in normal use.
+The local MCP server should start and stop with the TorroMail app by default. Users should not need to run `cargo run -p torromail-mcp` or any separate process in normal use.
 
 Development and diagnostics may still expose CLI commands, but the documented user path is:
 
-- Start DonnyMail.
-- DonnyMail starts or supervises the local MCP server.
+- Start TorroMail.
+- TorroMail starts or supervises the local MCP server.
 - The GUI shows whether the server is running and which executable is used.
 - AI client setup points to the supervised local process.
 
@@ -83,14 +83,14 @@ Account setup, secret changes, OAuth setup, permission edits, and cache/index en
 
 The next implementation step is to refactor the SwiftUI app structure. It should preserve the existing Rust core and MCP test contracts, then add SwiftUI tests or stable model tests when the app model is split into testable units.
 
-The first implementation pass should not build real IMAP, SMTP, or OAuth adapters. It should implement the correct user-facing structure and include lightweight MCP process supervision so the app can start a local `donnymail-mcp` executable when available.
+The first implementation pass should not build real IMAP, SMTP, or OAuth adapters. It should implement the correct user-facing structure and include lightweight MCP process supervision so the app can start a local `torromail-mcp` executable when available.
 
 ## Acceptance Criteria
 
 - The first screen is an account list with a selected account detail view.
 - Permissions, search/cache, mailboxes, and pending actions are reachable inside the selected account.
 - AI client authentication variations are separate from account configuration.
-- The UI communicates that the MCP server starts with DonnyMail in normal use.
+- The UI communicates that the MCP server starts with TorroMail in normal use.
 - The interface avoids presenting all advanced settings at once.
 - Existing Rust tests still pass.
 - The SwiftUI package still builds.

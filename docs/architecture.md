@@ -1,10 +1,10 @@
-# DonnyMail Architecture
+# TorroMail Architecture
 
-DonnyMail is a local-first mail access layer for agents. It retrieves mail from
+TorroMail is a local-first mail access layer for agents. It retrieves mail from
 configured accounts and exposes policy-controlled capabilities through MCP. The
 primary interface is the open MCP contract, not an end-user mail reader.
 
-DonnyMail is not a full mail client. The project must not add a human-facing
+TorroMail is not a full mail client. The project must not add a human-facing
 inbox, message reading surface, thread browser, or daily mail workflow UI unless
 that product boundary is explicitly changed. The native macOS app is a
 configuration and control surface: users manage accounts, permissions, cache,

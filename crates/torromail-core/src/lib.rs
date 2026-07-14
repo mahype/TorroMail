@@ -1,4 +1,4 @@
-//! Portable DonnyMail core.
+//! Portable TorroMail core.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

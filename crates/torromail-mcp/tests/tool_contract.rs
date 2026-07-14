@@ -1,4 +1,4 @@
-use donnymail_mcp::{AccessLevel, ToolCatalog, ToolName, TransportMode};
+use torromail_mcp::{AccessLevel, ToolCatalog, ToolName, TransportMode};
 
 #[test]
 fn stdio_is_the_default_transport() {

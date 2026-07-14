@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "donnymail-core"
+name = "torromail-core"
 version = "0.1.0"
 
 [[package]]
-name = "donnymail-mcp"
+name = "torromail-mcp"
 version = "0.1.0"
 dependencies = [
- "donnymail-core",
+ "torromail-core",
 ]

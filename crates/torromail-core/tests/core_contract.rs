@@ -1,4 +1,4 @@
-use donnymail_core::{
+use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
     PendingActionRequest, PendingActionStore, Policy, PolicyEngine, SearchHit, SearchSessionStore,
 };

@@ -1,14 +1,14 @@
-import DonnyMailKit
+import TorroMailKit
 import SwiftUI
 
 @main
-struct DonnyMailApp: App {
-    @StateObject private var model = DonnyMailModel.preview()
+struct TorroMailApp: App {
+    @StateObject private var model = TorroMailModel.preview()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
 
     var body: some Scene {
         WindowGroup {
-            DonnyMailRootView()
+            TorroMailRootView()
                 .environmentObject(model)
                 .environmentObject(mcpSupervisor)
                 .frame(minWidth: 1240, minHeight: 740)
@@ -27,8 +27,8 @@ struct DonnyMailApp: App {
     }
 }
 
-private struct DonnyMailRootView: View {
-    @EnvironmentObject private var model: DonnyMailModel
+private struct TorroMailRootView: View {
+    @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         NavigationSplitView {
@@ -36,7 +36,7 @@ private struct DonnyMailRootView: View {
                 Section(model.sidebarGroups[0].label) {
                     ForEach(model.accounts) { account in
                         AccountSidebarRow(account: account)
-                        .tag(DonnyMailSidebarSelection.account(account.id))
+                        .tag(TorroMailSidebarSelection.account(account.id))
                     }
                 }
 
@@ -48,7 +48,7 @@ private struct DonnyMailRootView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 430)
-            .navigationTitle("DonnyMail")
+            .navigationTitle("TorroMail")
             .toolbar {
                 Button {
                     model.beginAccountWizard()
@@ -76,7 +76,7 @@ private struct DonnyMailRootView: View {
         }
     }
 
-    private var sidebarSelection: Binding<DonnyMailSidebarSelection?> {
+    private var sidebarSelection: Binding<TorroMailSidebarSelection?> {
         Binding(
             get: { model.selectedSidebarItem },
             set: { selection in
@@ -127,11 +127,11 @@ private struct AccountSidebarRow: View {
 }
 
 private struct SidebarRow: View {
-    var selection: DonnyMailSidebarSelection
+    var selection: TorroMailSidebarSelection
     var title: String
     var symbol: String
 
-    init(_ selection: DonnyMailSidebarSelection, _ title: String, _ symbol: String) {
+    init(_ selection: TorroMailSidebarSelection, _ title: String, _ symbol: String) {
         self.selection = selection
         self.title = title
         self.symbol = symbol
@@ -145,7 +145,7 @@ private struct SidebarRow: View {
 }
 
 private struct AccountDetailView: View {
-    @EnvironmentObject private var model: DonnyMailModel
+    @EnvironmentObject private var model: TorroMailModel
     @Binding var account: MailAccount
 
     var body: some View {
@@ -155,7 +155,7 @@ private struct AccountDetailView: View {
                 .padding(.bottom, 16)
 
             Picker("Section", selection: $model.selectedAccountSection) {
-                ForEach(DonnyMailAccountSection.allCases) { section in
+                ForEach(TorroMailAccountSection.allCases) { section in
                     Text(section.label).tag(section)
                 }
             }
@@ -462,7 +462,7 @@ private struct AccountAdvancedView: View {
 }
 
 private struct AIClientsView: View {
-    @EnvironmentObject private var model: DonnyMailModel
+    @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         Form {
@@ -501,13 +501,13 @@ private struct AIClientsView: View {
 }
 
 private struct GeneralSettingsView: View {
-    @EnvironmentObject private var model: DonnyMailModel
+    @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
         Form {
             Section("MCP Server") {
-                Toggle("Start with DonnyMail", isOn: $model.generalSettings.startMcpServerWithApp)
+                Toggle("Start with TorroMail", isOn: $model.generalSettings.startMcpServerWithApp)
                     .onChange(of: model.generalSettings.startMcpServerWithApp) { _, enabled in
                         if enabled {
                             mcpSupervisor.startIfNeeded(settings: model.generalSettings)
@@ -546,7 +546,7 @@ private struct GeneralSettingsView: View {
 }
 
 private struct AuditLogView: View {
-    @EnvironmentObject private var model: DonnyMailModel
+    @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         Table(model.audit) {
@@ -596,7 +596,7 @@ private struct DiagnosticsView: View {
 
 private struct AccountWizardView: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var model: DonnyMailModel
+    @EnvironmentObject private var model: TorroMailModel
     @State private var name = ""
     @State private var email = ""
     @State private var provider = Provider.gmail

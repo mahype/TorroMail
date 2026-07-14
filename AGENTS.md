@@ -4,7 +4,7 @@ This file is the first stop for agents working in this repository.
 
 ## Product Intent
 
-DonnyMail is a local mail access layer for agents. It retrieves mail from
+TorroMail is a local mail access layer for agents. It retrieves mail from
 configured accounts and exposes safe, policy-controlled capabilities through an
 MCP server.
 
@@ -13,7 +13,7 @@ permission model, and documentation are the primary product surface.
 
 ## Important Boundary
 
-DonnyMail is not a general-purpose mail client.
+TorroMail is not a general-purpose mail client.
 
 Do not build:
 
@@ -39,11 +39,11 @@ like a precise control surface, not like a mail inbox.
 
 ## Architecture
 
-- `crates/donnymail-core`: portable Rust domain model for accounts, policies,
+- `crates/torromail-core`: portable Rust domain model for accounts, policies,
   cache defaults, pending actions, and search result sets.
-- `crates/donnymail-mcp`: explicit MCP tool catalog and stdio line server
+- `crates/torromail-mcp`: explicit MCP tool catalog and stdio line server
   facade.
-- `apps/DonnyMailApp`: SwiftUI macOS configuration/control app.
+- `apps/TorroMailApp`: SwiftUI macOS configuration/control app.
 - `docs`: architecture notes, product decisions, and implementation plans.
 
 Core rule: account setup, secret changes, OAuth setup, and permission edits stay
@@ -80,9 +80,9 @@ Run the relevant checks before claiming work is complete:
 
 ```sh
 cargo test
-cargo build -p donnymail-mcp
-swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract
-swift build --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build
+cargo build -p torromail-mcp
+swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
 For documentation-only changes, at minimum read the changed Markdown files and

@@ -1,11 +1,11 @@
-# DonnyMail
+# TorroMail
 
-DonnyMail is a local mail access layer for agents. It retrieves mail from configured
+TorroMail is a local mail access layer for agents. It retrieves mail from configured
 accounts and exposes mail capabilities through an MCP server. The project is
 open-source and open-interface-first: the MCP contract and local safety model are
 the primary product surface.
 
-DonnyMail is not a general-purpose mail client. It does not provide an inbox UI
+TorroMail is not a general-purpose mail client. It does not provide an inbox UI
 for users to browse, read, or manage mail manually. Any native macOS app in this
 repository is a configuration and control surface for account setup, permissions,
 MCP lifecycle, pending action review, diagnostics, and local status.
@@ -27,9 +27,9 @@ configuration and user confirmation.
 
 ## Layout
 
-- `crates/donnymail-core`: portable Rust domain model for accounts, policies, cache defaults, pending actions, and reusable search result sets.
-- `crates/donnymail-mcp`: explicit MCP tool surface and stdio line server facade.
-- `apps/DonnyMailApp`: macOS SwiftUI configuration/control app. This is not a mail client UI.
+- `crates/torromail-core`: portable Rust domain model for accounts, policies, cache defaults, pending actions, and reusable search result sets.
+- `crates/torromail-mcp`: explicit MCP tool surface and stdio line server facade.
+- `apps/TorroMailApp`: macOS SwiftUI configuration/control app. This is not a mail client UI.
 - `docs`: architecture notes and product decisions.
 
 ## Agent Orientation
@@ -42,9 +42,9 @@ workers.
 
 ```sh
 cargo test
-cargo build -p donnymail-mcp
-swift run --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build DonnyMailKitContract
-swift build --package-path apps/DonnyMailApp --scratch-path apps/DonnyMailApp/.build
+cargo build -p torromail-mcp
+swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
-In development, build `donnymail-mcp` before launching the SwiftUI app if you want the app supervisor to start the MCP process automatically from `target/debug/donnymail-mcp`.
+In development, build `torromail-mcp` before launching the SwiftUI app if you want the app supervisor to start the MCP process automatically from `target/debug/torromail-mcp`.

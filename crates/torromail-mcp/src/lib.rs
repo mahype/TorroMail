@@ -1,4 +1,4 @@
-//! DonnyMail MCP facade.
+//! TorroMail MCP facade.
 //!
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
@@ -177,7 +177,7 @@ impl LineMcpServer {
 
         if line.contains(r#""method":"initialize""#) || line.contains(r#""method": "initialize""#) {
             return format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"DonnyMail","version":"0.1.0"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"TorroMail","version":"0.1.0"}}}}}}"#
             );
         }
 

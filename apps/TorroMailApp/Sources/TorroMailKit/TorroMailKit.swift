@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-public enum DonnyMailSidebarSelection: Hashable {
+public enum TorroMailSidebarSelection: Hashable {
     case account(String)
     case aiClients
     case generalSettings
@@ -9,17 +9,17 @@ public enum DonnyMailSidebarSelection: Hashable {
     case diagnostics
 }
 
-public struct DonnyMailSidebarItem: Identifiable, Hashable {
+public struct TorroMailSidebarItem: Identifiable, Hashable {
     public var id: String
     public var label: String
     public var symbol: String
-    public var selection: DonnyMailSidebarSelection
+    public var selection: TorroMailSidebarSelection
 
     public init(
         id: String,
         label: String,
         symbol: String,
-        selection: DonnyMailSidebarSelection
+        selection: TorroMailSidebarSelection
     ) {
         self.id = id
         self.label = label
@@ -28,19 +28,19 @@ public struct DonnyMailSidebarItem: Identifiable, Hashable {
     }
 }
 
-public struct DonnyMailSidebarGroup: Identifiable, Hashable {
+public struct TorroMailSidebarGroup: Identifiable, Hashable {
     public var id: String
     public var label: String
-    public var items: [DonnyMailSidebarItem]
+    public var items: [TorroMailSidebarItem]
 
-    public init(id: String, label: String, items: [DonnyMailSidebarItem]) {
+    public init(id: String, label: String, items: [TorroMailSidebarItem]) {
         self.id = id
         self.label = label
         self.items = items
     }
 }
 
-public enum DonnyMailAccountSection: String, CaseIterable, Identifiable {
+public enum TorroMailAccountSection: String, CaseIterable, Identifiable {
     case overview
     case connection
     case permissions
@@ -269,7 +269,7 @@ public struct GeneralSettings: Hashable {
     public init(
         startMcpServerWithApp: Bool = true,
         transport: String = "stdio",
-        executable: String = "donnymail-mcp"
+        executable: String = "torromail-mcp"
     ) {
         self.startMcpServerWithApp = startMcpServerWithApp
         self.transport = transport
@@ -277,7 +277,7 @@ public struct GeneralSettings: Hashable {
     }
 
     public var mcpLifecycleSummary: String {
-        startMcpServerWithApp ? "Starts with DonnyMail" : "Manual start"
+        startMcpServerWithApp ? "Starts with TorroMail" : "Manual start"
     }
 }
 
@@ -300,8 +300,8 @@ public enum MCPServerStatus: Hashable {
 
     public var detail: String {
         switch self {
-        case .stopped: "DonnyMail is not supervising an MCP process."
-        case .starting: "DonnyMail is starting the local MCP process."
+        case .stopped: "TorroMail is not supervising an MCP process."
+        case .starting: "TorroMail is starting the local MCP process."
         case let .running(path): path
         case let .notFound(name): name
         case let .failed(message): message
@@ -452,10 +452,10 @@ public struct AuditEntry: Identifiable, Hashable {
 }
 
 @MainActor
-public final class DonnyMailModel: ObservableObject {
+public final class TorroMailModel: ObservableObject {
     @Published public var accounts: [MailAccount]
-    @Published public var selectedSidebarItem: DonnyMailSidebarSelection
-    @Published public var selectedAccountSection: DonnyMailAccountSection
+    @Published public var selectedSidebarItem: TorroMailSidebarSelection
+    @Published public var selectedAccountSection: TorroMailAccountSection
     @Published public var showAccountWizard: Bool
     @Published public var aiClients: [AIClient]
     @Published public var generalSettings: GeneralSettings
@@ -463,8 +463,8 @@ public final class DonnyMailModel: ObservableObject {
 
     public init(
         accounts: [MailAccount],
-        selectedSidebarItem: DonnyMailSidebarSelection,
-        selectedAccountSection: DonnyMailAccountSection = .overview,
+        selectedSidebarItem: TorroMailSidebarSelection,
+        selectedAccountSection: TorroMailAccountSection = .overview,
         showAccountWizard: Bool = false,
         aiClients: [AIClient],
         generalSettings: GeneralSettings,
@@ -479,13 +479,13 @@ public final class DonnyMailModel: ObservableObject {
         self.audit = audit
     }
 
-    public var sidebarItems: [DonnyMailSidebarItem] {
+    public var sidebarItems: [TorroMailSidebarItem] {
         sidebarGroups.flatMap(\.items)
     }
 
-    public var sidebarGroups: [DonnyMailSidebarGroup] {
+    public var sidebarGroups: [TorroMailSidebarGroup] {
         let accountItems = accounts.map { account in
-            DonnyMailSidebarItem(
+            TorroMailSidebarItem(
                 id: "account-\(account.id)",
                 label: account.name,
                 symbol: "envelope",
@@ -493,15 +493,15 @@ public final class DonnyMailModel: ObservableObject {
             )
         }
         let generalItems = [
-            DonnyMailSidebarItem(id: "ai-clients", label: "AI Clients", symbol: "person.2.badge.gearshape", selection: .aiClients),
-            DonnyMailSidebarItem(id: "general-settings", label: "General Settings", symbol: "gearshape", selection: .generalSettings),
-            DonnyMailSidebarItem(id: "audit-log", label: "Audit Log", symbol: "list.bullet.rectangle", selection: .auditLog),
-            DonnyMailSidebarItem(id: "diagnostics", label: "Diagnostics", symbol: "waveform.path.ecg", selection: .diagnostics)
+            TorroMailSidebarItem(id: "ai-clients", label: "AI Clients", symbol: "person.2.badge.gearshape", selection: .aiClients),
+            TorroMailSidebarItem(id: "general-settings", label: "General Settings", symbol: "gearshape", selection: .generalSettings),
+            TorroMailSidebarItem(id: "audit-log", label: "Audit Log", symbol: "list.bullet.rectangle", selection: .auditLog),
+            TorroMailSidebarItem(id: "diagnostics", label: "Diagnostics", symbol: "waveform.path.ecg", selection: .diagnostics)
         ]
 
         return [
-            DonnyMailSidebarGroup(id: "accounts", label: "Accounts", items: accountItems),
-            DonnyMailSidebarGroup(id: "general", label: "General", items: generalItems)
+            TorroMailSidebarGroup(id: "accounts", label: "Accounts", items: accountItems),
+            TorroMailSidebarGroup(id: "general", label: "General", items: generalItems)
         ]
     }
 
@@ -550,9 +550,9 @@ public final class DonnyMailModel: ObservableObject {
     }
 }
 
-extension DonnyMailModel {
-    public static func preview() -> DonnyMailModel {
-        DonnyMailModel(
+extension TorroMailModel {
+    public static func preview() -> TorroMailModel {
+        TorroMailModel(
             accounts: [
                 MailAccount(
                     id: "work",
