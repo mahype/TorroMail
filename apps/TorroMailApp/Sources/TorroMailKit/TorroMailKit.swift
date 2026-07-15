@@ -164,6 +164,29 @@ public enum MCPClientSetup {
         return command.displayPath
     }
 
+    /// Which assistants are set up to reach TorroMail. Read from their own
+    /// configuration — the app does not guess, and does not pretend.
+    public static func configuredClientNames(fileManager: FileManager = .default) -> [String] {
+        guard let support = try? fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) else {
+            return []
+        }
+        let config = support
+            .appendingPathComponent("Claude", isDirectory: true)
+            .appendingPathComponent("claude_desktop_config.json")
+        guard let data = try? Data(contentsOf: config),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let servers = root["mcpServers"] as? [String: Any],
+              servers["torromail"] != nil else {
+            return []
+        }
+        return ["Claude Desktop"]
+    }
+
     public static func configSnippet(commandPath: String) -> String {
         """
         {
@@ -216,6 +239,81 @@ public enum MCPClientSetup {
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: target, options: .atomic)
         return target
+    }
+}
+
+/// What TorroMail remembers between launches: the accounts you configured
+/// and where the app shows up. Passwords stay in the keychain; connection
+/// state and pending approvals are runtime facts and start fresh.
+public enum AppStateStore {
+    public static let version = 1
+
+    public struct State: Codable, Hashable {
+        public var version: Int
+        public var accounts: [MailAccount]
+        public var settings: GeneralSettings
+
+        public init(
+            version: Int = AppStateStore.version,
+            accounts: [MailAccount] = [],
+            settings: GeneralSettings = GeneralSettings()
+        ) {
+            self.version = version
+            self.accounts = accounts
+            self.settings = settings
+        }
+    }
+
+    /// `~/Library/Application Support/TorroMail/state.json` — next to the
+    /// policy document the MCP server reads.
+    public static func defaultURL(fileManager: FileManager = .default) throws -> URL {
+        try fileManager
+            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("TorroMail", isDirectory: true)
+            .appendingPathComponent("state.json")
+    }
+
+    public static func encode(_ state: State) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(state)
+    }
+
+    public static func decode(_ data: Data) throws -> State {
+        try JSONDecoder().decode(State.self, from: data)
+    }
+
+    /// Never throws: a first launch has no file, and losing the window over
+    /// a read error would help nobody. A file that exists but cannot be
+    /// decoded is moved aside rather than silently overwritten later.
+    public static func load(from url: URL? = nil, fileManager: FileManager = .default) -> State {
+        guard let target = try? url ?? defaultURL(fileManager: fileManager),
+              let data = try? Data(contentsOf: target) else {
+            return State()
+        }
+        do {
+            return try decode(data)
+        } catch {
+            let broken = target.appendingPathExtension("broken")
+            try? fileManager.removeItem(at: broken)
+            try? fileManager.moveItem(at: target, to: broken)
+            NSLog("TorroMail: unreadable state file moved to %@", broken.path)
+            return State()
+        }
+    }
+
+    /// Writes atomically — a crash mid-save must not cost the accounts.
+    public static func save(
+        _ state: State,
+        to url: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws {
+        let target = try url ?? defaultURL(fileManager: fileManager)
+        try fileManager.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try encode(state).write(to: target, options: .atomic)
     }
 }
 
@@ -297,7 +395,7 @@ public enum PolicyDocument {
     }
 }
 
-public enum Provider: String, CaseIterable, Identifiable, Hashable {
+public enum Provider: String, CaseIterable, Identifiable, Hashable, Codable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
     case microsoft = "Microsoft 365"
@@ -306,14 +404,14 @@ public enum Provider: String, CaseIterable, Identifiable, Hashable {
     public var id: Self { self }
 }
 
-public enum LoginMethod: CaseIterable, Identifiable, Hashable {
+public enum LoginMethod: String, CaseIterable, Identifiable, Hashable, Codable {
     case password
     case oauth
 
     public var id: Self { self }
 }
 
-public enum CacheMode: CaseIterable, Identifiable, Hashable {
+public enum CacheMode: String, CaseIterable, Identifiable, Hashable, Codable {
     case metadata
     case headers
     case body
@@ -344,7 +442,7 @@ public enum ConnectionState: Hashable {
 
 /// How deep assistants may read. The levels build on each other: the message
 /// implies its header, attachments imply the message.
-public enum ReadAccess: Int, CaseIterable, Identifiable, Hashable, Comparable, Sendable {
+public enum ReadAccess: Int, CaseIterable, Identifiable, Hashable, Comparable, Sendable, Codable {
     case none = 0
     case headers = 1
     case fullMessage = 2
@@ -360,7 +458,7 @@ public enum ReadAccess: Int, CaseIterable, Identifiable, Hashable, Comparable, S
 /// Mailbox mutations — everything that changes the mailbox but stays on the
 /// server. Sending is deliberately not in here: it is the one right that acts
 /// on the outside world.
-public struct WriteAccess: Hashable, Sendable {
+public struct WriteAccess: Hashable, Sendable, Codable {
     public var drafts: Bool
     public var mark: Bool
     public var move: Bool
@@ -402,7 +500,7 @@ public struct WriteAccess: Hashable, Sendable {
 /// Per-mailbox exception to the account-wide groups. `true` means "the group
 /// applies here" — the effective right is always the intersection with the
 /// account, so a folder can never allow more than the account does.
-public struct FolderRule: Hashable, Sendable {
+public struct FolderRule: Hashable, Sendable, Codable {
     public var read: Bool
     public var write: Bool
 
@@ -419,7 +517,7 @@ public struct FolderRule: Hashable, Sendable {
 /// on the file system: read (changes nothing), write (changes the mailbox but
 /// stays on the server), send (leaves the house). Folder exceptions scope the
 /// first two; sending is account-wide because SMTP is not bound to a mailbox.
-public struct PermissionSet: Hashable, Sendable {
+public struct PermissionSet: Hashable, Sendable, Codable {
     public var read: ReadAccess
     public var write: WriteAccess
     public var send: Bool
@@ -516,7 +614,7 @@ extension PermissionSet {
     }
 }
 
-public struct SearchCacheSettings: Hashable {
+public struct SearchCacheSettings: Hashable, Codable {
     public var localCacheEnabled: Bool
     public var cacheMode: CacheMode
     public var indexBodies: Bool
@@ -619,7 +717,71 @@ public struct MailAccount: Identifiable, Hashable {
     }
 }
 
-public struct GeneralSettings: Hashable {
+/// What survives a launch, stated explicitly. The password is not here — it
+/// lives in the keychain. Neither are connection state and pending
+/// approvals: both are facts about right now, so they start fresh, and a
+/// verified account is remembered as verified.
+extension MailAccount: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, email, provider, loginMethod, imapHost, smtpHost
+        case username, knownMailboxes, permissions, searchCache, isVerified
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let username = try container.decode(String.self, forKey: .username)
+        let imapHost = try container.decode(String.self, forKey: .imapHost)
+        let isVerified = try container.decodeIfPresent(Bool.self, forKey: .isVerified) ?? false
+
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            name: try container.decode(String.self, forKey: .name),
+            email: try container.decode(String.self, forKey: .email),
+            provider: try container.decode(Provider.self, forKey: .provider),
+            loginMethod: try container.decode(LoginMethod.self, forKey: .loginMethod),
+            imapHost: imapHost,
+            smtpHost: try container.decode(String.self, forKey: .smtpHost),
+            username: username,
+            connectionState: MailAccount.restoredState(
+                isVerified: isVerified,
+                username: username,
+                imapHost: imapHost
+            ),
+            knownMailboxes: try container.decode([String].self, forKey: .knownMailboxes),
+            permissions: try container.decode(PermissionSet.self, forKey: .permissions),
+            searchCache: try container.decode(SearchCacheSettings.self, forKey: .searchCache)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(email, forKey: .email)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(loginMethod, forKey: .loginMethod)
+        try container.encode(imapHost, forKey: .imapHost)
+        try container.encode(smtpHost, forKey: .smtpHost)
+        try container.encode(username, forKey: .username)
+        try container.encode(knownMailboxes, forKey: .knownMailboxes)
+        try container.encode(permissions, forKey: .permissions)
+        try container.encode(searchCache, forKey: .searchCache)
+        try container.encode(connectionState == .connected, forKey: .isVerified)
+    }
+
+    /// A previously verified account keeps its green dot; anything with
+    /// credentials to try asks for a test; an empty shell says so.
+    private static func restoredState(
+        isVerified: Bool,
+        username: String,
+        imapHost: String
+    ) -> ConnectionState {
+        if isVerified { return .connected }
+        return username.isEmpty && imapHost.isEmpty ? .notConfigured : .needsTest
+    }
+}
+
+public struct GeneralSettings: Hashable, Codable {
     /// The one lifecycle decision the user makes: TorroMail (and with it the
     /// MCP server) starts automatically at login. Everything else is derived.
     public var launchAtLogin: Bool
@@ -924,6 +1086,43 @@ public final class TorroMailModel: ObservableObject {
 }
 
 extension TorroMailModel {
+    /// The real app: your accounts and settings as you left them. Empty on
+    /// first launch — that is what the dashboard's getting-started card is
+    /// for. Demo accounts live in `preview()` and never reach the app.
+    public static func stored() -> TorroMailModel {
+        let state = AppStateStore.load()
+        return TorroMailModel(
+            accounts: state.accounts,
+            selectedSidebarItem: .dashboard,
+            generalSettings: state.settings,
+            // Audit entries need real logging; until then the log is honest
+            // about being empty.
+            audit: [],
+            connectedClients: MCPClientSetup.configuredClientNames(),
+            news: releaseNotes()
+        )
+    }
+
+    /// Local notes from Torro — not account data, so they are not stored.
+    static func releaseNotes() -> [NewsItem] {
+        [
+            NewsItem(
+                id: "news-oauth",
+                title: "Gmail und Microsoft 365 ohne Passwort",
+                detail: "Konten lassen sich jetzt per OAuth anmelden — kein App-Passwort mehr nötig.",
+                symbol: "key.fill",
+                isNew: true
+            ),
+            NewsItem(
+                id: "product-whisper",
+                title: "TorroWhisper",
+                detail: "Diktieren in jedem Programm, lokal auf deinem Mac.",
+                symbol: "waveform"
+            )
+        ]
+    }
+
+    /// Demo data for the contract test and SwiftUI previews only.
     public static func preview() -> TorroMailModel {
         TorroMailModel(
             accounts: [

@@ -321,12 +321,20 @@ private func publishPolicyDocument(for accounts: [MailAccount]) {
     }
 }
 
+private func persistState(accounts: [MailAccount], settings: GeneralSettings) {
+    do {
+        try AppStateStore.save(AppStateStore.State(accounts: accounts, settings: settings))
+    } catch {
+        NSLog("TorroMail: state write failed: %@", error.localizedDescription)
+    }
+}
+
 @main
 struct TorroMailApp: App {
     static let mainWindowID = "main"
 
     @NSApplicationDelegateAdaptor(TorroMailPresence.self) private var presence
-    @StateObject private var model = TorroMailModel.preview()
+    @StateObject private var model = TorroMailModel.stored()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
 
     init() {
@@ -348,9 +356,14 @@ struct TorroMailApp: App {
                     presence.showDockIcon = show
                 }
                 // Every permission switch lands in the policy document the
-                // MCP server enforces — flipped in the UI, live on the wire.
+                // MCP server enforces — flipped in the UI, live on the wire —
+                // and in the state file, so it is still there next launch.
                 .onChange(of: model.accounts, initial: true) { _, accounts in
                     publishPolicyDocument(for: accounts)
+                    persistState(accounts: accounts, settings: model.generalSettings)
+                }
+                .onChange(of: model.generalSettings) { _, settings in
+                    persistState(accounts: model.accounts, settings: settings)
                 }
         }
         .commands {

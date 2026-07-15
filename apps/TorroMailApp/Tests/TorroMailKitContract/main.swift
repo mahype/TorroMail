@@ -273,6 +273,51 @@ require(
     "OAuth accounts carry no IMAP block until OAuth lands"
 )
 
+// What you configure survives a launch. The password does not travel with
+// it, and runtime facts start fresh.
+let storedState = AppStateStore.State(
+    accounts: model.accounts,
+    settings: GeneralSettings(launchAtLogin: false, showMenuBarIcon: true)
+)
+let encodedState = (try? AppStateStore.encode(storedState)) ?? Data()
+let restored = try? AppStateStore.decode(encodedState)
+require(
+    restored?.accounts.map(\.id) == ["work", "personal"],
+    "accounts survive a save and load"
+)
+require(
+    restored?.accounts.first?.permissions == model.accounts[0].permissions,
+    "permissions including folder exceptions survive"
+)
+require(
+    restored?.settings.showMenuBarIcon == true && restored?.settings.launchAtLogin == false,
+    "settings survive too"
+)
+require(
+    restored?.accounts.first?.connectionState == .connected,
+    "a verified account keeps its verified state"
+)
+require(
+    restored?.accounts.first?.pendingActions.isEmpty == true,
+    "pending approvals are runtime facts and do not survive"
+)
+// The stored keys are exactly the configured facts: no password, no
+// runtime state. (`loginMethod` may say "password" — that is a method,
+// not a secret.)
+let storedAccounts = ((try? JSONSerialization.jsonObject(with: encodedState)) as? [String: Any])?["accounts"] as? [[String: Any]]
+require(
+    Set(storedAccounts?.first?.keys ?? [:].keys) == [
+        "id", "name", "email", "provider", "loginMethod", "imapHost",
+        "smtpHost", "username", "knownMailboxes", "permissions",
+        "searchCache", "isVerified"
+    ],
+    "the state file stores the configured facts and nothing else"
+)
+require(
+    AppStateStore.load(from: URL(fileURLWithPath: "/nonexistent/torromail-state.json")).accounts.isEmpty,
+    "a first launch starts empty instead of failing"
+)
+
 // Connecting a client merges into its configuration instead of replacing
 // it — other servers survive.
 let snippet = MCPClientSetup.configSnippet(
