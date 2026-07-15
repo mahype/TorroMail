@@ -354,6 +354,12 @@ fn mail_access_service_keeps_blocked_folders_invisible() {
 
     // Not even headers escape a blocked folder.
     assert!(service.get_message(&account_id, "m2", false).is_err());
+
+    // The folder listing keeps the blocked folder to itself entirely.
+    let mailboxes = service
+        .list_mailboxes(&account_id)
+        .expect("listing is allowed");
+    assert_eq!(mailboxes, vec!["INBOX".to_owned()]);
 }
 
 #[test]

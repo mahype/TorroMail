@@ -2,7 +2,10 @@
 
 pub mod imap_provider;
 
-pub use imap_provider::{ImapProviderConfig, SecretRef};
+pub use imap_provider::{
+    FetchedMessage, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport, SecretRef,
+    TcpImapTransport,
+};
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -18,6 +21,7 @@ pub enum CoreError {
         capability: Capability,
     },
     MessageNotFound(String),
+    ProviderFailure(String),
     PendingActionNotFound(String),
     PendingActionExpired(String),
     PendingActionAlreadyConfirmed(String),
@@ -38,6 +42,7 @@ impl Display for CoreError {
                 write!(f, "{capability:?} is not allowed for account {account_id}")
             }
             Self::MessageNotFound(id) => write!(f, "message not found: {id}"),
+            Self::ProviderFailure(message) => write!(f, "mail provider failure: {message}"),
             Self::PendingActionNotFound(id) => write!(f, "pending action not found: {id}"),
             Self::PendingActionExpired(id) => write!(f, "pending action expired: {id}"),
             Self::PendingActionAlreadyConfirmed(id) => {
@@ -954,6 +959,8 @@ pub trait MailProvider {
         message_id: &str,
         change: MarkChange,
     ) -> CoreResult<()>;
+
+    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1017,6 +1024,16 @@ impl MailProvider for FixtureMailProvider {
             .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))?;
         message.apply(change);
         Ok(())
+    }
+
+    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        let mut mailboxes = Vec::new();
+        for message in &self.messages {
+            if &message.account_id == account_id && !mailboxes.contains(&message.mailbox) {
+                mailboxes.push(message.mailbox.clone());
+            }
+        }
+        Ok(mailboxes)
     }
 }
 
@@ -1099,6 +1116,18 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         let mut header_only = message;
         header_only.body = String::new();
         Ok(header_only)
+    }
+
+    /// Only folders the policy grants anything on exist for assistants —
+    /// even the existence of a blocked folder is nobody's business.
+    pub fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        let policy = self.policy_engine.policy(account_id)?;
+        Ok(self
+            .provider
+            .list_mailboxes(account_id)?
+            .into_iter()
+            .filter(|mailbox| policy.permissions().can_access(mailbox))
+            .collect())
     }
 
     /// Marking is folder-scoped like every mailbox mutation — the message's

@@ -204,6 +204,25 @@ fn a_missing_policy_document_falls_back_to_the_product_default() {
 }
 
 #[test]
+fn mail_list_mailboxes_hides_blocked_folders() {
+    let path = temp_policy_path("list-mailboxes");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":true,"folder_rules":{"Archive":{"read":false,"write":false}}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mail_list_mailboxes","arguments":{"account_id":"work"}}}"#,
+    );
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains("INBOX"));
+    assert!(!response.contains("Archive"));
+}
+
+#[test]
 fn tool_list_serializes_without_secrets_or_local_paths() {
     let manifest = ToolCatalog::default().to_mcp_tools_json();
 

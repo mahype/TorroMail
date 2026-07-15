@@ -263,6 +263,9 @@ impl LineMcpServer {
         if name == ToolName::MailMark.as_str() {
             return handle_mail_mark(arguments, &account_id, engine, id);
         }
+        if name == ToolName::MailListMailboxes.as_str() {
+            return handle_mail_list_mailboxes(&account_id, engine, id);
+        }
 
         json_rpc_error(id, -32000, "tool not implemented yet")
     }
@@ -396,6 +399,16 @@ fn handle_mail_mark(
     json_rpc_text_result(id, &json!({ "marked": marked }))
 }
 
+fn handle_mail_list_mailboxes(account_id: &AccountId, engine: PolicyEngine, id: &str) -> String {
+    let mut sessions = SearchSessionStore::default();
+    let service = fixture_service(account_id, engine, &mut sessions);
+
+    match service.list_mailboxes(account_id) {
+        Ok(mailboxes) => json_rpc_text_result(id, &json!({ "mailboxes": mailboxes })),
+        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+    }
+}
+
 /// One policy-checked service over the fixture mailbox. The engine carries
 /// whatever the policy document granted; real mail data arrives with the
 /// IMAP provider.
@@ -424,16 +437,28 @@ fn json_rpc_text_result(id: &str, payload: &Value) -> String {
 /// The fixture mailbox behind `LineMcpServer::fixture`. Real accounts arrive
 /// with the provider boundary for IMAP configuration.
 fn fixture_provider(account_id: &AccountId) -> FixtureMailProvider {
-    FixtureMailProvider::new([StoredMessage::new(
-        account_id.clone(),
-        "INBOX",
-        "m1",
-        "thread-1",
-        "Quarterly invoice",
-        "billing@example.com",
-        "The quarterly invoice is attached.",
-        "Invoice body",
-    )])
+    FixtureMailProvider::new([
+        StoredMessage::new(
+            account_id.clone(),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Quarterly invoice",
+            "billing@example.com",
+            "The quarterly invoice is attached.",
+            "Invoice body",
+        ),
+        StoredMessage::new(
+            account_id.clone(),
+            "Archive",
+            "m2",
+            "thread-2",
+            "Team notes",
+            "lead@example.com",
+            "Planning notes",
+            "Planning body",
+        ),
+    ])
 }
 
 fn json_rpc_error(id: &str, code: i64, message: &str) -> String {

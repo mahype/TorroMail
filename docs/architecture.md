@@ -75,11 +75,18 @@ is the doorway MCP tools go through. Every read is authorized twice —
 account-wide and again for the mailbox the data actually lives in — so
 search results never contain hits from folders the permission rules block.
 `torromail-mcp` routes JSON-RPC `tools/call` into that service. `mail_search`,
-`mail_get_message`, and `mail_mark` execute against fixture data today. The
-remaining tools answer "not implemented yet" until the real IMAP provider
-lands. `ImapProviderConfig` already defines the configuration boundary for
-that provider; its `SecretRef` points into the keychain and redacts itself in
-any Debug output.
+`mail_get_message`, `mail_mark`, and `mail_list_mailboxes` execute against
+fixture data today; the mailbox listing only ever names folders the policy
+grants something on. The remaining tools answer "not implemented yet".
+
+The real IMAP path exists as a protocol core behind `ImapTransport`:
+`ImapClient` speaks the smallest useful IMAP4rev1 subset (LOGIN, LIST,
+SELECT, UID SEARCH/FETCH/STORE, literal parsing, PEEK-only body reads), and
+`ImapMailProvider` implements the same `MailProvider` trait the fixtures use
+— fully covered by scripted-transport tests without a network. The plaintext
+`TcpImapTransport` serves local development only; real accounts wait for the
+TLS transport and keychain-backed secret resolution behind
+`ImapProviderConfig`, whose `SecretRef` redacts itself in any Debug output.
 
 The permissions set in the app reach the server through an internal policy
 document: the app publishes `~/Library/Application Support/TorroMail/policy.json`
