@@ -214,37 +214,35 @@ impl LineMcpServer {
         }
     }
 
-    pub fn handle_line(&self, line: &str) -> String {
-        let id = extract_json_rpc_id(line).unwrap_or("null");
-
-        if line.contains(r#""method":"initialize""#) || line.contains(r#""method": "initialize""#) {
-            return format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"TorroMail","version":"0.1.0"}}}}}}"#
-            );
-        }
-
-        if line.contains(r#""method":"tools/list""#) || line.contains(r#""method": "tools/list""#) {
-            return format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"result":{}}}"#,
-                self.catalog.to_mcp_tools_json()
-            );
-        }
-
-        if line.contains(r#""method":"tools/call""#) || line.contains(r#""method": "tools/call""#) {
-            return self.handle_tool_call(line, id);
-        }
-
-        format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32601,"message":"method not found"}}}}"#
-        )
-    }
-
-    fn handle_tool_call(&self, line: &str, id: &str) -> String {
-        let request: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(error) => return json_rpc_error(id, -32700, &error.to_string()),
+    /// One JSON-RPC line in, at most one line out. `None` means "say
+    /// nothing": notifications carry no id and must never be answered, and a
+    /// line we cannot parse has no id to answer to either.
+    pub fn handle_line(&self, line: &str) -> Option<String> {
+        let request: Value = serde_json::from_str(line).ok()?;
+        let id = match request.get("id") {
+            Some(id) if !id.is_null() => id.clone(),
+            _ => return None,
         };
 
+        Some(match request["method"].as_str().unwrap_or_default() {
+            "initialize" => json_rpc_result(
+                &id,
+                &json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "TorroMail", "version": "0.1.0"}
+                }),
+            ),
+            "tools/list" => format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"result":{}}}"#,
+                self.catalog.to_mcp_tools_json()
+            ),
+            "tools/call" => self.handle_tool_call(&request, &id),
+            _ => json_rpc_error(&id, -32601, "method not found"),
+        })
+    }
+
+    fn handle_tool_call(&self, request: &Value, id: &Value) -> String {
         let name = request["params"]["name"].as_str().unwrap_or_default();
         if !self.catalog.names_as_str().contains(&name) {
             return json_rpc_error(id, -32601, "tool not found");
@@ -415,7 +413,7 @@ fn handle_mail_search(
     account_id: &AccountId,
     provider: RuntimeProvider,
     engine: PolicyEngine,
-    id: &str,
+    id: &Value,
 ) -> String {
     let query = arguments["query"].as_str().unwrap_or_default();
     let mailbox = arguments["mailbox"].as_str();
@@ -454,7 +452,7 @@ fn handle_mail_get_message(
     account_id: &AccountId,
     provider: RuntimeProvider,
     engine: PolicyEngine,
-    id: &str,
+    id: &Value,
 ) -> String {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
@@ -486,7 +484,7 @@ fn handle_mail_mark(
     account_id: &AccountId,
     provider: RuntimeProvider,
     engine: PolicyEngine,
-    id: &str,
+    id: &Value,
 ) -> String {
     let Some(change) = arguments["mark"].as_str().and_then(MarkChange::parse) else {
         return json_rpc_error(
@@ -522,7 +520,7 @@ fn handle_mail_list_mailboxes(
     account_id: &AccountId,
     provider: RuntimeProvider,
     engine: PolicyEngine,
-    id: &str,
+    id: &Value,
 ) -> String {
     let mut sessions = SearchSessionStore::default();
     let service = MailAccessService::new(provider, engine, &mut sessions);
@@ -533,18 +531,21 @@ fn handle_mail_list_mailboxes(
     }
 }
 
-fn json_rpc_text_result(id: &str, payload: &Value) -> String {
-    json!({
-        "jsonrpc": "2.0",
-        "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
-        "result": {
+/// Tool payloads travel as MCP text content: JSON inside a text block.
+fn json_rpc_text_result(id: &Value, payload: &Value) -> String {
+    json_rpc_result(
+        id,
+        &json!({
             "content": [{
                 "type": "text",
                 "text": payload.to_string()
             }]
-        }
-    })
-    .to_string()
+        }),
+    )
+}
+
+fn json_rpc_result(id: &Value, result: &Value) -> String {
+    json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
 }
 
 /// The fixture mailbox behind `LineMcpServer::fixture`. Real accounts arrive
@@ -574,14 +575,11 @@ fn fixture_provider(account_id: &AccountId) -> FixtureMailProvider {
     ])
 }
 
-fn json_rpc_error(id: &str, code: i64, message: &str) -> String {
+fn json_rpc_error(id: &Value, code: i64, message: &str) -> String {
     json!({
         "jsonrpc": "2.0",
-        "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
-        "error": {
-            "code": code,
-            "message": message
-        }
+        "id": id,
+        "error": {"code": code, "message": message}
     })
     .to_string()
 }
@@ -706,13 +704,4 @@ fn escape_json_string(value: &str) -> String {
             character => vec![character],
         })
         .collect()
-}
-
-fn extract_json_rpc_id(line: &str) -> Option<&str> {
-    let id_key = line.find(r#""id""#)?;
-    let after_key = &line[id_key + 4..];
-    let colon = after_key.find(':')?;
-    let after_colon = after_key[colon + 1..].trim_start();
-    let end = after_colon.find([',', '}']).unwrap_or(after_colon.len());
-    Some(after_colon[..end].trim())
 }

@@ -53,9 +53,11 @@ fn main() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
 
     for line in stdin.lock().lines() {
-        let response = server.handle_line(&line?);
-        writeln!(stdout, "{response}")?;
-        stdout.flush()?;
+        // Notifications get no answer at all — that is the protocol.
+        if let Some(response) = server.handle_line(&line?) {
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+        }
     }
 
     Ok(())
