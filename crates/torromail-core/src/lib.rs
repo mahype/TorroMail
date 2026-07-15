@@ -1,6 +1,6 @@
 //! Portable TorroMail core.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display};
 
@@ -213,6 +213,222 @@ impl AccountRegistry {
     }
 }
 
+/// How deep assistants may read. The levels build on each other: the message
+/// implies its header, attachments imply the message. Mirrors `ReadAccess`
+/// in TorroMailKit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReadAccess {
+    None,
+    Headers,
+    FullMessage,
+    WithAttachments,
+}
+
+/// Mailbox mutations — everything that changes the mailbox but stays on the
+/// server. Sending is deliberately not in here: it is the one right that
+/// acts on the outside world. Mirrors `WriteAccess` in TorroMailKit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct WriteAccess {
+    pub drafts: bool,
+    pub mark: bool,
+    /// `move` in the Swift model; renamed here because of the keyword.
+    pub move_messages: bool,
+    pub trash: bool,
+    /// Escalation of `trash`; meaningless without it, so `sanitized` clears
+    /// it when the trash right falls. Never part of a preset.
+    pub permanent_delete: bool,
+}
+
+impl WriteAccess {
+    pub const NOTHING: Self = Self {
+        drafts: false,
+        mark: false,
+        move_messages: false,
+        trash: false,
+        permanent_delete: false,
+    };
+
+    pub fn is_empty(&self) -> bool {
+        !(self.drafts || self.mark || self.move_messages || self.trash || self.permanent_delete)
+    }
+
+    /// Permanent delete cannot outlive the trash right it escalates.
+    pub fn sanitized(mut self) -> Self {
+        if !self.trash {
+            self.permanent_delete = false;
+        }
+        self
+    }
+}
+
+/// Per-mailbox exception to the account-wide groups. `true` means "the group
+/// applies here" — the effective right is always the intersection with the
+/// account, so a folder can never allow more than the account does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FolderRule {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl FolderRule {
+    /// What every folder starts as: follow the account.
+    pub const STANDARD: Self = Self {
+        read: true,
+        write: true,
+    };
+}
+
+impl Default for FolderRule {
+    fn default() -> Self {
+        Self::STANDARD
+    }
+}
+
+/// The named starting points. A preset is a fact about the current values —
+/// derived, never stored — so a "custom" state can never drift out of sync
+/// with the switches. Mirrors `PermissionPreset` in TorroMailKit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PermissionPreset {
+    /// Read everything, change nothing.
+    ReadOnly,
+    /// The everyday default: read mail and prepare drafts, send nothing.
+    ReadAndDrafts,
+    /// Keep the mailbox in shape: mark, move, delete — no composing.
+    TidyUp,
+    /// Everything except permanent deletion, which is never preset.
+    FullAccess,
+}
+
+impl PermissionPreset {
+    pub const ALL: [Self; 4] = [
+        Self::ReadOnly,
+        Self::ReadAndDrafts,
+        Self::TidyUp,
+        Self::FullAccess,
+    ];
+
+    pub fn read(self) -> ReadAccess {
+        if self == Self::FullAccess {
+            ReadAccess::WithAttachments
+        } else {
+            ReadAccess::FullMessage
+        }
+    }
+
+    pub fn write(self) -> WriteAccess {
+        match self {
+            Self::ReadOnly => WriteAccess::NOTHING,
+            Self::ReadAndDrafts => WriteAccess {
+                drafts: true,
+                ..WriteAccess::NOTHING
+            },
+            Self::TidyUp => WriteAccess {
+                mark: true,
+                move_messages: true,
+                trash: true,
+                ..WriteAccess::NOTHING
+            },
+            Self::FullAccess => WriteAccess {
+                drafts: true,
+                mark: true,
+                move_messages: true,
+                trash: true,
+                ..WriteAccess::NOTHING
+            },
+        }
+    }
+
+    pub fn send(self) -> bool {
+        self == Self::FullAccess
+    }
+
+    pub fn permission_set(self) -> PermissionSet {
+        PermissionSet {
+            read: self.read(),
+            write: self.write(),
+            send: self.send(),
+            per_folder: false,
+            folder_rules: BTreeMap::new(),
+        }
+    }
+}
+
+/// What connected assistants may do with an account, in three groups modelled
+/// on the file system: read (changes nothing), write (changes the mailbox but
+/// stays on the server), send (leaves the house). Folder exceptions scope the
+/// first two; sending is account-wide because SMTP is not bound to a mailbox.
+/// Mirrors `PermissionSet` in TorroMailKit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionSet {
+    pub read: ReadAccess,
+    pub write: WriteAccess,
+    pub send: bool,
+    /// Whether folder exceptions apply. Off means the groups rule every
+    /// folder; stored exceptions are kept, just inert.
+    pub per_folder: bool,
+    /// Exceptions by mailbox name. No entry = standard (follow the account).
+    pub folder_rules: BTreeMap<String, FolderRule>,
+}
+
+impl Default for PermissionSet {
+    /// The everyday default: `PermissionPreset::ReadAndDrafts`.
+    fn default() -> Self {
+        PermissionPreset::ReadAndDrafts.permission_set()
+    }
+}
+
+impl PermissionSet {
+    pub fn rule_for(&self, mailbox: &str) -> FolderRule {
+        if !self.per_folder {
+            return FolderRule::STANDARD;
+        }
+        self.folder_rules
+            .get(mailbox)
+            .copied()
+            .unwrap_or(FolderRule::STANDARD)
+    }
+
+    pub fn read_access_in(&self, mailbox: &str) -> ReadAccess {
+        if self.rule_for(mailbox).read {
+            self.read
+        } else {
+            ReadAccess::None
+        }
+    }
+
+    pub fn write_access_in(&self, mailbox: &str) -> WriteAccess {
+        if self.rule_for(mailbox).write {
+            self.write.sanitized()
+        } else {
+            WriteAccess::NOTHING
+        }
+    }
+
+    /// A mailbox with no effective rights is invisible to assistants.
+    pub fn can_access(&self, mailbox: &str) -> bool {
+        self.read_access_in(mailbox) != ReadAccess::None
+            || !self.write_access_in(mailbox).is_empty()
+    }
+
+    /// The preset these values match, if any. Folder exceptions do not
+    /// count: presets decide the groups, exceptions only scope them.
+    pub fn matching_preset(&self) -> Option<PermissionPreset> {
+        PermissionPreset::ALL.into_iter().find(|preset| {
+            preset.read() == self.read && preset.write() == self.write && preset.send() == self.send
+        })
+    }
+
+    /// Applies the preset's groups. Folder exceptions survive — switching
+    /// the profile is not meant to throw away per-folder decisions.
+    pub fn apply(&mut self, preset: PermissionPreset) {
+        self.read = preset.read();
+        self.write = preset.write();
+        self.send = preset.send();
+    }
+}
+
+/// The questions tools ask of a policy. Every variant is backed by the
+/// permission groups; cache and index decisions live in `CachePolicy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
     ReadHeaders,
@@ -225,27 +441,59 @@ pub enum Capability {
     Move,
     DeleteSoft,
     DeletePermanent,
-    CacheMetadata,
-    IndexBody,
-    WatchIdle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     account_id: AccountId,
-    capabilities: BTreeSet<Capability>,
+    permissions: PermissionSet,
 }
 
 impl Policy {
-    pub fn new(account_id: AccountId, capabilities: impl IntoIterator<Item = Capability>) -> Self {
+    pub fn new(account_id: AccountId, permissions: PermissionSet) -> Self {
         Self {
             account_id,
-            capabilities: capabilities.into_iter().collect(),
+            permissions,
         }
     }
 
+    pub fn permissions(&self) -> &PermissionSet {
+        &self.permissions
+    }
+
+    /// Account-wide answer, before any folder exception.
     pub fn allows(&self, capability: Capability) -> bool {
-        self.capabilities.contains(&capability)
+        granted(
+            capability,
+            self.permissions.read,
+            self.permissions.write.sanitized(),
+            self.permissions.send,
+        )
+    }
+
+    /// Folder-scoped answer: the account groups cut down by the mailbox rule.
+    pub fn allows_in(&self, mailbox: &str, capability: Capability) -> bool {
+        granted(
+            capability,
+            self.permissions.read_access_in(mailbox),
+            self.permissions.write_access_in(mailbox),
+            self.permissions.send,
+        )
+    }
+}
+
+fn granted(capability: Capability, read: ReadAccess, write: WriteAccess, send: bool) -> bool {
+    match capability {
+        Capability::Search => read > ReadAccess::None,
+        Capability::ReadHeaders => read >= ReadAccess::Headers,
+        Capability::ReadBody => read >= ReadAccess::FullMessage,
+        Capability::DownloadAttachments => read >= ReadAccess::WithAttachments,
+        Capability::Draft => write.drafts,
+        Capability::Send => send,
+        Capability::Mark => write.mark,
+        Capability::Move => write.move_messages,
+        Capability::DeleteSoft => write.trash,
+        Capability::DeletePermanent => write.permanent_delete,
     }
 }
 
@@ -265,12 +513,46 @@ impl PolicyEngine {
     }
 
     pub fn authorize(&self, account_id: &AccountId, capability: Capability) -> CoreResult<()> {
-        let policy = self
-            .policies
-            .get(account_id)
-            .ok_or_else(|| CoreError::AccountNotFound(account_id.clone()))?;
+        let policy = self.policy(account_id)?;
+        Self::verdict(policy.allows(capability), account_id, capability)
+    }
 
-        if policy.allows(capability) {
+    /// Folder-scoped authorization for operations that happen inside one
+    /// mailbox: reading, marking, deleting.
+    pub fn authorize_in(
+        &self,
+        account_id: &AccountId,
+        mailbox: &str,
+        capability: Capability,
+    ) -> CoreResult<()> {
+        let policy = self.policy(account_id)?;
+        Self::verdict(
+            policy.allows_in(mailbox, capability),
+            account_id,
+            capability,
+        )
+    }
+
+    /// Moving needs write on both ends: the message leaves one mailbox and
+    /// lands in another.
+    pub fn authorize_move(
+        &self,
+        account_id: &AccountId,
+        source_mailbox: &str,
+        target_mailbox: &str,
+    ) -> CoreResult<()> {
+        self.authorize_in(account_id, source_mailbox, Capability::Move)?;
+        self.authorize_in(account_id, target_mailbox, Capability::Move)
+    }
+
+    fn policy(&self, account_id: &AccountId) -> CoreResult<&Policy> {
+        self.policies
+            .get(account_id)
+            .ok_or_else(|| CoreError::AccountNotFound(account_id.clone()))
+    }
+
+    fn verdict(allowed: bool, account_id: &AccountId, capability: Capability) -> CoreResult<()> {
+        if allowed {
             Ok(())
         } else {
             Err(CoreError::CapabilityDenied {

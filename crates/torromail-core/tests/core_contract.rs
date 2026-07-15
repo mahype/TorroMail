@@ -1,6 +1,7 @@
 use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
-    PendingActionRequest, PendingActionStore, Policy, PolicyEngine, SearchHit, SearchSessionStore,
+    FolderRule, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
+    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, WriteAccess,
 };
 
 #[test]
@@ -35,19 +36,144 @@ fn default_cache_policy_is_metadata_only() {
 }
 
 #[test]
-fn policy_engine_denies_missing_capabilities() {
-    let account_id = AccountId::new("personal");
-    let policy = Policy::new(
-        account_id.clone(),
-        [Capability::ReadHeaders, Capability::Search],
+fn new_accounts_start_at_read_and_drafts() {
+    let permissions = PermissionSet::default();
+
+    assert_eq!(
+        permissions.matching_preset(),
+        Some(PermissionPreset::ReadAndDrafts)
     );
-    let engine = PolicyEngine::new([policy]);
+    assert!(!permissions.send);
+}
+
+#[test]
+fn presets_are_derived_and_drift_to_custom() {
+    let mut permissions = PermissionSet::default();
+    permissions.apply(PermissionPreset::FullAccess);
+    assert_eq!(
+        permissions.matching_preset(),
+        Some(PermissionPreset::FullAccess)
+    );
+
+    permissions.write.mark = false;
+    assert_eq!(permissions.matching_preset(), None);
+}
+
+#[test]
+fn no_preset_enables_permanent_deletion() {
+    for preset in PermissionPreset::ALL {
+        assert!(!preset.write().permanent_delete, "{preset:?}");
+    }
+}
+
+#[test]
+fn permanent_delete_falls_with_the_trash_right() {
+    let write = WriteAccess {
+        trash: false,
+        permanent_delete: true,
+        ..WriteAccess::NOTHING
+    };
+
+    assert!(!write.sanitized().permanent_delete);
+}
+
+#[test]
+fn folder_exceptions_scope_the_groups_but_never_exceed_them() {
+    let mut permissions = PermissionSet::default();
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Private".to_owned(),
+        FolderRule {
+            read: false,
+            write: false,
+        },
+    );
+    permissions.folder_rules.insert(
+        "Archive".to_owned(),
+        FolderRule {
+            read: true,
+            write: false,
+        },
+    );
+
+    assert!(!permissions.can_access("Private"));
+    assert_eq!(permissions.read_access_in("INBOX"), ReadAccess::FullMessage);
+    assert!(permissions.write_access_in("INBOX").drafts);
+    assert_eq!(
+        permissions.read_access_in("Archive"),
+        ReadAccess::FullMessage
+    );
+    assert!(permissions.write_access_in("Archive").is_empty());
+
+    // Switching per-folder off keeps the exceptions stored, just inert.
+    permissions.per_folder = false;
+    assert!(permissions.can_access("Private"));
+    assert!(permissions.folder_rules.contains_key("Private"));
+}
+
+#[test]
+fn policy_engine_authorizes_from_the_permission_groups() {
+    let account_id = AccountId::new("personal");
+    let mut permissions = PermissionSet::default();
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Private".to_owned(),
+        FolderRule {
+            read: false,
+            write: false,
+        },
+    );
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), permissions)]);
 
     assert!(engine.authorize(&account_id, Capability::Search).is_ok());
+    assert!(engine.authorize(&account_id, Capability::ReadBody).is_ok());
+    assert!(
+        engine
+            .authorize(&account_id, Capability::DownloadAttachments)
+            .is_err()
+    );
+    assert!(engine.authorize(&account_id, Capability::Draft).is_ok());
     assert!(engine.authorize(&account_id, Capability::Send).is_err());
     assert!(
         engine
             .authorize(&account_id, Capability::DeletePermanent)
+            .is_err()
+    );
+    assert!(
+        engine
+            .authorize_in(&account_id, "INBOX", Capability::ReadHeaders)
+            .is_ok()
+    );
+    assert!(
+        engine
+            .authorize_in(&account_id, "Private", Capability::ReadHeaders)
+            .is_err()
+    );
+}
+
+#[test]
+fn moving_needs_write_on_both_ends() {
+    let account_id = AccountId::new("work");
+    let mut permissions = PermissionSet::default();
+    permissions.apply(PermissionPreset::TidyUp);
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Archive".to_owned(),
+        FolderRule {
+            read: true,
+            write: false,
+        },
+    );
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), permissions)]);
+
+    assert!(
+        engine
+            .authorize_move(&account_id, "INBOX", "Processed")
+            .is_ok()
+    );
+    assert!(
+        engine
+            .authorize_move(&account_id, "INBOX", "Archive")
             .is_err()
     );
 }

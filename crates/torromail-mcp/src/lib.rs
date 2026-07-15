@@ -18,6 +18,7 @@ pub enum ToolName {
     MailGetMessage,
     MailGetThread,
     MailListMailboxes,
+    MailMark,
     MailCreateDraft,
     MailPrepareSend,
     MailPrepareMove,
@@ -36,6 +37,7 @@ impl ToolName {
             Self::MailGetMessage => "mail_get_message",
             Self::MailGetThread => "mail_get_thread",
             Self::MailListMailboxes => "mail_list_mailboxes",
+            Self::MailMark => "mail_mark",
             Self::MailCreateDraft => "mail_create_draft",
             Self::MailPrepareSend => "mail_prepare_send",
             Self::MailPrepareMove => "mail_prepare_move",
@@ -51,6 +53,9 @@ impl ToolName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessLevel {
     Read,
+    /// Writes without a GUI confirmation loop — low-risk mailbox mutations
+    /// such as marking, still gated by the account's permissions.
+    DirectWrite,
     PrepareAction,
     ConfirmPreparedAction,
     ReadOnlyAdmin,
@@ -97,6 +102,9 @@ impl ToolDescriptor {
             }
             ToolName::MailListMailboxes => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"}},"required":["account_id"]}"#
+            }
+            ToolName::MailMark => {
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"}},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","mailbox","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"}},"required":["account_id","to","subject","body"]}"#
@@ -216,6 +224,10 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
             ToolName::MailListMailboxes,
             "List mailboxes visible to the configured account.",
         ),
+        direct_write(
+            ToolName::MailMark,
+            "Mark messages read or flagged where the account policy allows marking.",
+        ),
         prepare(
             ToolName::MailCreateDraft,
             "Create a draft when the account policy allows drafts.",
@@ -258,6 +270,15 @@ fn read(name: ToolName, description: &'static str) -> ToolDescriptor {
         name,
         description,
         access_level: AccessLevel::Read,
+        requires_gui_confirmation: false,
+    }
+}
+
+fn direct_write(name: ToolName, description: &'static str) -> ToolDescriptor {
+    ToolDescriptor {
+        name,
+        description,
+        access_level: AccessLevel::DirectWrite,
         requires_gui_confirmation: false,
     }
 }

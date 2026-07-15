@@ -15,6 +15,7 @@ fn planned_mail_tools_are_exposed() {
     assert!(names.contains(&ToolName::MailGetMessage));
     assert!(names.contains(&ToolName::MailGetThread));
     assert!(names.contains(&ToolName::MailListMailboxes));
+    assert!(names.contains(&ToolName::MailMark));
     assert!(names.contains(&ToolName::MailCreateDraft));
     assert!(names.contains(&ToolName::MailPrepareSend));
     assert!(names.contains(&ToolName::MailPrepareMove));
@@ -37,6 +38,18 @@ fn admin_tools_are_read_only() {
         };
         assert_eq!(tool.access_level(), AccessLevel::ReadOnlyAdmin);
     }
+}
+
+#[test]
+fn mail_mark_is_a_direct_write_without_confirmation() {
+    let catalog = ToolCatalog::default();
+    let tool = match catalog.find(ToolName::MailMark) {
+        Some(tool) => tool,
+        None => panic!("mail_mark exists"),
+    };
+
+    assert_eq!(tool.access_level(), AccessLevel::DirectWrite);
+    assert!(!tool.requires_gui_confirmation());
 }
 
 #[test]
