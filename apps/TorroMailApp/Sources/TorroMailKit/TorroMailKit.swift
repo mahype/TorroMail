@@ -2,9 +2,39 @@ import Foundation
 import SwiftUI
 
 public enum TorroMailSidebarSelection: Hashable {
+    case dashboard
     case accounts
     case settings
     case log
+}
+
+/// What the app wants to say about itself in one word. The dashboard leads
+/// with this and stays quiet when there is nothing to decide.
+public enum SystemHealth: Hashable {
+    /// Nothing set up yet — the dashboard explains the app instead.
+    case notConfigured
+    /// Something needs the user: broken credentials, or a stopped service.
+    case needsAttention
+    /// Everything running, nothing waiting.
+    case ready
+}
+
+/// A note from Torro — a new release, another product. Local data for now;
+/// nothing here reaches the network.
+public struct NewsItem: Identifiable, Hashable {
+    public var id: String
+    public var title: String
+    public var detail: String
+    public var symbol: String
+    public var isNew: Bool
+
+    public init(id: String, title: String, detail: String, symbol: String, isNew: Bool = false) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.symbol = symbol
+        self.isNew = isNew
+    }
 }
 
 public enum Provider: String, CaseIterable, Identifiable, Hashable {
@@ -191,13 +221,45 @@ public struct GeneralSettings: Hashable {
     /// MCP server) starts automatically at login. Everything else is derived.
     public var launchAtLogin: Bool
 
+    /// Whether TorroMail keeps a Dock tile while it has no window open. Off by
+    /// default: the app's job is done in the background, so it stays out of the
+    /// Dock until the user opens the window.
+    public var showDockIcon: Bool
+
+    /// Whether TorroMail sits in the menu bar. Off by default for the same
+    /// reason — presence is something the user opts into.
+    public var showMenuBarIcon: Bool
+
     /// Internal: which executable the supervisor launches. Never shown in the
     /// UI — diagnostics belong in the log.
     public var mcpExecutable: String
 
-    public init(launchAtLogin: Bool = true, mcpExecutable: String = "torromail-mcp") {
+    public init(
+        launchAtLogin: Bool = true,
+        showDockIcon: Bool = false,
+        showMenuBarIcon: Bool = false,
+        mcpExecutable: String = "torromail-mcp"
+    ) {
         self.launchAtLogin = launchAtLogin
+        self.showDockIcon = showDockIcon
+        self.showMenuBarIcon = showMenuBarIcon
         self.mcpExecutable = mcpExecutable
+    }
+}
+
+/// How much of TorroMail the system sees. Maps onto AppKit's activation
+/// policy, but stated in the terms the setting is about.
+public enum AppPresence: Hashable {
+    /// Dock tile and app menu — a normal app.
+    case foreground
+    /// Neither. TorroMail keeps serving assistants, invisibly.
+    case background
+
+    /// With the Dock icon switched off, an open window still pulls TorroMail
+    /// into the Dock — a window the user cannot switch to would be worse than
+    /// the tile they wanted gone.
+    public static func resolve(showDockIcon: Bool, hasOpenWindow: Bool) -> AppPresence {
+        showDockIcon || hasOpenWindow ? .foreground : .background
     }
 }
 
@@ -361,6 +423,9 @@ public final class TorroMailModel: ObservableObject {
     @Published public var showAccountWizard: Bool
     @Published public var generalSettings: GeneralSettings
     @Published public var audit: [AuditEntry]
+    /// Assistants currently talking to the MCP server.
+    @Published public var connectedClients: [String]
+    @Published public var news: [NewsItem]
 
     public init(
         accounts: [MailAccount],
@@ -368,7 +433,9 @@ public final class TorroMailModel: ObservableObject {
         accountPath: [String] = [],
         showAccountWizard: Bool = false,
         generalSettings: GeneralSettings,
-        audit: [AuditEntry]
+        audit: [AuditEntry],
+        connectedClients: [String] = [],
+        news: [NewsItem] = []
     ) {
         self.accounts = accounts
         self.selectedSidebarItem = selectedSidebarItem
@@ -376,6 +443,26 @@ public final class TorroMailModel: ObservableObject {
         self.showAccountWizard = showAccountWizard
         self.generalSettings = generalSettings
         self.audit = audit
+        self.connectedClients = connectedClients
+        self.news = news
+    }
+
+    /// The headline state. Accounts that were never tested do not count as a
+    /// problem — only credentials the server actually rejected do.
+    public var health: SystemHealth {
+        if accounts.isEmpty { return .notConfigured }
+        if accounts.contains(where: { $0.connectionState.isBroken }) { return .needsAttention }
+        return .ready
+    }
+
+    /// Every approval waiting, newest account first, flattened for the
+    /// dashboard.
+    public var pendingActions: [PendingAction] {
+        accounts.flatMap(\.pendingActions)
+    }
+
+    public func accountName(id: String) -> String? {
+        accounts.first { $0.id == id }?.name
     }
 
     /// Total approvals waiting across all accounts — the badge on the
@@ -462,7 +549,7 @@ extension TorroMailModel {
                     connectionState: .needsTest
                 )
             ],
-            selectedSidebarItem: .accounts,
+            selectedSidebarItem: .dashboard,
             generalSettings: GeneralSettings(),
             audit: [
                 AuditEntry(
@@ -478,6 +565,22 @@ extension TorroMailModel {
                     account: "Work",
                     event: "mail_prepare_send",
                     result: "Pending"
+                )
+            ],
+            connectedClients: ["Claude Desktop"],
+            news: [
+                NewsItem(
+                    id: "news-oauth",
+                    title: "Gmail und Microsoft 365 ohne Passwort",
+                    detail: "Konten lassen sich jetzt per OAuth anmelden — kein App-Passwort mehr nötig.",
+                    symbol: "key.fill",
+                    isNew: true
+                ),
+                NewsItem(
+                    id: "product-whisper",
+                    title: "TorroWhisper",
+                    detail: "Diktieren in jedem Programm, lokal auf deinem Mac.",
+                    symbol: "waveform"
                 )
             ]
         )

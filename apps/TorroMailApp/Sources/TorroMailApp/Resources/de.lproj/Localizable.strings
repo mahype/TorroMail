@@ -1,10 +1,37 @@
 /* Sidebar */
+"Overview" = "Übersicht";
 "Mail Accounts" = "Mail-Konten";
 "Settings" = "Einstellungen";
 "Log" = "Protokoll";
 "Add Account" = "Konto hinzufügen";
 "New Account" = "Neues Konto";
 "No account selected" = "Kein Konto ausgewählt";
+
+/* Dashboard */
+"Your mailboxes for AI assistants — nothing leaves without your say-so." = "Deine Postfächer für KI-Assistenten — nichts geht raus ohne deine Freigabe.";
+"Status" = "Status";
+"Ready for assistants" = "Bereit für Assistenten";
+"Not reachable for assistants" = "Für Assistenten nicht erreichbar";
+"TorroMail is running in the background." = "TorroMail läuft im Hintergrund.";
+"Start TorroMail in Settings so assistants can reach your mail." = "Starte TorroMail in den Einstellungen, damit Assistenten deine E-Mails erreichen.";
+"No assistant connected" = "Kein Assistent verbunden";
+"%@ connected" = "%@ verbunden";
+"Connect one in Settings to start using your mail." = "Verbinde einen in den Einstellungen, um loszulegen.";
+"Every access is logged." = "Jeder Zugriff wird protokolliert.";
+"Waiting for you" = "Wartet auf dich";
+"An assistant prepared these. Nothing happens until you approve." = "Ein Assistent hat das vorbereitet. Es passiert nichts, bis du freigibst.";
+"Send to %@ · from %@" = "Senden an %@ · aus %@";
+"Recent Activity" = "Letzte Aktivität";
+"Open Log" = "Protokoll öffnen";
+"Getting started" = "Erste Schritte";
+"Add a mail account" = "Mail-Konto hinzufügen";
+"TorroMail talks to your mail server. It never becomes your mail client." = "TorroMail spricht mit deinem Mailserver. Es wird nie dein Mail-Programm.";
+"Decide what is allowed" = "Festlegen, was erlaubt ist";
+"Per account you pick what assistants may read and do." = "Pro Konto bestimmst du, was Assistenten lesen und tun dürfen.";
+"Connect an assistant" = "Assistenten verbinden";
+"Sending, moving and deleting always come back to you for approval." = "Senden, Verschieben und Löschen kommen immer zu dir zur Freigabe zurück.";
+"News from Torro" = "Neues von Torro";
+"New" = "Neu";
 
 /* Connection */
 "Connection" = "Verbindung";
@@ -64,9 +91,19 @@
 "Remove “%@”?" = "„%@“ entfernen?";
 "This only removes the configuration from TorroMail. Your mail stays on the server." = "Entfernt nur die Konfiguration aus TorroMail. Deine E-Mails bleiben auf dem Server.";
 
+/* Menu bar */
+"TorroMail" = "TorroMail";
+"Open TorroMail" = "TorroMail öffnen";
+"%d waiting for you" = "%d wartet auf dich";
+"Quit TorroMail" = "TorroMail beenden";
+
 /* Settings */
 "Start at login" = "Beim Anmelden starten";
 "TorroMail and its MCP server start automatically in the background." = "TorroMail und der MCP-Server starten automatisch im Hintergrund.";
+"Where TorroMail shows up" = "Wo TorroMail auftaucht";
+"Show in menu bar" = "In der Menüleiste anzeigen";
+"Keep in Dock" = "Im Dock behalten";
+"TorroMail serves assistants either way. With both off it only shows up while this window is open — open TorroMail again to bring it back." = "TorroMail bedient Assistenten so oder so. Sind beide aus, ist es nur sichtbar, solange dieses Fenster offen ist — öffne TorroMail einfach erneut, um es zurückzuholen.";
 "MCP Server" = "MCP-Server";
 "Running" = "Läuft";
 "Starting" = "Startet";
