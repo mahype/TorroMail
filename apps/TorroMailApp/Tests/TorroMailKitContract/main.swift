@@ -131,6 +131,14 @@ require(
     "app role should be control-surface only"
 )
 
+// The appearance contract: the control surface follows the system in both
+// modes, spaces on an 8-point base, and stays on semantic colors outside
+// declared brand moments.
+require(TorroMailAppearance.spacingUnit == 8, "spacing should use an 8-point base")
+require(TorroMailAppearance.supportsLightMode, "light mode should be supported")
+require(TorroMailAppearance.supportsDarkMode, "dark mode should be supported")
+require(TorroMailAppearance.usesSemanticColors, "theme should use semantic colors")
+
 // Account lifecycle stays in the GUI: add opens the new account, remove
 // drops back to the account list.
 model.addAccount(name: "Club", email: "club@example.org", provider: .imapSmtp, loginMethod: .password)

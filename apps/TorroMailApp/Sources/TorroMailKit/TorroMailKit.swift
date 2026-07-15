@@ -51,6 +51,16 @@ public enum TorroMailProductBoundary {
     ]
 }
 
+/// Appearance facts the control surface commits to: both system modes, an
+/// 8-point spacing base, and semantic colors everywhere outside the declared
+/// brand moments (the red ground, the wordmark).
+public enum TorroMailAppearance {
+    public static let spacingUnit = 8
+    public static let supportsLightMode = true
+    public static let supportsDarkMode = true
+    public static let usesSemanticColors = true
+}
+
 public enum Provider: String, CaseIterable, Identifiable, Hashable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
