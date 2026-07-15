@@ -671,12 +671,14 @@ git commit -m "feat: add IMAP provider boundary"
 
 ### Task 5: SwiftUI Control Surface Guardrails
 
+> Completed 2026-07-15 — the redesigned app already spoke control-surface language, so only the boundary type and contract checks were added.
+
 **Files:**
 - Modify: `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`
 - Modify: `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`
 - Test: `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`
 
-- [ ] **Step 1: Write failing Swift contract checks**
+- [x] **Step 1: Write failing Swift contract checks**
 
 Add these checks to `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`:
 
@@ -697,13 +699,13 @@ require(
 )
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract`
 
 Expected: FAIL because `TorroMailProductBoundary` does not exist.
 
-- [ ] **Step 3: Add product-boundary model**
+- [x] **Step 3: Add product-boundary model**
 
 Add this type to `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`:
 
@@ -720,7 +722,7 @@ public enum TorroMailProductBoundary {
 }
 ```
 
-- [ ] **Step 4: Update visible app copy**
+- [x] **Step 4: Update visible app copy**
 
 In `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`, replace mail-client-style titles with control-surface copy:
 
@@ -747,7 +749,7 @@ Text("Threads")
 Text("Compose")
 ```
 
-- [ ] **Step 5: Run Swift contract and build**
+- [x] **Step 5: Run Swift contract and build**
 
 Run:
 
@@ -758,7 +760,7 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift apps/TorroMailApp/Tests/TorroMailKitContract/main.swift
@@ -769,12 +771,14 @@ git commit -m "feat: guard SwiftUI control surface"
 
 ### Task 6: Light And Dark Control-Surface Theme
 
+> Completed 2026-07-15 — the app already renders both modes through semantic styles; the appearance facts are now pinned by contract.
+
 **Files:**
 - Modify: `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`
 - Modify: `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`
 - Test: `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`
 
-- [ ] **Step 1: Write failing theme contract checks**
+- [x] **Step 1: Write failing theme contract checks**
 
 Add this to `apps/TorroMailApp/Tests/TorroMailKitContract/main.swift`:
 
@@ -785,13 +789,13 @@ require(TorroMailAppearance.supportsDarkMode, "dark mode should be supported")
 require(TorroMailAppearance.usesSemanticColors, "theme should use semantic colors")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract`
 
 Expected: FAIL because `TorroMailAppearance` does not exist.
 
-- [ ] **Step 3: Add appearance contract**
+- [x] **Step 3: Add appearance contract**
 
 Add this to `apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift`:
 
@@ -804,7 +808,7 @@ public enum TorroMailAppearance {
 }
 ```
 
-- [ ] **Step 4: Apply semantic colors in SwiftUI**
+- [x] **Step 4: Apply semantic colors in SwiftUI**
 
 In `apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift`, prefer semantic styles:
 
@@ -826,7 +830,7 @@ private enum Layout {
 }
 ```
 
-- [ ] **Step 5: Run Swift verification**
+- [x] **Step 5: Run Swift verification**
 
 Run:
 
@@ -837,7 +841,7 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/TorroMailApp/Sources/TorroMailKit/TorroMailKit.swift apps/TorroMailApp/Sources/TorroMailApp/TorroMailApp.swift apps/TorroMailApp/Tests/TorroMailKitContract/main.swift
@@ -848,12 +852,14 @@ git commit -m "feat: add control surface appearance contract"
 
 ### Task 7: Documentation And Final Verification
 
+> Completed 2026-07-15 — all statements verified present; full cargo and Swift verification green.
+
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/architecture.md`
 - Modify: `AGENTS.md`
 
-- [ ] **Step 1: Update docs with implemented behavior**
+- [x] **Step 1: Update docs with implemented behavior**
 
 Ensure these exact statements remain true in the docs:
 
@@ -863,7 +869,7 @@ The native macOS app is a configuration and control surface.
 MCP clients can search and read within policy, prepare risky actions, and inspect read-only admin state.
 ```
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run:
 
@@ -876,7 +882,7 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 
 Expected: all commands complete successfully.
 
-- [ ] **Step 3: Search for product-boundary regressions**
+- [x] **Step 3: Search for product-boundary regressions**
 
 Run:
 
@@ -886,7 +892,7 @@ rg -n "Inbox UI|Message reader|Thread browser|Manual triage workflow|not a gener
 
 Expected: matches either define the boundary, enforce it in tests/contracts, or mark historical docs as superseded.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md docs/architecture.md AGENTS.md
