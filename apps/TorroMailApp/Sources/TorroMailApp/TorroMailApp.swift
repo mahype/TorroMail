@@ -236,7 +236,14 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
     /// action over for the reopen path.
     var openMainWindow: (() -> Void)?
 
-    private var openWindows = 0
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // The window's own lifecycle is the signal: SwiftUI's `onDisappear`
+        // does not fire for a WindowGroup window that the user closes.
+        let center = NotificationCenter.default
+        for name in [NSWindow.willCloseNotification, NSWindow.didBecomeKeyNotification] {
+            center.addObserver(self, selector: #selector(windowsChanged), name: name, object: nil)
+        }
+    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
         false
@@ -256,18 +263,22 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func windowDidOpen() {
-        openWindows += 1
-        apply()
+    @objc private func windowsChanged() {
+        // A closing window is still listed while `willClose` is in flight, so
+        // let AppKit settle and then look at what is actually left.
+        DispatchQueue.main.async { [weak self] in
+            self?.apply()
+        }
     }
 
-    func windowDidClose() {
-        openWindows = max(0, openWindows - 1)
-        apply()
+    /// Panels, the status item and other AppKit scaffolding all show up in
+    /// `NSApp.windows`; only a window the user can bring to the front counts.
+    private var hasOpenWindow: Bool {
+        NSApp.windows.contains { $0.isVisible && $0.canBecomeMain }
     }
 
     private func apply() {
-        let presence = AppPresence.resolve(showDockIcon: showDockIcon, hasOpenWindow: openWindows > 0)
+        let presence = AppPresence.resolve(showDockIcon: showDockIcon, hasOpenWindow: hasOpenWindow)
         let policy: NSApplication.ActivationPolicy = presence == .foreground ? .regular : .accessory
         guard NSApp.activationPolicy() != policy else { return }
         NSApp.setActivationPolicy(policy)
@@ -302,8 +313,6 @@ struct TorroMailApp: App {
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                 }
-                .onAppear { presence.windowDidOpen() }
-                .onDisappear { presence.windowDidClose() }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show
                 }
@@ -471,26 +480,29 @@ private struct DashboardView: View {
 /// one line what this app actually does.
 private struct BrandHero: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TorroWordmark(capHeight: 17)
+        VStack(alignment: .leading, spacing: 6) {
+            TorroWordmark(capHeight: 15)
             Text(L("Your mailboxes for AI assistants — nothing leaves without your say-so."))
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.92))
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(22)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 15)
         .background {
             let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-            ZStack(alignment: .trailing) {
-                LinearGradient(
-                    colors: [.torroRed, .torroRedDeep],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                // The signet as a watermark, the use torro-design lists for
-                // it. It runs off the right edge on purpose — cropped by the
-                // card rather than floating as a lone shape.
+            LinearGradient(
+                colors: [.torroRed, .torroRedDeep],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            // The signet as a watermark, the use torro-design lists for it. It
+            // runs off the right edge on purpose — cropped by the card rather
+            // than floating as a lone shape. It has to be an overlay: as a
+            // sibling in a stack its fixed 150pt would set the height, and the
+            // red would spill past the hero onto whatever sits below.
+            .overlay(alignment: .trailing) {
                 TorroSignet()
                     .fill(.white.opacity(0.09))
                     .frame(width: 260, height: 150)
