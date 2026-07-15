@@ -13,6 +13,7 @@ pub enum CoreError {
         account_id: AccountId,
         capability: Capability,
     },
+    MessageNotFound(String),
     PendingActionNotFound(String),
     PendingActionExpired(String),
     PendingActionAlreadyConfirmed(String),
@@ -32,6 +33,7 @@ impl Display for CoreError {
             } => {
                 write!(f, "{capability:?} is not allowed for account {account_id}")
             }
+            Self::MessageNotFound(id) => write!(f, "message not found: {id}"),
             Self::PendingActionNotFound(id) => write!(f, "pending action not found: {id}"),
             Self::PendingActionExpired(id) => write!(f, "pending action expired: {id}"),
             Self::PendingActionAlreadyConfirmed(id) => {
@@ -668,6 +670,9 @@ impl PendingActionStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
     message_id: String,
+    /// Where the message lives — folder rules decide per mailbox, so every
+    /// hit has to say which one it came from.
+    mailbox: String,
     subject: String,
     sender: String,
     snippet: String,
@@ -676,12 +681,14 @@ pub struct SearchHit {
 impl SearchHit {
     pub fn new(
         message_id: impl Into<String>,
+        mailbox: impl Into<String>,
         subject: impl Into<String>,
         sender: impl Into<String>,
         snippet: impl Into<String>,
     ) -> Self {
         Self {
             message_id: message_id.into(),
+            mailbox: mailbox.into(),
             subject: subject.into(),
             sender: sender.into(),
             snippet: snippet.into(),
@@ -690,6 +697,14 @@ impl SearchHit {
 
     pub fn message_id(&self) -> &str {
         &self.message_id
+    }
+
+    pub fn mailbox(&self) -> &str {
+        &self.mailbox
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
     }
 
     fn searchable_text(&self) -> String {
@@ -788,6 +803,236 @@ impl SearchSessionStore {
             hits,
             now,
             existing.expires_at - now,
+        ))
+    }
+}
+
+/// One message as a provider stores it. Message data exists for MCP
+/// responses, fixtures, and pending-action previews only — never for a
+/// human-facing mail surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessage {
+    account_id: AccountId,
+    mailbox: String,
+    message_id: String,
+    thread_id: String,
+    subject: String,
+    sender: String,
+    snippet: String,
+    body: String,
+}
+
+impl StoredMessage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        account_id: AccountId,
+        mailbox: impl Into<String>,
+        message_id: impl Into<String>,
+        thread_id: impl Into<String>,
+        subject: impl Into<String>,
+        sender: impl Into<String>,
+        snippet: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            account_id,
+            mailbox: mailbox.into(),
+            message_id: message_id.into(),
+            thread_id: thread_id.into(),
+            subject: subject.into(),
+            sender: sender.into(),
+            snippet: snippet.into(),
+            body: body.into(),
+        }
+    }
+
+    pub fn mailbox(&self) -> &str {
+        &self.mailbox
+    }
+
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    pub fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        let haystack = format!(
+            "{} {} {} {}",
+            self.subject, self.sender, self.snippet, self.body
+        )
+        .to_lowercase();
+        query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .all(|token| haystack.contains(&token))
+    }
+}
+
+/// The boundary fixture-backed tests and real IMAP retrieval share: search
+/// and single-message fetch, nothing that smells like an inbox.
+pub trait MailProvider {
+    fn search(
+        &self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<Vec<SearchHit>>;
+
+    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FixtureMailProvider {
+    messages: Vec<StoredMessage>,
+}
+
+impl FixtureMailProvider {
+    pub fn new(messages: impl IntoIterator<Item = StoredMessage>) -> Self {
+        Self {
+            messages: messages.into_iter().collect(),
+        }
+    }
+}
+
+impl MailProvider for FixtureMailProvider {
+    fn search(
+        &self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<Vec<SearchHit>> {
+        Ok(self
+            .messages
+            .iter()
+            .filter(|message| &message.account_id == account_id)
+            .filter(|message| mailbox.is_none_or(|name| message.mailbox == name))
+            .filter(|message| message.matches_query(query))
+            .take(limit)
+            .map(|message| {
+                SearchHit::new(
+                    message.message_id(),
+                    message.mailbox(),
+                    message.subject(),
+                    message.sender(),
+                    message.snippet(),
+                )
+            })
+            .collect())
+    }
+
+    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
+        self.messages
+            .iter()
+            .find(|message| &message.account_id == account_id && message.message_id == message_id)
+            .cloned()
+            .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))
+    }
+}
+
+/// The policy-checked doorway between MCP tools and a mail provider. Every
+/// read passes the permission groups twice: account-wide, and again for the
+/// mailbox the data actually lives in.
+pub struct MailAccessService<'a, P: MailProvider> {
+    provider: P,
+    policy_engine: PolicyEngine,
+    sessions: &'a mut SearchSessionStore,
+}
+
+impl<'a, P: MailProvider> MailAccessService<'a, P> {
+    pub fn new(
+        provider: P,
+        policy_engine: PolicyEngine,
+        sessions: &'a mut SearchSessionStore,
+    ) -> Self {
+        Self {
+            provider,
+            policy_engine,
+            sessions,
+        }
+    }
+
+    pub fn search(
+        &mut self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+        now: u64,
+    ) -> CoreResult<SearchResultSet> {
+        match mailbox {
+            Some(name) => self
+                .policy_engine
+                .authorize_in(account_id, name, Capability::Search)?,
+            None => self
+                .policy_engine
+                .authorize(account_id, Capability::Search)?,
+        }
+
+        // A search across everything must not leak hits from folders the
+        // policy blocks, so every hit answers for its own mailbox.
+        let policy = self.policy_engine.policy(account_id)?;
+        let hits = self
+            .provider
+            .search(account_id, query, mailbox, limit)?
+            .into_iter()
+            .filter(|hit| policy.allows_in(hit.mailbox(), Capability::Search))
+            .collect();
+
+        Ok(self
+            .sessions
+            .create(account_id.clone(), query, hits, now, 7200))
+    }
+
+    pub fn get_message(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        include_body: bool,
+    ) -> CoreResult<StoredMessage> {
+        self.policy_engine
+            .authorize(account_id, Capability::ReadHeaders)?;
+        let message = self.provider.get_message(account_id, message_id)?;
+
+        // The folder decides again: a blocked mailbox hides even headers.
+        self.policy_engine
+            .authorize_in(account_id, message.mailbox(), Capability::ReadHeaders)?;
+
+        if include_body {
+            self.policy_engine
+                .authorize_in(account_id, message.mailbox(), Capability::ReadBody)?;
+            return Ok(message);
+        }
+
+        Ok(StoredMessage::new(
+            account_id.clone(),
+            message.mailbox(),
+            message.message_id(),
+            message.thread_id(),
+            message.subject(),
+            message.sender(),
+            message.snippet(),
+            "",
         ))
     }
 }

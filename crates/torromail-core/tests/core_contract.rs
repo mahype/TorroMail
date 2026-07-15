@@ -1,7 +1,8 @@
 use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
-    FolderRule, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, WriteAccess,
+    FixtureMailProvider, FolderRule, MailAccessService, MailProvider, PendingActionRequest,
+    PendingActionStore, PermissionPreset, PermissionSet, Policy, PolicyEngine, ReadAccess,
+    SearchHit, SearchSessionStore, StoredMessage, WriteAccess,
 };
 
 #[test]
@@ -218,6 +219,129 @@ fn expired_pending_actions_cannot_be_confirmed() {
 }
 
 #[test]
+fn fixture_provider_searches_and_reads_messages_without_ui_state() {
+    let account_id = AccountId::new("work");
+    let provider = FixtureMailProvider::new([
+        StoredMessage::new(
+            account_id.clone(),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Quarterly invoice",
+            "billing@example.com",
+            "The quarterly invoice is attached.",
+            "Invoice body",
+        ),
+        StoredMessage::new(
+            account_id.clone(),
+            "Archive",
+            "m2",
+            "thread-2",
+            "Team notes",
+            "lead@example.com",
+            "Planning notes",
+            "Planning body",
+        ),
+    ]);
+
+    let hits = provider
+        .search(&account_id, "invoice", Some("INBOX"), 10)
+        .expect("fixture search succeeds");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id(), "m1");
+    assert_eq!(hits[0].mailbox(), "INBOX");
+
+    let message = provider
+        .get_message(&account_id, "m1")
+        .expect("message exists");
+    assert_eq!(message.subject(), "Quarterly invoice");
+    assert_eq!(message.body(), "Invoice body");
+}
+
+#[test]
+fn mail_access_service_enforces_search_and_body_policy() {
+    let account_id = AccountId::new("work");
+    let provider = FixtureMailProvider::new([StoredMessage::new(
+        account_id.clone(),
+        "INBOX",
+        "m1",
+        "thread-1",
+        "Quarterly invoice",
+        "billing@example.com",
+        "The quarterly invoice is attached.",
+        "Invoice body",
+    )]);
+    // Subject and sender only: search and headers pass, the body stays shut.
+    let mut permissions = PermissionSet::default();
+    permissions.read = ReadAccess::Headers;
+    permissions.write = WriteAccess::NOTHING;
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    let result_set = service
+        .search(&account_id, "invoice", Some("INBOX"), 10, 100)
+        .expect("search is allowed at header level");
+    assert_eq!(result_set.hits().len(), 1);
+
+    let header_only = service
+        .get_message(&account_id, "m1", false)
+        .expect("headers are allowed");
+    assert_eq!(header_only.body(), "");
+
+    assert!(service.get_message(&account_id, "m1", true).is_err());
+}
+
+#[test]
+fn mail_access_service_keeps_blocked_folders_invisible() {
+    let account_id = AccountId::new("work");
+    let provider = FixtureMailProvider::new([
+        StoredMessage::new(
+            account_id.clone(),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Invoice April",
+            "billing@example.com",
+            "April invoice attached",
+            "April body",
+        ),
+        StoredMessage::new(
+            account_id.clone(),
+            "Private",
+            "m2",
+            "thread-2",
+            "Invoice personal",
+            "friend@example.net",
+            "Personal invoice attached",
+            "Personal body",
+        ),
+    ]);
+    let mut permissions = PermissionSet::default();
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Private".to_owned(),
+        FolderRule {
+            read: false,
+            write: false,
+        },
+    );
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    // A search across every folder must not leak the blocked one.
+    let result_set = service
+        .search(&account_id, "invoice", None, 10, 100)
+        .expect("account-wide search is allowed");
+    assert_eq!(result_set.hits().len(), 1);
+    assert_eq!(result_set.hits()[0].message_id(), "m1");
+
+    // Not even headers escape a blocked folder.
+    assert!(service.get_message(&account_id, "m2", false).is_err());
+}
+
+#[test]
 fn search_result_sets_can_be_refined_in_memory() {
     let mut sessions = SearchSessionStore::default();
     let result_set = sessions.create(
@@ -226,18 +350,21 @@ fn search_result_sets_can_be_refined_in_memory() {
         vec![
             SearchHit::new(
                 "m1",
+                "INBOX",
                 "Invoice April",
                 "billing@example.com",
                 "April invoice attached",
             ),
             SearchHit::new(
                 "m2",
+                "INBOX",
                 "Team notes",
                 "lead@example.com",
                 "Budget planning notes",
             ),
             SearchHit::new(
                 "m3",
+                "INBOX",
                 "Invoice May",
                 "billing@example.com",
                 "May invoice attached",
