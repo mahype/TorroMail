@@ -33,6 +33,11 @@
 "News from Torro" = "Neues von Torro";
 "New" = "Neu";
 
+/* Identity */
+"Identity" = "Identität";
+"Sender Name" = "Absendername";
+"Shown in TorroMail, and used as the sender of anything you approve." = "Wird in TorroMail angezeigt und als Absender von allem verwendet, was du freigibst.";
+
 /* Connection */
 "Connection" = "Verbindung";
 "Provider" = "Anbieter";
@@ -155,7 +160,6 @@
 "Export…" = "Exportieren …";
 
 /* Wizard */
-"Display Name" = "Anzeigename";
 "Email" = "E-Mail";
 "Cancel" = "Abbrechen";
 "Add" = "Hinzufügen";

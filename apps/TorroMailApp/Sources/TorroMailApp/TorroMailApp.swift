@@ -1034,6 +1034,7 @@ private struct AccountDetailView: View {
 
     var body: some View {
         Form {
+            identitySection
             connectionSection
             permissionsSection
             foldersSection
@@ -1060,6 +1061,20 @@ private struct AccountDetailView: View {
             }
         } message: {
             Text(L("This only removes the configuration from TorroMail. Your mail stays on the server."))
+        }
+    }
+
+    /// Who this account is: the name assistants send mail as, and the
+    /// address it comes from. The wizard asks once — this is where it stays
+    /// changeable.
+    private var identitySection: some View {
+        Section {
+            TextField(L("Sender Name"), text: $account.name, prompt: Text(verbatim: "Sven Wagener"))
+            TextField(L("Email"), text: $account.email, prompt: Text(verbatim: "name@example.com"))
+        } header: {
+            Text(L("Identity"))
+        } footer: {
+            Text(L("Shown in TorroMail, and used as the sender of anything you approve."))
         }
     }
 
@@ -1710,8 +1725,8 @@ private struct AccountWizardView: View {
         VStack(spacing: 0) {
             Form {
                 Section(L("New Account")) {
-                    TextField(L("Display Name"), text: $name)
-                    TextField(L("Email"), text: $email)
+                    TextField(L("Sender Name"), text: $name, prompt: Text(verbatim: "Sven Wagener"))
+                    TextField(L("Email"), text: $email, prompt: Text(verbatim: "name@example.com"))
                     Picker(L("Provider"), selection: $provider) {
                         ForEach(Provider.allCases) { provider in
                             Text(provider.rawValue).tag(provider)
