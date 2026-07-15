@@ -1537,6 +1537,7 @@ private struct ConnectionStatusBadge: View {
 private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
+    @State private var clientSetupNote: String?
 
     var body: some View {
         Form {
@@ -1580,8 +1581,17 @@ private struct SettingsView: View {
             }
 
             Section {
-                Button(L("Add to Claude Desktop")) {}
-                Button(L("Copy Config Snippet")) {}
+                Button(L("Add to Claude Desktop")) {
+                    addToClaudeDesktop()
+                }
+                Button(L("Copy Config Snippet")) {
+                    copyConfigSnippet()
+                }
+                if let clientSetupNote {
+                    Text(clientSetupNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } header: {
                 Text(L("AI Clients"))
             } footer: {
@@ -1590,6 +1600,38 @@ private struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(L("Settings"))
+    }
+
+    /// Writes the server into Claude Desktop's configuration — the one-click
+    /// path. The note below the buttons reports what actually happened.
+    private func addToClaudeDesktop() {
+        guard let commandPath = MCPClientSetup.serverCommandPath(
+            executableName: model.generalSettings.mcpExecutable
+        ) else {
+            clientSetupNote = L("The MCP server binary was not found.")
+            return
+        }
+        do {
+            try MCPClientSetup.addToClaudeDesktop(commandPath: commandPath)
+            clientSetupNote = L("Added. Restart Claude Desktop to connect.")
+        } catch let failure as MCPClientSetup.Failure {
+            clientSetupNote = L(failure.reason)
+        } catch {
+            clientSetupNote = L("Could not update Claude Desktop's configuration.")
+        }
+    }
+
+    private func copyConfigSnippet() {
+        guard let commandPath = MCPClientSetup.serverCommandPath(
+            executableName: model.generalSettings.mcpExecutable
+        ) else {
+            clientSetupNote = L("The MCP server binary was not found.")
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(MCPClientSetup.configSnippet(commandPath: commandPath), forType: .string)
+        clientSetupNote = L("Copied to the clipboard.")
     }
 
     private var statusColor: Color {

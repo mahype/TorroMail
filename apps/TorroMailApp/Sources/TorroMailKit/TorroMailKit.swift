@@ -139,6 +139,86 @@ public enum AccountCheck {
     }
 }
 
+/// Wiring TorroMail into MCP clients. The snippet points at the bundled
+/// server binary; the policy document lives at its default path, so no
+/// arguments or environment are needed.
+public enum MCPClientSetup {
+    public struct Failure: Error {
+        public let reason: String
+
+        public init(_ reason: String) {
+            self.reason = reason
+        }
+    }
+
+    /// Absolute path of the server binary for client configs. A bare PATH
+    /// fallback is useless there, so only real paths count.
+    public static func serverCommandPath(executableName: String) -> String? {
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve(), command.displayPath.contains("/") else {
+            return nil
+        }
+        return command.displayPath
+    }
+
+    public static func configSnippet(commandPath: String) -> String {
+        """
+        {
+          "mcpServers": {
+            "torromail": {
+              "command": "\(commandPath)"
+            }
+          }
+        }
+        """
+    }
+
+    /// Merges the torromail server into Claude Desktop's configuration.
+    /// Other servers survive; an unreadable existing file is an error and
+    /// never overwritten.
+    @discardableResult
+    public static func addToClaudeDesktop(
+        commandPath: String,
+        configURL: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        let target: URL
+        if let configURL {
+            target = configURL
+        } else {
+            let claudeDirectory = try fileManager
+                .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+                .appendingPathComponent("Claude", isDirectory: true)
+            guard fileManager.fileExists(atPath: claudeDirectory.path) else {
+                throw Failure("Claude Desktop was not found.")
+            }
+            target = claudeDirectory.appendingPathComponent("claude_desktop_config.json")
+        }
+
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: target) {
+            guard let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                throw Failure("The existing configuration could not be read.")
+            }
+            root = existing
+        }
+        var servers = root["mcpServers"] as? [String: Any] ?? [:]
+        servers["torromail"] = ["command": commandPath]
+        root["mcpServers"] = servers
+
+        try fileManager.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: target, options: .atomic)
+        return target
+    }
+}
+
 /// The internal bridge between the app and every `torromail-mcp` instance:
 /// the app publishes this document whenever permissions change, the server
 /// reloads it per tool call. Internal plumbing — never a user-facing

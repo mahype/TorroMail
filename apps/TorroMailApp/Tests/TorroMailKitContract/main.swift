@@ -273,6 +273,32 @@ require(
     "OAuth accounts carry no IMAP block until OAuth lands"
 )
 
+// Connecting a client merges into its configuration instead of replacing
+// it — other servers survive.
+let snippet = MCPClientSetup.configSnippet(
+    commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp"
+)
+require(
+    snippet.contains("\"mcpServers\"") && snippet.contains("torromail-mcp"),
+    "the config snippet names the server and its command"
+)
+
+let temporaryConfig = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-claude-config-\(ProcessInfo.processInfo.processIdentifier).json")
+try? Data(#"{"mcpServers":{"other":{"command":"/usr/local/bin/other-server"}}}"#.utf8)
+    .write(to: temporaryConfig)
+_ = try? MCPClientSetup.addToClaudeDesktop(
+    commandPath: "/tmp/torromail-mcp",
+    configURL: temporaryConfig
+)
+let mergedData = (try? Data(contentsOf: temporaryConfig)) ?? Data()
+let mergedServers = ((try? JSONSerialization.jsonObject(with: mergedData)) as? [String: Any])?["mcpServers"] as? [String: Any] ?? [:]
+require(
+    mergedServers["other"] != nil && mergedServers["torromail"] != nil,
+    "adding the server preserves other configured servers"
+)
+try? FileManager.default.removeItem(at: temporaryConfig)
+
 // MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(
     executableName: "torromail-mcp",

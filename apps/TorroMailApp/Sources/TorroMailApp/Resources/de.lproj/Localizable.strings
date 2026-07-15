@@ -139,6 +139,12 @@
 "Add to Claude Desktop" = "Zu Claude Desktop hinzufügen";
 "Copy Config Snippet" = "Konfiguration kopieren";
 "Connect an assistant so it can use your mail through TorroMail." = "Verbinde einen Assistenten, damit er deine E-Mails über TorroMail nutzen kann.";
+"Added. Restart Claude Desktop to connect." = "Hinzugefügt. Starte Claude Desktop neu, um zu verbinden.";
+"Copied to the clipboard." = "In die Zwischenablage kopiert.";
+"The MCP server binary was not found." = "Das MCP-Server-Programm wurde nicht gefunden.";
+"Claude Desktop was not found." = "Claude Desktop wurde nicht gefunden.";
+"The existing configuration could not be read." = "Die vorhandene Konfiguration konnte nicht gelesen werden.";
+"Could not update Claude Desktop's configuration." = "Die Konfiguration von Claude Desktop konnte nicht aktualisiert werden.";
 
 /* Log */
 "Time" = "Zeit";
