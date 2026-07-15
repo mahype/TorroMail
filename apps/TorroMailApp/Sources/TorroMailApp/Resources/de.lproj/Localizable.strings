@@ -1,5 +1,5 @@
 /* Sidebar */
-"Accounts" = "Konten";
+"Mail Accounts" = "Mail-Konten";
 "Settings" = "Einstellungen";
 "Log" = "Protokoll";
 "Add Account" = "Konto hinzufügen";
@@ -18,6 +18,7 @@
 "Sign In…" = "Anmelden…";
 "Test Connection" = "Verbindung testen";
 "Connected" = "Verbunden";
+"Credentials verified" = "Zugangsdaten geprüft";
 "Needs test" = "Test erforderlich";
 "Not configured" = "Nicht eingerichtet";
 

@@ -10,15 +10,24 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 
 let model = TorroMailModel.preview()
 
-// Decisions, not options: the sidebar carries accounts plus exactly two
-// general destinations (Settings, Log). There is no Diagnostics surface.
+// Decisions, not options: the sidebar carries exactly three destinations —
+// Mail Accounts, Settings, Log. Individual accounts live one level deeper,
+// as cards inside the accounts destination.
 require(
     model.accounts.map(\.name) == ["Work", "Personal"],
     "accounts are the primary navigation"
 )
 require(
-    model.selectedSidebarItem == .account("work"),
-    "first account should be selected by default"
+    model.selectedSidebarItem == .accounts,
+    "the account list should be shown by default"
+)
+require(
+    model.accountPath.isEmpty,
+    "the account list starts without a drill-down"
+)
+require(
+    model.pendingActionCount == 1,
+    "the accounts item badges every waiting approval"
 )
 
 // Status only on exception: healthy accounts stay quiet, unverified ones ask
@@ -30,6 +39,14 @@ require(
 require(
     model.accounts[1].connectionState.needsAttention,
     "an untested connection must ask for attention"
+)
+require(
+    !model.accounts[1].connectionState.isBroken,
+    "untested credentials are not broken credentials"
+)
+require(
+    ConnectionState.failed("auth rejected").isBroken,
+    "rejected credentials show the red dot"
 )
 require(
     model.accounts[0].pendingActions.count == 1,
@@ -47,15 +64,15 @@ require(
     "supervisor knows its executable without exposing it in the UI"
 )
 
-// Account lifecycle stays in the GUI: add selects the new account, remove
-// falls back to the first remaining one.
+// Account lifecycle stays in the GUI: add opens the new account, remove
+// drops back to the account list.
 model.addAccount(name: "Club", email: "club@example.org", provider: .imapSmtp, loginMethod: .password)
 require(model.accounts.count == 3, "wizard adds an account")
-guard case let .account(newID) = model.selectedSidebarItem else {
-    require(false, "adding an account selects it")
-    fatalError("unreachable")
-}
-require(newID == model.accounts[2].id, "adding an account selects it")
+let newID = model.accounts[2].id
+require(
+    model.selectedSidebarItem == .accounts && model.accountPath == [newID],
+    "adding an account opens its settings"
+)
 require(
     model.accounts[2].connectionState == .notConfigured,
     "a fresh account starts unconfigured"
@@ -64,8 +81,8 @@ require(
 model.removeAccount(id: newID)
 require(model.accounts.count == 2, "remove deletes the configuration")
 require(
-    model.selectedSidebarItem == .account("work"),
-    "removing the selected account falls back to the first account"
+    model.accountPath.isEmpty,
+    "removing the open account falls back to the account list"
 )
 
 // MCP executable resolution prefers the dev workspace before PATH.

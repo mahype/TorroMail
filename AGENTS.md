@@ -50,6 +50,29 @@ like a precise control surface, not like a mail inbox.
 - User-facing strings are localized. English is the development language;
   German lives in `apps/TorroMailApp/Sources/TorroMailApp/Resources/de.lproj`.
 
+## Design Guidelines
+
+Brand and design assets live in <https://github.com/mahype/torro-design>
+(private repo — use authenticated `gh` access). Key facts:
+
+- Core color: Torro Rot `#D50C0C` (dark variant `#A50A0A` for gradients and
+  hover, black `#0E0E0F`, silver `#C4C3C3`, white).
+- House font: Frutiger LT (95 UltraBlack for logo/headlines, 65 Bold for
+  subheads, 55 Roman for body). Secondary print font: Minion Pro.
+- Signet: two inward-facing horns; mascot: the fighting bull.
+- Machine-readable tokens: `tokens/tokens.json` and `tokens/colors.css`;
+  interactive guide with do/don'ts: `design-guide.html`.
+
+Follow these for brand moments (icon, logo, accent color); native macOS
+semantic colors and system typography remain the default for standard
+controls per the UI principles above.
+
+In this repository: the app icon (horns square per the guide) lives in
+`apps/TorroMailApp/Icon/` (`AppIcon.svg` source, generated `AppIcon.icns`),
+the accent color is `Color.torroRed` in the app target, and
+`scripts/make-app-bundle.sh` builds a runnable dev bundle including icon and
+localization.
+
 ## Architecture
 
 - `crates/torromail-core`: portable Rust domain model for accounts, policies,

@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 public enum TorroMailSidebarSelection: Hashable {
-    case account(String)
+    case accounts
     case settings
     case log
 }
@@ -42,6 +42,13 @@ public enum ConnectionState: Hashable {
 
     public var needsAttention: Bool {
         self != .connected
+    }
+
+    /// Whether the stored credentials are known to be broken, as opposed to
+    /// merely unverified. Drives the red dot on the account card.
+    public var isBroken: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }
 
@@ -348,6 +355,9 @@ public struct AuditEntry: Identifiable, Hashable {
 public final class TorroMailModel: ObservableObject {
     @Published public var accounts: [MailAccount]
     @Published public var selectedSidebarItem: TorroMailSidebarSelection
+    /// Drill-down inside the accounts destination. Empty shows the account
+    /// list; one entry shows that account's settings.
+    @Published public var accountPath: [String]
     @Published public var showAccountWizard: Bool
     @Published public var generalSettings: GeneralSettings
     @Published public var audit: [AuditEntry]
@@ -355,15 +365,28 @@ public final class TorroMailModel: ObservableObject {
     public init(
         accounts: [MailAccount],
         selectedSidebarItem: TorroMailSidebarSelection,
+        accountPath: [String] = [],
         showAccountWizard: Bool = false,
         generalSettings: GeneralSettings,
         audit: [AuditEntry]
     ) {
         self.accounts = accounts
         self.selectedSidebarItem = selectedSidebarItem
+        self.accountPath = accountPath
         self.showAccountWizard = showAccountWizard
         self.generalSettings = generalSettings
         self.audit = audit
+    }
+
+    /// Total approvals waiting across all accounts — the badge on the
+    /// accounts sidebar item.
+    public var pendingActionCount: Int {
+        accounts.reduce(0) { $0 + $1.pendingActions.count }
+    }
+
+    public func openAccount(id: String) {
+        selectedSidebarItem = .accounts
+        accountPath = [id]
     }
 
     public func beginAccountWizard() {
@@ -381,18 +404,14 @@ public final class TorroMailModel: ObservableObject {
             connectionState: .notConfigured
         )
         accounts.append(account)
-        selectedSidebarItem = .account(account.id)
+        openAccount(id: account.id)
     }
 
+    /// Removing the open account drops back to the account list rather than
+    /// picking a neighbour the user never asked for.
     public func removeAccount(id: String) {
         accounts.removeAll { $0.id == id }
-        if case let .account(selectedID) = selectedSidebarItem, selectedID == id {
-            if let first = accounts.first {
-                selectedSidebarItem = .account(first.id)
-            } else {
-                selectedSidebarItem = .settings
-            }
-        }
+        accountPath.removeAll { $0 == id }
     }
 }
 
@@ -443,7 +462,7 @@ extension TorroMailModel {
                     connectionState: .needsTest
                 )
             ],
-            selectedSidebarItem: .account("work"),
+            selectedSidebarItem: .accounts,
             generalSettings: GeneralSettings(),
             audit: [
                 AuditEntry(

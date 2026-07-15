@@ -23,6 +23,11 @@ private func label(for mode: CacheMode) -> String {
     }
 }
 
+extension Color {
+    /// Torro Rot #D50C0C — brand accent from github.com/mahype/torro-design.
+    static let torroRed = Color(red: 213 / 255, green: 12 / 255, blue: 12 / 255)
+}
+
 @main
 struct TorroMailApp: App {
     @StateObject private var model = TorroMailModel.preview()
@@ -34,6 +39,7 @@ struct TorroMailApp: App {
                 .environmentObject(model)
                 .environmentObject(mcpSupervisor)
                 .frame(minWidth: 1080, minHeight: 660)
+                .tint(.torroRed)
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                 }
@@ -55,31 +61,17 @@ private struct TorroMailRootView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: sidebarSelection) {
-                Section(L("Accounts")) {
-                    ForEach(model.accounts) { account in
-                        AccountSidebarRow(account: account)
-                            .tag(TorroMailSidebarSelection.account(account.id))
-                            .badge(account.pendingActions.count)
-                    }
-                }
-
-                Section {
-                    Label(L("Settings"), systemImage: "gearshape")
-                        .tag(TorroMailSidebarSelection.settings)
-                    Label(L("Log"), systemImage: "list.bullet.rectangle")
-                        .tag(TorroMailSidebarSelection.log)
-                }
+                Label(L("Mail Accounts"), systemImage: "envelope")
+                    .tag(TorroMailSidebarSelection.accounts)
+                    .badge(model.pendingActionCount)
+                Label(L("Settings"), systemImage: "gearshape")
+                    .tag(TorroMailSidebarSelection.settings)
+                Label(L("Log"), systemImage: "list.bullet.rectangle")
+                    .tag(TorroMailSidebarSelection.log)
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
             .navigationTitle("TorroMail")
-            .toolbar {
-                Button {
-                    model.beginAccountWizard()
-                } label: {
-                    Label(L("Add Account"), systemImage: "plus")
-                }
-            }
         } detail: {
             detailView
         }
@@ -92,18 +84,28 @@ private struct TorroMailRootView: View {
     @ViewBuilder
     private var detailView: some View {
         switch model.selectedSidebarItem {
-        case let .account(accountID):
-            if let index = model.accounts.firstIndex(where: { $0.id == accountID }) {
-                AccountDetailView(account: $model.accounts[index])
-                    .id(accountID)
-            } else {
-                Text(L("No account selected"))
-                    .foregroundStyle(.secondary)
+        case .accounts:
+            NavigationStack(path: $model.accountPath) {
+                AccountListView()
+                    .navigationDestination(for: String.self) { accountID in
+                        accountDetail(for: accountID)
+                    }
             }
         case .settings:
             SettingsView()
         case .log:
             LogView()
+        }
+    }
+
+    @ViewBuilder
+    private func accountDetail(for accountID: String) -> some View {
+        if let index = model.accounts.firstIndex(where: { $0.id == accountID }) {
+            AccountDetailView(account: $model.accounts[index])
+                .id(accountID)
+        } else {
+            Text(L("No account selected"))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -118,33 +120,137 @@ private struct TorroMailRootView: View {
     }
 }
 
-private struct AccountSidebarRow: View {
-    var account: MailAccount
+private struct AccountListView: View {
+    @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
+        ScrollView {
+            LazyVStack(spacing: 10) {
+                ForEach(model.accounts) { account in
+                    NavigationLink(value: account.id) {
+                        AccountCard(account: account)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 720, alignment: .top)
+            .frame(maxWidth: .infinity)
+        }
+        .background(.background.secondary)
+        .navigationTitle(L("Mail Accounts"))
+        .toolbar {
+            Button {
+                model.beginAccountWizard()
+            } label: {
+                Label(L("Add Account"), systemImage: "plus")
+            }
+        }
+    }
+}
+
+private struct AccountCard: View {
+    var account: MailAccount
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovering = false
+
+    private let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+
+    var body: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.torroRed.gradient)
+                .frame(width: 34, height: 34)
+                .overlay {
+                    Image(systemName: "envelope.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .shadow(color: .black.opacity(0.2), radius: 1.5, y: 1)
+
+            VStack(alignment: .leading, spacing: 1) {
                 Text(account.name)
-                    .fontWeight(.medium)
+                    .font(.headline)
                     .lineLimit(1)
                 Text(account.email)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 12)
 
-            // Quiet when healthy: the dot only appears when the connection
-            // needs the user's attention.
-            if account.connectionState.needsAttention {
-                Circle()
-                    .fill(.orange)
-                    .frame(width: 8, height: 8)
+            if !account.pendingActions.isEmpty {
+                Text(account.pendingActions.count.formatted())
+                    .font(.caption)
+                    .monospacedDigit()
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(.tint, in: Capsule())
+                    .foregroundStyle(.white)
             }
+
+            CredentialStatusDot(state: account.connectionState)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(.background.secondary, in: shape)
+        // The raised look the rest of macOS uses: a lit top edge that fades
+        // towards the bottom, over a soft ambient shadow.
+        .overlay {
+            shape.strokeBorder(edgeGradient, lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.36 : 0.12), radius: 6, y: 3)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.24 : 0.06), radius: 1, y: 1)
+        .contentShape(shape)
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+    }
+
+    private var edgeGradient: LinearGradient {
+        let top: Color
+        let bottom: Color
+        if colorScheme == .dark {
+            top = .white.opacity(isHovering ? 0.34 : 0.20)
+            bottom = .white.opacity(isHovering ? 0.10 : 0.05)
+        } else {
+            top = .white.opacity(0.9)
+            bottom = .black.opacity(isHovering ? 0.18 : 0.10)
+        }
+        return LinearGradient(colors: [top, bottom], startPoint: .top, endPoint: .bottom)
+    }
+}
+
+/// Green when the credentials are known good, red when they are broken,
+/// orange while the connection has not been verified yet.
+private struct CredentialStatusDot: View {
+    var state: ConnectionState
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 9, height: 9)
+            .help(helpText)
+            .accessibilityLabel(helpText)
+    }
+
+    private var color: Color {
+        if state.isBroken { return .red }
+        return state.needsAttention ? .orange : .green
+    }
+
+    private var helpText: String {
+        switch state {
+        case .connected: L("Credentials verified")
+        case .needsTest: L("Needs test")
+        case .notConfigured: L("Not configured")
+        case let .failed(message): message
+        }
     }
 }
 
