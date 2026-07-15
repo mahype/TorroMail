@@ -3,15 +3,18 @@
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
+mod keychain;
 mod policy_document;
 
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use torromail_core::{
-    AccountId, FixtureMailProvider, MailAccessService, MarkChange, PermissionSet, Policy,
-    PolicyEngine, SearchSessionStore, StoredMessage,
+    AccountId, CoreResult, FixtureMailProvider, ImapProviderConfig, MailAccessService,
+    MailProvider, MarkChange, PermissionSet, Policy, PolicyEngine, SearchHit, SearchSessionStore,
+    StoredMessage,
 };
+use torromail_imap_tls::TlsImapMailProvider;
 
 use crate::policy_document::parse_policy_document;
 
@@ -249,43 +252,156 @@ impl LineMcpServer {
 
         let arguments = &request["params"]["arguments"];
         let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
-        let engine = match self.policy_engine_for(&account_id) {
-            Ok(engine) => engine,
+        let (engine, imap) = match self.runtime_for(&account_id) {
+            Ok(runtime) => runtime,
             Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        let provider = match connect_provider(&account_id, imap) {
+            Ok(provider) => provider,
+            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
         };
 
         if name == ToolName::MailSearch.as_str() {
-            return handle_mail_search(arguments, &account_id, engine, id);
+            return handle_mail_search(arguments, &account_id, provider, engine, id);
         }
         if name == ToolName::MailGetMessage.as_str() {
-            return handle_mail_get_message(arguments, &account_id, engine, id);
+            return handle_mail_get_message(arguments, &account_id, provider, engine, id);
         }
         if name == ToolName::MailMark.as_str() {
-            return handle_mail_mark(arguments, &account_id, engine, id);
+            return handle_mail_mark(arguments, &account_id, provider, engine, id);
         }
         if name == ToolName::MailListMailboxes.as_str() {
-            return handle_mail_list_mailboxes(&account_id, engine, id);
+            return handle_mail_list_mailboxes(&account_id, provider, engine, id);
         }
 
         json_rpc_error(id, -32000, "tool not implemented yet")
     }
 
-    /// The engine for this call. With a policy path the document decides —
-    /// reloaded every time, failing closed when unreadable, refusing
-    /// accounts it does not contain. Without one, the product default.
-    fn policy_engine_for(&self, account_id: &AccountId) -> Result<PolicyEngine, String> {
+    /// The policy engine and connection facts for this call. With a policy
+    /// path the document decides — reloaded every time, failing closed when
+    /// unreadable, refusing accounts it does not contain. Without one, the
+    /// product default over fixture data.
+    fn runtime_for(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<(PolicyEngine, Option<ImapProviderConfig>), String> {
         let Some(path) = &self.policy_path else {
-            return Ok(default_engine(account_id));
+            return Ok((default_engine(account_id), None));
         };
 
         match std::fs::read_to_string(path) {
-            Ok(text) => parse_policy_document(&text).map(PolicyEngine::new),
+            Ok(text) => {
+                let accounts = parse_policy_document(&text)?;
+                let imap = accounts
+                    .iter()
+                    .find(|account| {
+                        account
+                            .imap
+                            .as_ref()
+                            .is_some_and(|config| &config.account_id == account_id)
+                    })
+                    .and_then(|account| account.imap.clone());
+                let engine = PolicyEngine::new(accounts.into_iter().map(|account| account.policy));
+                Ok((engine, imap))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(default_engine(account_id))
+                Ok((default_engine(account_id), None))
             }
             Err(error) => Err(format!("policy document unreadable: {error}")),
         }
     }
+}
+
+/// Connects a real mailbox when the document has connection facts for the
+/// account; fixture data otherwise. Every call is a fresh session — no
+/// pooling yet.
+fn connect_provider(
+    account_id: &AccountId,
+    imap: Option<ImapProviderConfig>,
+) -> CoreResult<RuntimeProvider> {
+    match imap {
+        Some(config) => {
+            let secret = keychain::resolve_secret(&config.secret_ref)?;
+            let provider = torromail_imap_tls::connect_account(&config, &secret)?;
+            Ok(RuntimeProvider::Imap(Box::new(provider)))
+        }
+        None => Ok(RuntimeProvider::Fixture(fixture_provider(account_id))),
+    }
+}
+
+/// The two mailbox sources one server can serve, behind one provider face.
+enum RuntimeProvider {
+    Fixture(FixtureMailProvider),
+    Imap(Box<TlsImapMailProvider>),
+}
+
+impl MailProvider for RuntimeProvider {
+    fn search(
+        &self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<Vec<SearchHit>> {
+        match self {
+            Self::Fixture(provider) => provider.search(account_id, query, mailbox, limit),
+            Self::Imap(provider) => provider.search(account_id, query, mailbox, limit),
+        }
+    }
+
+    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
+        match self {
+            Self::Fixture(provider) => provider.get_message(account_id, message_id),
+            Self::Imap(provider) => provider.get_message(account_id, message_id),
+        }
+    }
+
+    fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<()> {
+        match self {
+            Self::Fixture(provider) => provider.mark(account_id, message_id, change),
+            Self::Imap(provider) => provider.mark(account_id, message_id, change),
+        }
+    }
+
+    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        match self {
+            Self::Fixture(provider) => provider.list_mailboxes(account_id),
+            Self::Imap(provider) => provider.list_mailboxes(account_id),
+        }
+    }
+}
+
+/// The connection check behind the app's "Test Connection" button and the
+/// `--check-account` flag: resolve the secret, log in over TLS, count the
+/// mailboxes. No mail content is touched.
+pub fn check_account(account_id: &str, policy_path: Option<PathBuf>) -> Result<String, String> {
+    let path = policy_path.ok_or("no policy document path available")?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("policy document unreadable: {error}"))?;
+    let accounts = parse_policy_document(&text)?;
+    let config = accounts
+        .iter()
+        .find_map(|account| {
+            account
+                .imap
+                .as_ref()
+                .filter(|config| config.account_id.as_str() == account_id)
+        })
+        .ok_or(format!("no IMAP configuration for account {account_id}"))?;
+
+    let secret = keychain::resolve_secret(&config.secret_ref).map_err(|error| error.to_string())?;
+    let provider =
+        torromail_imap_tls::connect_account(config, &secret).map_err(|error| error.to_string())?;
+    let mailboxes = provider
+        .list_mailboxes(&config.account_id)
+        .map_err(|error| error.to_string())?;
+
+    Ok(format!("login ok, {} mailboxes visible", mailboxes.len()))
 }
 
 /// The product default until the app has published permissions: read and
@@ -297,6 +413,7 @@ fn default_engine(account_id: &AccountId) -> PolicyEngine {
 fn handle_mail_search(
     arguments: &Value,
     account_id: &AccountId,
+    provider: RuntimeProvider,
     engine: PolicyEngine,
     id: &str,
 ) -> String {
@@ -305,7 +422,7 @@ fn handle_mail_search(
     let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
 
     let mut sessions = SearchSessionStore::default();
-    let mut service = fixture_service(account_id, engine, &mut sessions);
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
     match service.search(account_id, query, mailbox, limit, 100) {
         Ok(result_set) => {
@@ -335,6 +452,7 @@ fn handle_mail_search(
 fn handle_mail_get_message(
     arguments: &Value,
     account_id: &AccountId,
+    provider: RuntimeProvider,
     engine: PolicyEngine,
     id: &str,
 ) -> String {
@@ -342,7 +460,7 @@ fn handle_mail_get_message(
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
 
     let mut sessions = SearchSessionStore::default();
-    let service = fixture_service(account_id, engine, &mut sessions);
+    let service = MailAccessService::new(provider, engine, &mut sessions);
 
     match service.get_message(account_id, message_id, include_body) {
         Ok(message) => json_rpc_text_result(
@@ -366,6 +484,7 @@ fn handle_mail_get_message(
 fn handle_mail_mark(
     arguments: &Value,
     account_id: &AccountId,
+    provider: RuntimeProvider,
     engine: PolicyEngine,
     id: &str,
 ) -> String {
@@ -382,7 +501,7 @@ fn handle_mail_mark(
         .unwrap_or_default();
 
     let mut sessions = SearchSessionStore::default();
-    let mut service = fixture_service(account_id, engine, &mut sessions);
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
     let mut marked = Vec::new();
     for message_id in message_ids {
@@ -399,25 +518,19 @@ fn handle_mail_mark(
     json_rpc_text_result(id, &json!({ "marked": marked }))
 }
 
-fn handle_mail_list_mailboxes(account_id: &AccountId, engine: PolicyEngine, id: &str) -> String {
+fn handle_mail_list_mailboxes(
+    account_id: &AccountId,
+    provider: RuntimeProvider,
+    engine: PolicyEngine,
+    id: &str,
+) -> String {
     let mut sessions = SearchSessionStore::default();
-    let service = fixture_service(account_id, engine, &mut sessions);
+    let service = MailAccessService::new(provider, engine, &mut sessions);
 
     match service.list_mailboxes(account_id) {
         Ok(mailboxes) => json_rpc_text_result(id, &json!({ "mailboxes": mailboxes })),
         Err(error) => json_rpc_error(id, -32000, &error.to_string()),
     }
-}
-
-/// One policy-checked service over the fixture mailbox. The engine carries
-/// whatever the policy document granted; real mail data arrives with the
-/// IMAP provider.
-fn fixture_service<'a>(
-    account_id: &AccountId,
-    engine: PolicyEngine,
-    sessions: &'a mut SearchSessionStore,
-) -> MailAccessService<'a, FixtureMailProvider> {
-    MailAccessService::new(fixture_provider(account_id), engine, sessions)
 }
 
 fn json_rpc_text_result(id: &str, payload: &Value) -> String {

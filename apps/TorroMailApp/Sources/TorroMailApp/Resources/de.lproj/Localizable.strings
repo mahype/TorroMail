@@ -44,6 +44,7 @@
 "Username" = "Benutzername";
 "Sign In…" = "Anmelden…";
 "Test Connection" = "Verbindung testen";
+"Could not save the password to the keychain." = "Das Passwort konnte nicht im Schlüsselbund gespeichert werden.";
 "Connected" = "Verbunden";
 "Credentials verified" = "Zugangsdaten geprüft";
 "Needs test" = "Test erforderlich";

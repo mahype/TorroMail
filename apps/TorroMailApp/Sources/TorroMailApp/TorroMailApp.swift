@@ -1010,8 +1010,9 @@ private struct CredentialStatusDot: View {
 private struct AccountDetailView: View {
     @EnvironmentObject private var model: TorroMailModel
     @Binding var account: MailAccount
-    // Transient until Keychain storage lands; never persisted.
+    // Held only for the moment of saving; the keychain is the home.
     @State private var password = ""
+    @State private var isCheckingConnection = false
     @State private var confirmRemoval = false
     // Remembered so switching a group off and on again restores the last
     // sub-selection instead of resetting the user's choice.
@@ -1075,7 +1076,36 @@ private struct AccountDetailView: View {
                 if account.loginMethod == .oauth {
                     Button(L("Sign In…")) {}
                 }
-                Button(L("Test Connection")) {}
+                Button(L("Test Connection")) {
+                    testConnection()
+                }
+                .disabled(isCheckingConnection)
+            }
+        }
+    }
+
+    /// Saves the password to the keychain and runs the real check: the MCP
+    /// binary resolves the secret, connects over TLS and logs in — the dot
+    /// reports what actually happened.
+    private func testConnection() {
+        if account.loginMethod == .password, !password.isEmpty {
+            do {
+                try KeychainStore.savePassword(password, forAccount: account.id)
+                password = ""
+            } catch {
+                account.connectionState = .failed(L("Could not save the password to the keychain."))
+                return
+            }
+        }
+
+        isCheckingConnection = true
+        let accountID = account.id
+        let executable = model.generalSettings.mcpExecutable
+        Task.detached(priority: .userInitiated) {
+            let state = AccountCheck.run(accountID: accountID, executableName: executable)
+            await MainActor.run {
+                account.connectionState = state
+                isCheckingConnection = false
             }
         }
     }

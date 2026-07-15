@@ -24,6 +24,11 @@ impl SecretRef {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// `keychain://{service}/{account}` — the one scheme resolvers know.
+    pub fn keychain_location(&self) -> Option<(&str, &str)> {
+        self.0.strip_prefix("keychain://")?.split_once('/')
+    }
 }
 
 impl fmt::Debug for SecretRef {

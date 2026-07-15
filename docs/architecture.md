@@ -87,11 +87,18 @@ SELECT, UID SEARCH/FETCH/STORE, literal parsing, PEEK-only body reads), and
 share one generic `StreamImapTransport` over any duplex stream: plaintext
 TCP for local development, and implicit TLS from `torromail-imap-tls`
 (rustls with the bundled Mozilla roots; custom CAs arrive with platform
-verification). `torromail_imap_tls::connect_account` turns an
-`ImapProviderConfig` plus a resolved secret into a logged-in provider —
-resolving the secret from the keychain is the one piece still open, so the
-MCP server keeps serving fixture data until it lands. `SecretRef` redacts
-itself in any Debug output.
+verification).
+
+Secrets close the chain: the app stores passwords in the macOS keychain
+under service `TorroMail`; the policy document carries connection facts and
+the reference (`keychain://TorroMail/{account}`) — never the password. The
+server resolves the reference itself via the Security framework, which asks
+the user once to allow `torromail-mcp` until code signing makes it
+promptless. Accounts with connection facts get a real TLS session per tool
+call (no pooling yet); accounts without stay on fixture data. The app's
+"Test Connection" button runs `torromail-mcp --check-account <id>` — the
+same resolution, TLS and LOGIN the tools use, so a green dot means the real
+path works. `SecretRef` redacts itself in any Debug output.
 
 The permissions set in the app reach the server through an internal policy
 document: the app publishes `~/Library/Application Support/TorroMail/policy.json`

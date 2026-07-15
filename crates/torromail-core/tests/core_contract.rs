@@ -234,6 +234,15 @@ fn imap_provider_config_keeps_secrets_out_of_debug_output() {
 }
 
 #[test]
+fn secret_refs_name_their_keychain_location() {
+    let secret = torromail_core::SecretRef::new("keychain://TorroMail/work");
+    assert_eq!(secret.keychain_location(), Some(("TorroMail", "work")));
+
+    let opaque = torromail_core::SecretRef::new("vault:12345");
+    assert_eq!(opaque.keychain_location(), None);
+}
+
+#[test]
 fn fixture_provider_searches_and_reads_messages_without_ui_state() {
     let account_id = AccountId::new("work");
     let provider = FixtureMailProvider::new([

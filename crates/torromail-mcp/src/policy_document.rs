@@ -25,16 +25,62 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use torromail_core::{AccountId, FolderRule, PermissionSet, Policy, ReadAccess, WriteAccess};
+use torromail_core::{
+    AccountId, FolderRule, ImapProviderConfig, PermissionSet, Policy, ReadAccess, SecretRef,
+    WriteAccess,
+};
 
-pub(crate) fn parse_policy_document(text: &str) -> Result<Vec<Policy>, String> {
+/// One account as the document describes it: its permissions, and — once
+/// the app has connection facts — how to reach the real mailbox.
+pub(crate) struct DocumentAccount {
+    pub(crate) policy: Policy,
+    pub(crate) imap: Option<ImapProviderConfig>,
+}
+
+pub(crate) fn parse_policy_document(text: &str) -> Result<Vec<DocumentAccount>, String> {
     let document: Value =
         serde_json::from_str(text).map_err(|error| format!("policy document invalid: {error}"))?;
     let accounts = document["accounts"]
         .as_array()
         .ok_or("policy document invalid: accounts must be an array")?;
 
-    accounts.iter().map(parse_account_policy).collect()
+    accounts.iter().map(parse_account).collect()
+}
+
+fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
+    let policy = parse_account_policy(account)?;
+    let imap = match account.get("imap") {
+        None | Some(Value::Null) => None,
+        Some(imap) => Some(parse_imap_config(account, imap)?),
+    };
+    Ok(DocumentAccount { policy, imap })
+}
+
+/// A present-but-broken connection block is an error, never a silent
+/// fixture fallback — that would misreport whose data is being served.
+fn parse_imap_config(account: &Value, imap: &Value) -> Result<ImapProviderConfig, String> {
+    let id = account["id"]
+        .as_str()
+        .ok_or("policy document invalid: account id must be a string")?;
+    let host = imap["host"]
+        .as_str()
+        .ok_or("policy document invalid: imap host must be a string")?;
+    let username = imap["username"]
+        .as_str()
+        .ok_or("policy document invalid: imap username must be a string")?;
+    let secret_ref = imap["secret_ref"]
+        .as_str()
+        .ok_or("policy document invalid: imap secret_ref must be a string")?;
+    let port = u16::try_from(imap["port"].as_u64().unwrap_or(993))
+        .map_err(|_| "policy document invalid: imap port out of range".to_owned())?;
+
+    Ok(ImapProviderConfig::new(
+        AccountId::new(id),
+        host,
+        port,
+        username,
+        SecretRef::new(secret_ref),
+    ))
 }
 
 fn parse_account_policy(account: &Value) -> Result<Policy, String> {

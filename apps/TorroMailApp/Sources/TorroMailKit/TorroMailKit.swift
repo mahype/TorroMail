@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import SwiftUI
 
 public enum TorroMailSidebarSelection: Hashable {
@@ -61,6 +62,83 @@ public enum TorroMailAppearance {
     public static let usesSemanticColors = true
 }
 
+/// Passwords live in the macOS keychain and nowhere else. The app writes
+/// them under one service name; the policy document only ever carries the
+/// reference (`keychain://TorroMail/{account}`), which the MCP server
+/// resolves itself — macOS asks the user once to allow it.
+public enum KeychainStore {
+    public static let service = "TorroMail"
+
+    public struct Failure: Error {
+        public let status: OSStatus
+    }
+
+    public static func secretReference(forAccount accountID: String) -> String {
+        "keychain://\(service)/\(accountID)"
+    }
+
+    public static func savePassword(_ password: String, forAccount accountID: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: accountID
+        ]
+        let payload: [String: Any] = [
+            kSecValueData as String: Data(password.utf8)
+        ]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, payload as CFDictionary)
+        if updateStatus == errSecItemNotFound {
+            let addStatus = SecItemAdd(query.merging(payload) { _, new in new } as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw Failure(status: addStatus) }
+            return
+        }
+        guard updateStatus == errSecSuccess else { throw Failure(status: updateStatus) }
+    }
+}
+
+/// Runs the MCP binary's `--check-account`: the same secret resolution,
+/// TLS and LOGIN the tools use — so a green dot means the real path works.
+public enum AccountCheck {
+    public static func run(accountID: String, executableName: String) -> ConnectionState {
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve() else {
+            return .failed("MCP executable not found")
+        }
+
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments + ["--check-account", accountID]
+        var environment = ProcessInfo.processInfo.environment
+        if let policyURL = try? PolicyDocument.defaultURL() {
+            environment["TORROMAIL_POLICY_PATH"] = policyURL.path
+        }
+        process.environment = environment
+        let errorPipe = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        process.waitUntilExit()
+
+        if process.terminationStatus == 0 {
+            return .connected
+        }
+        let detail = String(
+            data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .failed(detail?.isEmpty == false ? detail ?? "" : "connection check failed")
+    }
+}
+
 /// The internal bridge between the app and every `torromail-mcp` instance:
 /// the app publishes this document whenever permissions change, the server
 /// reloads it per tool call. Internal plumbing — never a user-facing
@@ -100,7 +178,7 @@ public enum PolicyDocument {
     }
 
     private static func accountObject(for account: MailAccount) -> [String: Any] {
-        [
+        var object: [String: Any] = [
             "id": account.id,
             "read": name(for: account.permissions.read),
             "write": [
@@ -116,6 +194,17 @@ public enum PolicyDocument {
                 ["read": rule.read, "write": rule.write]
             }
         ]
+        // Connection facts travel once the user has provided them; the
+        // password itself stays in the keychain, only the reference moves.
+        if account.loginMethod == .password, !account.imapHost.isEmpty, !account.username.isEmpty {
+            object["imap"] = [
+                "host": account.imapHost,
+                "port": 993,
+                "username": account.username,
+                "secret_ref": KeychainStore.secretReference(forAccount: account.id)
+            ]
+        }
+        return object
     }
 
     private static func name(for read: ReadAccess) -> String {

@@ -249,6 +249,30 @@ require(
     "folder exceptions travel with the document"
 )
 
+// Connection facts travel only for password accounts with a host, and the
+// password itself never does — only the keychain reference.
+let imapAccount = MailAccount(
+    id: "club",
+    name: "Club",
+    email: "club@example.org",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    imapHost: "imap.example.org",
+    username: "club@example.org"
+)
+let imapData = (try? PolicyDocument.data(for: [imapAccount])) ?? Data()
+let imapObject = (try? JSONSerialization.jsonObject(with: imapData)) as? [String: Any] ?? [:]
+let imapEntry = ((imapObject["accounts"] as? [[String: Any]])?.first?["imap"]) as? [String: Any] ?? [:]
+require(
+    imapEntry["host"] as? String == "imap.example.org"
+        && imapEntry["secret_ref"] as? String == "keychain://TorroMail/club",
+    "connection facts carry a keychain reference, never a password"
+)
+require(
+    (workPolicy["imap"] as? [String: Any]) == nil,
+    "OAuth accounts carry no IMAP block until OAuth lands"
+)
+
 // MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(
     executableName: "torromail-mcp",

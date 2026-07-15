@@ -15,9 +15,34 @@ fn policy_path() -> Option<PathBuf> {
 }
 
 fn main() -> io::Result<()> {
-    if std::env::args().any(|argument| argument == "--list-tools") {
+    let arguments: Vec<String> = std::env::args().collect();
+
+    if arguments.iter().any(|argument| argument == "--list-tools") {
         println!("{}", ToolCatalog::default().to_mcp_tools_json());
         return Ok(());
+    }
+
+    // The connection check behind the app's "Test Connection" button:
+    // resolve the secret, log in over TLS, report — exit code carries the
+    // verdict.
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--check-account")
+    {
+        let Some(account_id) = arguments.get(position + 1) else {
+            eprintln!("--check-account needs an account id");
+            std::process::exit(2);
+        };
+        match torromail_mcp::check_account(account_id, policy_path()) {
+            Ok(summary) => {
+                println!("{summary}");
+                return Ok(());
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let server = match policy_path() {
