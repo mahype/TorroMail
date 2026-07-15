@@ -390,9 +390,12 @@ private struct TorroMailRootView: View {
             List(selection: sidebarSelection) {
                 Label(L("Overview"), systemImage: "square.grid.2x2")
                     .tag(TorroMailSidebarSelection.dashboard)
+                // `.badge` has to come before `.tag`: it wraps the row, and a
+                // tag applied to the wrapper does not reach the row, leaving
+                // the item unselectable.
                 Label(L("Mail Accounts"), systemImage: "envelope")
-                    .tag(TorroMailSidebarSelection.accounts)
                     .badge(model.pendingActionCount)
+                    .tag(TorroMailSidebarSelection.accounts)
                 Label(L("Settings"), systemImage: "gearshape")
                     .tag(TorroMailSidebarSelection.settings)
                 Label(L("Log"), systemImage: "list.bullet.rectangle")
