@@ -224,6 +224,31 @@ require(
     "the preview work account demonstrates a preset with folder exceptions"
 )
 
+// The policy document is the bridge to the MCP server: what the switches
+// say is what the server enforces.
+let policyData = (try? PolicyDocument.data(for: model.accounts)) ?? Data()
+let policyObject = (try? JSONSerialization.jsonObject(with: policyData)) as? [String: Any] ?? [:]
+let policyAccounts = policyObject["accounts"] as? [[String: Any]] ?? []
+let workPolicy = policyAccounts.first { ($0["id"] as? String) == "work" } ?? [:]
+require(
+    workPolicy["read"] as? String == "with_attachments",
+    "read levels travel by name"
+)
+require(
+    workPolicy["send"] as? Bool == true,
+    "the send decision reaches the document"
+)
+let workWrite = workPolicy["write"] as? [String: Any] ?? [:]
+require(
+    (workWrite["mark"] as? Bool) == true && (workWrite["permanent_delete"] as? Bool) == false,
+    "write sub-rights travel individually"
+)
+let privateRule = (workPolicy["folder_rules"] as? [String: Any])?["Private"] as? [String: Any] ?? [:]
+require(
+    (privateRule["read"] as? Bool) == false && (privateRule["write"] as? Bool) == false,
+    "folder exceptions travel with the document"
+)
+
 // MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(
     executableName: "torromail-mcp",

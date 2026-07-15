@@ -75,12 +75,20 @@ is the doorway MCP tools go through. Every read is authorized twice —
 account-wide and again for the mailbox the data actually lives in — so
 search results never contain hits from folders the permission rules block.
 `torromail-mcp` routes JSON-RPC `tools/call` into that service. `mail_search`,
-`mail_get_message`, and `mail_mark` execute against fixture data today — under
-the product's default permissions, so marking is refused until an account
-policy allows it. The remaining tools answer "not implemented yet" until the
-real IMAP provider lands. `ImapProviderConfig` already defines the
-configuration boundary for that provider; its `SecretRef` points into the
-keychain and redacts itself in any Debug output.
+`mail_get_message`, and `mail_mark` execute against fixture data today. The
+remaining tools answer "not implemented yet" until the real IMAP provider
+lands. `ImapProviderConfig` already defines the configuration boundary for
+that provider; its `SecretRef` points into the keychain and redacts itself in
+any Debug output.
+
+The permissions set in the app reach the server through an internal policy
+document: the app publishes `~/Library/Application Support/TorroMail/policy.json`
+(override: `TORROMAIL_POLICY_PATH`) whenever accounts change, and every
+`torromail-mcp` instance — whether the app's supervisor or an MCP client
+spawned it — reloads the document on each tool call, so a switch flipped in
+the UI applies immediately. A corrupt document fails closed, accounts missing
+from it are refused, and only when no document exists yet does the server fall
+back to the product default (read and drafts).
 
 ## Search And Cache
 

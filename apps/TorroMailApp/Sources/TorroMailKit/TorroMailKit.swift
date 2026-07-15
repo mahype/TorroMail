@@ -61,6 +61,73 @@ public enum TorroMailAppearance {
     public static let usesSemanticColors = true
 }
 
+/// The internal bridge between the app and every `torromail-mcp` instance:
+/// the app publishes this document whenever permissions change, the server
+/// reloads it per tool call. Internal plumbing — never a user-facing
+/// configuration path.
+public enum PolicyDocument {
+    public static let version = 1
+
+    /// `~/Library/Application Support/TorroMail/policy.json` — the path the
+    /// server falls back to when `TORROMAIL_POLICY_PATH` is not set.
+    public static func defaultURL(fileManager: FileManager = .default) throws -> URL {
+        try fileManager
+            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("TorroMail", isDirectory: true)
+            .appendingPathComponent("policy.json")
+    }
+
+    public static func data(for accounts: [MailAccount]) throws -> Data {
+        let document: [String: Any] = [
+            "version": version,
+            "accounts": accounts.map(accountObject(for:))
+        ]
+        return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+    }
+
+    /// Writes atomically so a reloading server never sees a half document.
+    public static func publish(
+        accounts: [MailAccount],
+        to url: URL? = nil,
+        fileManager: FileManager = .default
+    ) throws {
+        let target = try url ?? defaultURL(fileManager: fileManager)
+        try fileManager.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data(for: accounts).write(to: target, options: .atomic)
+    }
+
+    private static func accountObject(for account: MailAccount) -> [String: Any] {
+        [
+            "id": account.id,
+            "read": name(for: account.permissions.read),
+            "write": [
+                "drafts": account.permissions.write.drafts,
+                "mark": account.permissions.write.mark,
+                "move": account.permissions.write.move,
+                "trash": account.permissions.write.trash,
+                "permanent_delete": account.permissions.write.permanentDelete
+            ],
+            "send": account.permissions.send,
+            "per_folder": account.permissions.perFolder,
+            "folder_rules": account.permissions.folderRules.mapValues { rule in
+                ["read": rule.read, "write": rule.write]
+            }
+        ]
+    }
+
+    private static func name(for read: ReadAccess) -> String {
+        switch read {
+        case .none: "none"
+        case .headers: "headers"
+        case .fullMessage: "full_message"
+        case .withAttachments: "with_attachments"
+        }
+    }
+}
+
 public enum Provider: String, CaseIterable, Identifiable, Hashable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
@@ -526,6 +593,13 @@ public final class MCPServerSupervisor: ObservableObject {
         let process = Process()
         process.executableURL = command.executableURL
         process.arguments = command.arguments
+        // The supervised server reads the same policy document the app
+        // publishes, so the permissions set in the UI are what it enforces.
+        var environment = ProcessInfo.processInfo.environment
+        if let policyURL = try? PolicyDocument.defaultURL() {
+            environment["TORROMAIL_POLICY_PATH"] = policyURL.path
+        }
+        process.environment = environment
         standardInput = Pipe()
         standardOutput = Pipe()
         standardError = Pipe()

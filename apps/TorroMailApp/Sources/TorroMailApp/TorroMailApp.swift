@@ -312,6 +312,15 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
     }
 }
 
+/// Failures are diagnostics, not decisions — they belong in the log.
+private func publishPolicyDocument(for accounts: [MailAccount]) {
+    do {
+        try PolicyDocument.publish(accounts: accounts)
+    } catch {
+        NSLog("TorroMail: policy document write failed: %@", error.localizedDescription)
+    }
+}
+
 @main
 struct TorroMailApp: App {
     static let mainWindowID = "main"
@@ -337,6 +346,11 @@ struct TorroMailApp: App {
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show
+                }
+                // Every permission switch lands in the policy document the
+                // MCP server enforces — flipped in the UI, live on the wire.
+                .onChange(of: model.accounts, initial: true) { _, accounts in
+                    publishPolicyDocument(for: accounts)
                 }
         }
         .commands {

@@ -132,6 +132,77 @@ fn mail_mark_rejects_unknown_flag_names() {
     assert!(response.contains(r#""code":-32602"#));
 }
 
+fn temp_policy_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "torromail-policy-{}-{name}.json",
+        std::process::id()
+    ))
+}
+
+#[test]
+fn policy_document_permissions_reach_the_tools() {
+    let path = temp_policy_path("grants");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":false,"mark":true,"move":false,"trash":false,"permanent_delete":false},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"seen"}}}"#,
+    );
+    std::fs::remove_file(&path).ok();
+
+    // The same call the default policy refuses succeeds once the document
+    // grants the mark permission. The payload travels as escaped JSON text.
+    assert!(response.contains(r#"\"seen\":true"#));
+}
+
+#[test]
+fn accounts_missing_from_the_policy_document_are_refused() {
+    let path = temp_policy_path("other-account");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"personal","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"invoice"}}}"#,
+    );
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("account not found"));
+}
+
+#[test]
+fn corrupt_policy_documents_fail_closed() {
+    let path = temp_policy_path("corrupt");
+    std::fs::write(&path, "not json at all").expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"invoice"}}}"#,
+    );
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("policy document invalid"));
+}
+
+#[test]
+fn a_missing_policy_document_falls_back_to_the_product_default() {
+    let server = LineMcpServer::with_policy_path(temp_policy_path("never-written"));
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"invoice"}}}"#,
+    );
+
+    assert!(response.contains("result-set-1"));
+}
+
 #[test]
 fn tool_list_serializes_without_secrets_or_local_paths() {
     let manifest = ToolCatalog::default().to_mcp_tools_json();

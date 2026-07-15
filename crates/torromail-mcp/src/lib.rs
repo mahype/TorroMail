@@ -3,11 +3,17 @@
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
+mod policy_document;
+
+use std::path::PathBuf;
+
 use serde_json::{Value, json};
 use torromail_core::{
     AccountId, FixtureMailProvider, MailAccessService, MarkChange, PermissionSet, Policy,
     PolicyEngine, SearchSessionStore, StoredMessage,
 };
+
+use crate::policy_document::parse_policy_document;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
@@ -183,6 +189,10 @@ impl ToolCatalog {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LineMcpServer {
     catalog: ToolCatalog,
+    /// Where the app publishes the account permissions. `None` runs the
+    /// product default (read + drafts) for any account — the fixture mode
+    /// tests use.
+    policy_path: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -190,6 +200,15 @@ impl LineMcpServer {
     /// providers will use, minus the network.
     pub fn fixture() -> Self {
         Self::default()
+    }
+
+    /// A server that enforces the policy document at `path`, reloading it on
+    /// every tool call so permission changes in the app apply immediately.
+    pub fn with_policy_path(path: impl Into<PathBuf>) -> Self {
+        Self {
+            catalog: ToolCatalog::default(),
+            policy_path: Some(path.into()),
+        }
     }
 
     pub fn handle_line(&self, line: &str) -> String {
@@ -229,30 +248,63 @@ impl LineMcpServer {
         }
 
         let arguments = &request["params"]["arguments"];
+        let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+        let engine = match self.policy_engine_for(&account_id) {
+            Ok(engine) => engine,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+
         if name == ToolName::MailSearch.as_str() {
-            return handle_mail_search(arguments, id);
+            return handle_mail_search(arguments, &account_id, engine, id);
         }
         if name == ToolName::MailGetMessage.as_str() {
-            return handle_mail_get_message(arguments, id);
+            return handle_mail_get_message(arguments, &account_id, engine, id);
         }
         if name == ToolName::MailMark.as_str() {
-            return handle_mail_mark(arguments, id);
+            return handle_mail_mark(arguments, &account_id, engine, id);
         }
 
         json_rpc_error(id, -32000, "tool not implemented yet")
     }
+
+    /// The engine for this call. With a policy path the document decides —
+    /// reloaded every time, failing closed when unreadable, refusing
+    /// accounts it does not contain. Without one, the product default.
+    fn policy_engine_for(&self, account_id: &AccountId) -> Result<PolicyEngine, String> {
+        let Some(path) = &self.policy_path else {
+            return Ok(default_engine(account_id));
+        };
+
+        match std::fs::read_to_string(path) {
+            Ok(text) => parse_policy_document(&text).map(PolicyEngine::new),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(default_engine(account_id))
+            }
+            Err(error) => Err(format!("policy document unreadable: {error}")),
+        }
+    }
 }
 
-fn handle_mail_search(arguments: &Value, id: &str) -> String {
-    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+/// The product default until the app has published permissions: read and
+/// drafts, nothing else.
+fn default_engine(account_id: &AccountId) -> PolicyEngine {
+    PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())])
+}
+
+fn handle_mail_search(
+    arguments: &Value,
+    account_id: &AccountId,
+    engine: PolicyEngine,
+    id: &str,
+) -> String {
     let query = arguments["query"].as_str().unwrap_or_default();
     let mailbox = arguments["mailbox"].as_str();
     let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
 
     let mut sessions = SearchSessionStore::default();
-    let mut service = fixture_service(&account_id, &mut sessions);
+    let mut service = fixture_service(account_id, engine, &mut sessions);
 
-    match service.search(&account_id, query, mailbox, limit, 100) {
+    match service.search(account_id, query, mailbox, limit, 100) {
         Ok(result_set) => {
             let hits = result_set
                 .hits()
@@ -277,15 +329,19 @@ fn handle_mail_search(arguments: &Value, id: &str) -> String {
     }
 }
 
-fn handle_mail_get_message(arguments: &Value, id: &str) -> String {
-    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+fn handle_mail_get_message(
+    arguments: &Value,
+    account_id: &AccountId,
+    engine: PolicyEngine,
+    id: &str,
+) -> String {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
 
     let mut sessions = SearchSessionStore::default();
-    let service = fixture_service(&account_id, &mut sessions);
+    let service = fixture_service(account_id, engine, &mut sessions);
 
-    match service.get_message(&account_id, message_id, include_body) {
+    match service.get_message(account_id, message_id, include_body) {
         Ok(message) => json_rpc_text_result(
             id,
             &json!({
@@ -304,8 +360,12 @@ fn handle_mail_get_message(arguments: &Value, id: &str) -> String {
     }
 }
 
-fn handle_mail_mark(arguments: &Value, id: &str) -> String {
-    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+fn handle_mail_mark(
+    arguments: &Value,
+    account_id: &AccountId,
+    engine: PolicyEngine,
+    id: &str,
+) -> String {
     let Some(change) = arguments["mark"].as_str().and_then(MarkChange::parse) else {
         return json_rpc_error(
             id,
@@ -319,11 +379,11 @@ fn handle_mail_mark(arguments: &Value, id: &str) -> String {
         .unwrap_or_default();
 
     let mut sessions = SearchSessionStore::default();
-    let mut service = fixture_service(&account_id, &mut sessions);
+    let mut service = fixture_service(account_id, engine, &mut sessions);
 
     let mut marked = Vec::new();
     for message_id in message_ids {
-        match service.mark(&account_id, message_id, change) {
+        match service.mark(account_id, message_id, change) {
             Ok(message) => marked.push(json!({
                 "message_id": message.message_id(),
                 "seen": message.seen(),
@@ -336,18 +396,15 @@ fn handle_mail_mark(arguments: &Value, id: &str) -> String {
     json_rpc_text_result(id, &json!({ "marked": marked }))
 }
 
-/// One policy-checked service over the fixture mailbox, carrying the
-/// product's default permissions: read and drafts — nothing else. Real
-/// accounts and their configured permissions arrive with the IMAP provider.
+/// One policy-checked service over the fixture mailbox. The engine carries
+/// whatever the policy document granted; real mail data arrives with the
+/// IMAP provider.
 fn fixture_service<'a>(
     account_id: &AccountId,
+    engine: PolicyEngine,
     sessions: &'a mut SearchSessionStore,
 ) -> MailAccessService<'a, FixtureMailProvider> {
-    MailAccessService::new(
-        fixture_provider(account_id),
-        PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())]),
-        sessions,
-    )
+    MailAccessService::new(fixture_provider(account_id), engine, sessions)
 }
 
 fn json_rpc_text_result(id: &str, payload: &Value) -> String {
