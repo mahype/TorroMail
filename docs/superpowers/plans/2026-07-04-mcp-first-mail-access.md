@@ -555,12 +555,14 @@ git commit -m "feat: execute MCP mail search"
 
 ### Task 4: Real Provider Boundary For IMAP Configuration
 
+> Completed 2026-07-15.
+
 **Files:**
 - Modify: `crates/torromail-core/src/lib.rs`
 - Create: `crates/torromail-core/src/imap_provider.rs`
 - Test: `crates/torromail-core/tests/core_contract.rs`
 
-- [ ] **Step 1: Write a provider-boundary test without network**
+- [x] **Step 1: Write a provider-boundary test without network**
 
 Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
@@ -583,13 +585,13 @@ fn imap_provider_config_keeps_secrets_out_of_debug_output() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p torromail-core imap_provider_config_keeps_secrets_out_of_debug_output`
 
 Expected: FAIL because `ImapProviderConfig` and `SecretRef` do not exist.
 
-- [ ] **Step 3: Add module and types**
+- [x] **Step 3: Add module and types**
 
 Create `crates/torromail-core/src/imap_provider.rs`:
 
@@ -652,13 +654,13 @@ pub mod imap_provider;
 pub use imap_provider::{ImapProviderConfig, SecretRef};
 ```
 
-- [ ] **Step 4: Run core tests**
+- [x] **Step 4: Run core tests**
 
 Run: `cargo test -p torromail-core`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/torromail-core/src/lib.rs crates/torromail-core/src/imap_provider.rs crates/torromail-core/tests/core_contract.rs

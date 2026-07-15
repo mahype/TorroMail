@@ -219,6 +219,21 @@ fn expired_pending_actions_cannot_be_confirmed() {
 }
 
 #[test]
+fn imap_provider_config_keeps_secrets_out_of_debug_output() {
+    let config = torromail_core::ImapProviderConfig::new(
+        AccountId::new("work"),
+        "imap.example.com",
+        993,
+        "work@example.com",
+        torromail_core::SecretRef::new("keychain://torromail/work"),
+    );
+
+    let debug = format!("{config:?}");
+    assert!(debug.contains("imap.example.com"));
+    assert!(!debug.contains("keychain://torromail/work"));
+}
+
+#[test]
 fn fixture_provider_searches_and_reads_messages_without_ui_state() {
     let account_id = AccountId::new("work");
     let provider = FixtureMailProvider::new([

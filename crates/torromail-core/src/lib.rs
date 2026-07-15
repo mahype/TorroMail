@@ -1,5 +1,9 @@
 //! Portable TorroMail core.
 
+pub mod imap_provider;
+
+pub use imap_provider::{ImapProviderConfig, SecretRef};
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display};
