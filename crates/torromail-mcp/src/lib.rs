@@ -3,6 +3,12 @@
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
+use serde_json::{Value, json};
+use torromail_core::{
+    AccountId, FixtureMailProvider, MailAccessService, PermissionSet, Policy, PolicyEngine,
+    SearchSessionStore, StoredMessage,
+};
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
     #[default]
@@ -180,6 +186,12 @@ pub struct LineMcpServer {
 }
 
 impl LineMcpServer {
+    /// A server wired to fixture data — the same policy-checked path real
+    /// providers will use, minus the network.
+    pub fn fixture() -> Self {
+        Self::default()
+    }
+
     pub fn handle_line(&self, line: &str) -> String {
         let id = extract_json_rpc_id(line).unwrap_or("null");
 
@@ -196,10 +208,101 @@ impl LineMcpServer {
             );
         }
 
+        if line.contains(r#""method":"tools/call""#) || line.contains(r#""method": "tools/call""#) {
+            return self.handle_tool_call(line, id);
+        }
+
         format!(
             r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32601,"message":"method not found"}}}}"#
         )
     }
+
+    fn handle_tool_call(&self, line: &str, id: &str) -> String {
+        let request: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(error) => return json_rpc_error(id, -32700, &error.to_string()),
+        };
+
+        let name = request["params"]["name"].as_str().unwrap_or_default();
+        if !self.catalog.names_as_str().contains(&name) {
+            return json_rpc_error(id, -32601, "tool not found");
+        }
+        if name != ToolName::MailSearch.as_str() {
+            return json_rpc_error(id, -32000, "tool not implemented yet");
+        }
+
+        let arguments = &request["params"]["arguments"];
+        let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+        let query = arguments["query"].as_str().unwrap_or_default();
+        let mailbox = arguments["mailbox"].as_str();
+        let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
+
+        let mut sessions = SearchSessionStore::default();
+        let mut service = MailAccessService::new(
+            fixture_provider(&account_id),
+            PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())]),
+            &mut sessions,
+        );
+
+        match service.search(&account_id, query, mailbox, limit, 100) {
+            Ok(result_set) => {
+                let hits = result_set
+                    .hits()
+                    .iter()
+                    .map(|hit| {
+                        json!({
+                            "message_id": hit.message_id(),
+                            "mailbox": hit.mailbox(),
+                            "subject": hit.subject()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": json!({
+                                "result_set_id": result_set.id(),
+                                "hits": hits
+                            })
+                            .to_string()
+                        }]
+                    }
+                })
+                .to_string()
+            }
+            Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+        }
+    }
+}
+
+/// The fixture mailbox behind `LineMcpServer::fixture`. Real accounts arrive
+/// with the provider boundary for IMAP configuration.
+fn fixture_provider(account_id: &AccountId) -> FixtureMailProvider {
+    FixtureMailProvider::new([StoredMessage::new(
+        account_id.clone(),
+        "INBOX",
+        "m1",
+        "thread-1",
+        "Quarterly invoice",
+        "billing@example.com",
+        "The quarterly invoice is attached.",
+        "Invoice body",
+    )])
+}
+
+fn json_rpc_error(id: &str, code: i64, message: &str) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+    .to_string()
 }
 
 fn canonical_tools() -> Vec<ToolDescriptor> {

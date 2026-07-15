@@ -30,11 +30,13 @@ This plan must not add an inbox, message list for human browsing, conversation v
 
 ### Task 1: Core Mail Models And Fixture Provider
 
+> Completed 2026-07-15 — adapted to the permission-groups policy model (read/write/send with folder rules) that replaced the flat capability set.
+
 **Files:**
 - Modify: `crates/torromail-core/src/lib.rs`
 - Test: `crates/torromail-core/tests/core_contract.rs`
 
-- [ ] **Step 1: Write failing tests for search/read models**
+- [x] **Step 1: Write failing tests for search/read models**
 
 Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
@@ -79,13 +81,13 @@ fn fixture_provider_searches_and_reads_messages_without_ui_state() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p torromail-core fixture_provider_searches_and_reads_messages_without_ui_state`
 
 Expected: FAIL because `FixtureMailProvider`, `MailProvider`, and `StoredMessage` do not exist.
 
-- [ ] **Step 3: Implement the minimal core models and provider**
+- [x] **Step 3: Implement the minimal core models and provider**
 
 Add these public types near `SearchHit` in `crates/torromail-core/src/lib.rs`:
 
@@ -203,13 +205,13 @@ impl MailProvider for FixtureMailProvider {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p torromail-core fixture_provider_searches_and_reads_messages_without_ui_state`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 If the workspace is inside a Git repository:
 
@@ -222,11 +224,13 @@ git commit -m "feat: add mail provider fixture"
 
 ### Task 2: Policy-Enforced Mail Access Service
 
+> Completed 2026-07-15 — adapted to the permission-groups policy model (read/write/send with folder rules) that replaced the flat capability set.
+
 **Files:**
 - Modify: `crates/torromail-core/src/lib.rs`
 - Test: `crates/torromail-core/tests/core_contract.rs`
 
-- [ ] **Step 1: Write failing tests for policy enforcement**
+- [x] **Step 1: Write failing tests for policy enforcement**
 
 Add this test to `crates/torromail-core/tests/core_contract.rs`:
 
@@ -264,13 +268,13 @@ fn mail_access_service_enforces_search_and_body_policy() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p torromail-core mail_access_service_enforces_search_and_body_policy`
 
 Expected: FAIL because `MailAccessService` does not exist.
 
-- [ ] **Step 3: Implement `MailAccessService`**
+- [x] **Step 3: Implement `MailAccessService`**
 
 Add this type after `FixtureMailProvider` in `crates/torromail-core/src/lib.rs`:
 
@@ -334,13 +338,13 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
 }
 ```
 
-- [ ] **Step 4: Run core tests**
+- [x] **Step 4: Run core tests**
 
 Run: `cargo test -p torromail-core`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/torromail-core/src/lib.rs crates/torromail-core/tests/core_contract.rs
@@ -351,12 +355,14 @@ git commit -m "feat: enforce mail access policy"
 
 ### Task 3: MCP JSON-RPC Tool Calls
 
+> Completed 2026-07-15 — adapted to the permission-groups policy model (read/write/send with folder rules) that replaced the flat capability set.
+
 **Files:**
 - Modify: `crates/torromail-mcp/Cargo.toml`
 - Modify: `crates/torromail-mcp/src/lib.rs`
 - Test: `crates/torromail-mcp/tests/tool_contract.rs`
 
-- [ ] **Step 1: Add failing MCP call tests**
+- [x] **Step 1: Add failing MCP call tests**
 
 Add this test to `crates/torromail-mcp/tests/tool_contract.rs`:
 
@@ -385,13 +391,13 @@ fn mcp_server_rejects_unknown_tool_calls() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p torromail-mcp mcp_server_executes_fixture_backed_mail_search`
 
 Expected: FAIL because `LineMcpServer::fixture` and `tools/call` routing do not exist.
 
-- [ ] **Step 3: Add dependencies**
+- [x] **Step 3: Add dependencies**
 
 In `crates/torromail-mcp/Cargo.toml`, keep the existing `torromail-core` dependency and add `serde_json`:
 
@@ -401,7 +407,7 @@ torromail-core = { path = "../torromail-core" }
 serde_json = "1"
 ```
 
-- [ ] **Step 4: Implement fixture-backed `tools/call` routing**
+- [x] **Step 4: Implement fixture-backed `tools/call` routing**
 
 In `crates/torromail-mcp/src/lib.rs`, import JSON and core types:
 
@@ -532,13 +538,13 @@ pub fn subject(&self) -> &str {
 }
 ```
 
-- [ ] **Step 5: Run MCP tests**
+- [x] **Step 5: Run MCP tests**
 
 Run: `cargo test -p torromail-mcp`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/torromail-core/src/lib.rs crates/torromail-mcp/Cargo.toml crates/torromail-mcp/src/lib.rs crates/torromail-mcp/tests/tool_contract.rs

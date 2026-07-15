@@ -67,6 +67,17 @@ Read-only admin tools:
 - `mail_get_policy`
 - `mail_get_cache_status`
 
+## Service Boundary
+
+`torromail-core` owns the policy-checked mail path. `MailProvider` is the
+trait fixture-backed tests and real IMAP retrieval share; `MailAccessService`
+is the doorway MCP tools go through. Every read is authorized twice —
+account-wide and again for the mailbox the data actually lives in — so
+search results never contain hits from folders the permission rules block.
+`torromail-mcp` routes JSON-RPC `tools/call` into that service. `mail_search`
+executes against fixture data today; the remaining tools answer "not
+implemented yet" until the real IMAP provider lands.
+
 ## Search And Cache
 
 The default cache policy persists metadata and headers only. Body cache, body indexing, and attachment indexing are opt-in per account or mailbox. Every search creates a reusable `result_set_id`; refinements operate on the prior set before broadening back to provider search.

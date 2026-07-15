@@ -1,4 +1,4 @@
-use torromail_mcp::{AccessLevel, ToolCatalog, ToolName, TransportMode};
+use torromail_mcp::{AccessLevel, LineMcpServer, ToolCatalog, ToolName, TransportMode};
 
 #[test]
 fn stdio_is_the_default_transport() {
@@ -61,6 +61,40 @@ fn gui_only_mutations_are_not_exposed_as_mcp_tools() {
     assert!(!names.contains(&"mail_update_secret"));
     assert!(!names.contains(&"mail_set_permissions"));
     assert!(!names.contains(&"mail_enable_oauth"));
+}
+
+#[test]
+fn mcp_server_executes_fixture_backed_mail_search() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"invoice","mailbox":"INBOX","limit":10}}}"#,
+    );
+
+    assert!(response.contains(r#""id":1"#));
+    assert!(response.contains("result-set-1"));
+    assert!(response.contains("Quarterly invoice"));
+}
+
+#[test]
+fn mcp_server_rejects_unknown_tool_calls() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mail_add_account","arguments":{}}}"#,
+    );
+
+    assert!(response.contains(r#""code":-32601"#));
+    assert!(response.contains("tool not found"));
+}
+
+#[test]
+fn known_but_unimplemented_tools_say_so_instead_of_vanishing() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_get_message","arguments":{}}}"#,
+    );
+
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("not implemented"));
 }
 
 #[test]
