@@ -5,8 +5,8 @@
 
 use serde_json::{Value, json};
 use torromail_core::{
-    AccountId, FixtureMailProvider, MailAccessService, PermissionSet, Policy, PolicyEngine,
-    SearchSessionStore, StoredMessage,
+    AccountId, FixtureMailProvider, MailAccessService, MarkChange, PermissionSet, Policy,
+    PolicyEngine, SearchSessionStore, StoredMessage,
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -227,55 +227,141 @@ impl LineMcpServer {
         if !self.catalog.names_as_str().contains(&name) {
             return json_rpc_error(id, -32601, "tool not found");
         }
-        if name != ToolName::MailSearch.as_str() {
-            return json_rpc_error(id, -32000, "tool not implemented yet");
-        }
 
         let arguments = &request["params"]["arguments"];
-        let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
-        let query = arguments["query"].as_str().unwrap_or_default();
-        let mailbox = arguments["mailbox"].as_str();
-        let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
+        if name == ToolName::MailSearch.as_str() {
+            return handle_mail_search(arguments, id);
+        }
+        if name == ToolName::MailGetMessage.as_str() {
+            return handle_mail_get_message(arguments, id);
+        }
+        if name == ToolName::MailMark.as_str() {
+            return handle_mail_mark(arguments, id);
+        }
 
-        let mut sessions = SearchSessionStore::default();
-        let mut service = MailAccessService::new(
-            fixture_provider(&account_id),
-            PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())]),
-            &mut sessions,
-        );
+        json_rpc_error(id, -32000, "tool not implemented yet")
+    }
+}
 
-        match service.search(&account_id, query, mailbox, limit, 100) {
-            Ok(result_set) => {
-                let hits = result_set
-                    .hits()
-                    .iter()
-                    .map(|hit| {
-                        json!({
-                            "message_id": hit.message_id(),
-                            "mailbox": hit.mailbox(),
-                            "subject": hit.subject()
-                        })
+fn handle_mail_search(arguments: &Value, id: &str) -> String {
+    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+    let query = arguments["query"].as_str().unwrap_or_default();
+    let mailbox = arguments["mailbox"].as_str();
+    let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
+
+    let mut sessions = SearchSessionStore::default();
+    let mut service = fixture_service(&account_id, &mut sessions);
+
+    match service.search(&account_id, query, mailbox, limit, 100) {
+        Ok(result_set) => {
+            let hits = result_set
+                .hits()
+                .iter()
+                .map(|hit| {
+                    json!({
+                        "message_id": hit.message_id(),
+                        "mailbox": hit.mailbox(),
+                        "subject": hit.subject()
                     })
-                    .collect::<Vec<_>>();
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
-                    "result": {
-                        "content": [{
-                            "type": "text",
-                            "text": json!({
-                                "result_set_id": result_set.id(),
-                                "hits": hits
-                            })
-                            .to_string()
-                        }]
-                    }
                 })
-                .to_string()
-            }
-            Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+                .collect::<Vec<_>>();
+            json_rpc_text_result(
+                id,
+                &json!({
+                    "result_set_id": result_set.id(),
+                    "hits": hits
+                }),
+            )
+        }
+        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+    }
+}
+
+fn handle_mail_get_message(arguments: &Value, id: &str) -> String {
+    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+    let message_id = arguments["message_id"].as_str().unwrap_or_default();
+    let include_body = arguments["include_body"].as_bool().unwrap_or(false);
+
+    let mut sessions = SearchSessionStore::default();
+    let service = fixture_service(&account_id, &mut sessions);
+
+    match service.get_message(&account_id, message_id, include_body) {
+        Ok(message) => json_rpc_text_result(
+            id,
+            &json!({
+                "message_id": message.message_id(),
+                "mailbox": message.mailbox(),
+                "thread_id": message.thread_id(),
+                "subject": message.subject(),
+                "sender": message.sender(),
+                "snippet": message.snippet(),
+                "body": message.body(),
+                "seen": message.seen(),
+                "flagged": message.flagged()
+            }),
+        ),
+        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+    }
+}
+
+fn handle_mail_mark(arguments: &Value, id: &str) -> String {
+    let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+    let Some(change) = arguments["mark"].as_str().and_then(MarkChange::parse) else {
+        return json_rpc_error(
+            id,
+            -32602,
+            "mark must be one of seen, unseen, flagged, unflagged",
+        );
+    };
+    let message_ids: Vec<&str> = arguments["message_ids"]
+        .as_array()
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let mut sessions = SearchSessionStore::default();
+    let mut service = fixture_service(&account_id, &mut sessions);
+
+    let mut marked = Vec::new();
+    for message_id in message_ids {
+        match service.mark(&account_id, message_id, change) {
+            Ok(message) => marked.push(json!({
+                "message_id": message.message_id(),
+                "seen": message.seen(),
+                "flagged": message.flagged()
+            })),
+            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
         }
     }
+
+    json_rpc_text_result(id, &json!({ "marked": marked }))
+}
+
+/// One policy-checked service over the fixture mailbox, carrying the
+/// product's default permissions: read and drafts — nothing else. Real
+/// accounts and their configured permissions arrive with the IMAP provider.
+fn fixture_service<'a>(
+    account_id: &AccountId,
+    sessions: &'a mut SearchSessionStore,
+) -> MailAccessService<'a, FixtureMailProvider> {
+    MailAccessService::new(
+        fixture_provider(account_id),
+        PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())]),
+        sessions,
+    )
+}
+
+fn json_rpc_text_result(id: &str, payload: &Value) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": serde_json::from_str::<Value>(id).unwrap_or(Value::Null),
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": payload.to_string()
+            }]
+        }
+    })
+    .to_string()
 }
 
 /// The fixture mailbox behind `LineMcpServer::fixture`. Real accounts arrive

@@ -1,8 +1,8 @@
 use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
-    FixtureMailProvider, FolderRule, MailAccessService, MailProvider, PendingActionRequest,
-    PendingActionStore, PermissionPreset, PermissionSet, Policy, PolicyEngine, ReadAccess,
-    SearchHit, SearchSessionStore, StoredMessage, WriteAccess,
+    FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
+    PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
+    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, StoredMessage, WriteAccess,
 };
 
 #[test]
@@ -354,6 +354,76 @@ fn mail_access_service_keeps_blocked_folders_invisible() {
 
     // Not even headers escape a blocked folder.
     assert!(service.get_message(&account_id, "m2", false).is_err());
+}
+
+#[test]
+fn marking_respects_the_mark_permission_and_folder_rules() {
+    let account_id = AccountId::new("work");
+    let provider = FixtureMailProvider::new([
+        StoredMessage::new(
+            account_id.clone(),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Quarterly invoice",
+            "billing@example.com",
+            "The quarterly invoice is attached.",
+            "Invoice body",
+        ),
+        StoredMessage::new(
+            account_id.clone(),
+            "Private",
+            "m2",
+            "thread-2",
+            "Personal note",
+            "friend@example.net",
+            "A personal note",
+            "Personal body",
+        ),
+    ]);
+    let mut permissions = PermissionSet::default();
+    permissions.apply(PermissionPreset::TidyUp);
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Private".to_owned(),
+        FolderRule {
+            read: false,
+            write: false,
+        },
+    );
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    let marked = service
+        .mark(&account_id, "m1", MarkChange::Seen)
+        .expect("marking is allowed in INBOX");
+    assert!(marked.seen());
+    assert!(!marked.flagged());
+
+    // The blocked folder refuses the mutation no matter what the tool
+    // arguments claim.
+    assert!(service.mark(&account_id, "m2", MarkChange::Seen).is_err());
+}
+
+#[test]
+fn default_permissions_keep_marking_shut() {
+    let account_id = AccountId::new("work");
+    let provider = FixtureMailProvider::new([StoredMessage::new(
+        account_id.clone(),
+        "INBOX",
+        "m1",
+        "thread-1",
+        "Quarterly invoice",
+        "billing@example.com",
+        "The quarterly invoice is attached.",
+        "Invoice body",
+    )]);
+    let engine = PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())]);
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    assert!(service.mark(&account_id, "m1", MarkChange::Seen).is_err());
 }
 
 #[test]

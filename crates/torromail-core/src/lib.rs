@@ -811,6 +811,29 @@ impl SearchSessionStore {
     }
 }
 
+/// The four flag changes assistants may ask for — the two IMAP flags the
+/// mark permission covers, each in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkChange {
+    Seen,
+    Unseen,
+    Flagged,
+    Unflagged,
+}
+
+impl MarkChange {
+    /// The wire names used in tool arguments.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "seen" => Some(Self::Seen),
+            "unseen" => Some(Self::Unseen),
+            "flagged" => Some(Self::Flagged),
+            "unflagged" => Some(Self::Unflagged),
+            _ => None,
+        }
+    }
+}
+
 /// One message as a provider stores it. Message data exists for MCP
 /// responses, fixtures, and pending-action previews only — never for a
 /// human-facing mail surface.
@@ -824,6 +847,8 @@ pub struct StoredMessage {
     sender: String,
     snippet: String,
     body: String,
+    seen: bool,
+    flagged: bool,
 }
 
 impl StoredMessage {
@@ -847,11 +872,21 @@ impl StoredMessage {
             sender: sender.into(),
             snippet: snippet.into(),
             body: body.into(),
+            seen: false,
+            flagged: false,
         }
     }
 
     pub fn mailbox(&self) -> &str {
         &self.mailbox
+    }
+
+    pub fn seen(&self) -> bool {
+        self.seen
+    }
+
+    pub fn flagged(&self) -> bool {
+        self.flagged
     }
 
     pub fn message_id(&self) -> &str {
@@ -889,6 +924,15 @@ impl StoredMessage {
             .map(str::to_lowercase)
             .all(|token| haystack.contains(&token))
     }
+
+    fn apply(&mut self, change: MarkChange) {
+        match change {
+            MarkChange::Seen => self.seen = true,
+            MarkChange::Unseen => self.seen = false,
+            MarkChange::Flagged => self.flagged = true,
+            MarkChange::Unflagged => self.flagged = false,
+        }
+    }
 }
 
 /// The boundary fixture-backed tests and real IMAP retrieval share: search
@@ -903,6 +947,13 @@ pub trait MailProvider {
     ) -> CoreResult<Vec<SearchHit>>;
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
+
+    fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<()>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -951,6 +1002,21 @@ impl MailProvider for FixtureMailProvider {
             .find(|message| &message.account_id == account_id && message.message_id == message_id)
             .cloned()
             .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))
+    }
+
+    fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<()> {
+        let message = self
+            .messages
+            .iter_mut()
+            .find(|message| &message.account_id == account_id && message.message_id == message_id)
+            .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))?;
+        message.apply(change);
+        Ok(())
     }
 }
 
@@ -1028,15 +1094,25 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
             return Ok(message);
         }
 
-        Ok(StoredMessage::new(
-            account_id.clone(),
-            message.mailbox(),
-            message.message_id(),
-            message.thread_id(),
-            message.subject(),
-            message.sender(),
-            message.snippet(),
-            "",
-        ))
+        // Below ReadBody the message keeps its metadata and loses its
+        // content.
+        let mut header_only = message;
+        header_only.body = String::new();
+        Ok(header_only)
+    }
+
+    /// Marking is folder-scoped like every mailbox mutation — the message's
+    /// own mailbox decides, not whatever mailbox the caller claims.
+    pub fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<StoredMessage> {
+        let message = self.provider.get_message(account_id, message_id)?;
+        self.policy_engine
+            .authorize_in(account_id, message.mailbox(), Capability::Mark)?;
+        self.provider.mark(account_id, message_id, change)?;
+        self.provider.get_message(account_id, message_id)
     }
 }

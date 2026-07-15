@@ -90,11 +90,46 @@ fn mcp_server_rejects_unknown_tool_calls() {
 fn known_but_unimplemented_tools_say_so_instead_of_vanishing() {
     let server = LineMcpServer::fixture();
     let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_get_message","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_get_thread","arguments":{}}}"#,
     );
 
     assert!(response.contains(r#""code":-32000"#));
     assert!(response.contains("not implemented"));
+}
+
+#[test]
+fn mcp_server_reads_single_messages_through_the_policy() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"m1","include_body":true}}}"#,
+    );
+
+    assert!(response.contains(r#""id":4"#));
+    assert!(response.contains("Quarterly invoice"));
+    assert!(response.contains("Invoice body"));
+}
+
+#[test]
+fn mcp_server_enforces_the_mark_permission() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"seen"}}}"#,
+    );
+
+    // The fixture account runs on the read + drafts default, so marking is
+    // exactly what the policy must refuse.
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("Mark is not allowed"));
+}
+
+#[test]
+fn mail_mark_rejects_unknown_flag_names() {
+    let server = LineMcpServer::fixture();
+    let response = server.handle_line(
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"starred"}}}"#,
+    );
+
+    assert!(response.contains(r#""code":-32602"#));
 }
 
 #[test]
