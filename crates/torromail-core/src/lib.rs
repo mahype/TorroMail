@@ -4,7 +4,7 @@ pub mod imap_provider;
 
 pub use imap_provider::{
     FetchedMessage, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport, SecretRef,
-    TcpImapTransport,
+    StreamImapTransport, TcpImapTransport,
 };
 
 use std::collections::BTreeMap;

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/torromail-core",
+    "crates/torromail-imap-tls",
     "crates/torromail-mcp",
 ]
 resolver = "3"

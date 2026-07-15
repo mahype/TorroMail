@@ -341,37 +341,34 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     }
 }
 
-/// Plaintext TCP transport — development against local test servers only.
-/// Real accounts wait for the TLS transport; `ImapProviderConfig` already
-/// carries the connection facts it will need.
-pub struct TcpImapTransport {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+/// Buffered line/literal transport over any duplex byte stream — plaintext
+/// TCP in development, TLS in production (`torromail-imap-tls`). Reads are
+/// buffered; writes go straight through to the underlying stream.
+pub struct StreamImapTransport<S: Read + Write> {
+    stream: BufReader<S>,
 }
 
-impl TcpImapTransport {
-    pub fn connect(host: &str, port: u16) -> CoreResult<Self> {
-        let stream = TcpStream::connect((host, port)).map_err(io_failure)?;
-        let reader = BufReader::new(stream.try_clone().map_err(io_failure)?);
-        Ok(Self {
-            reader,
-            writer: stream,
-        })
+impl<S: Read + Write> StreamImapTransport<S> {
+    pub fn new(stream: S) -> Self {
+        Self {
+            stream: BufReader::new(stream),
+        }
     }
 }
 
-impl ImapTransport for TcpImapTransport {
+impl<S: Read + Write> ImapTransport for StreamImapTransport<S> {
     fn send_line(&mut self, line: &str) -> CoreResult<()> {
-        self.writer
+        let writer = self.stream.get_mut();
+        writer
             .write_all(line.as_bytes())
-            .and_then(|_| self.writer.write_all(b"\r\n"))
-            .and_then(|_| self.writer.flush())
+            .and_then(|()| writer.write_all(b"\r\n"))
+            .and_then(|()| writer.flush())
             .map_err(io_failure)
     }
 
     fn read_line(&mut self) -> CoreResult<String> {
         let mut line = String::new();
-        let read = self.reader.read_line(&mut line).map_err(io_failure)?;
+        let read = self.stream.read_line(&mut line).map_err(io_failure)?;
         if read == 0 {
             return Err(CoreError::ProviderFailure(
                 "IMAP connection closed".to_owned(),
@@ -385,8 +382,19 @@ impl ImapTransport for TcpImapTransport {
 
     fn read_bytes(&mut self, count: usize) -> CoreResult<Vec<u8>> {
         let mut bytes = vec![0; count];
-        self.reader.read_exact(&mut bytes).map_err(io_failure)?;
+        self.stream.read_exact(&mut bytes).map_err(io_failure)?;
         Ok(bytes)
+    }
+}
+
+/// Plaintext TCP — development against local test servers only. Real
+/// accounts use the TLS transport in `torromail-imap-tls`.
+pub type TcpImapTransport = StreamImapTransport<TcpStream>;
+
+impl StreamImapTransport<TcpStream> {
+    pub fn connect(host: &str, port: u16) -> CoreResult<Self> {
+        let stream = TcpStream::connect((host, port)).map_err(io_failure)?;
+        Ok(Self::new(stream))
     }
 }
 

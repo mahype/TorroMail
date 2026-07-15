@@ -83,10 +83,15 @@ The real IMAP path exists as a protocol core behind `ImapTransport`:
 `ImapClient` speaks the smallest useful IMAP4rev1 subset (LOGIN, LIST,
 SELECT, UID SEARCH/FETCH/STORE, literal parsing, PEEK-only body reads), and
 `ImapMailProvider` implements the same `MailProvider` trait the fixtures use
-— fully covered by scripted-transport tests without a network. The plaintext
-`TcpImapTransport` serves local development only; real accounts wait for the
-TLS transport and keychain-backed secret resolution behind
-`ImapProviderConfig`, whose `SecretRef` redacts itself in any Debug output.
+— fully covered by scripted-transport tests without a network. Transports
+share one generic `StreamImapTransport` over any duplex stream: plaintext
+TCP for local development, and implicit TLS from `torromail-imap-tls`
+(rustls with the bundled Mozilla roots; custom CAs arrive with platform
+verification). `torromail_imap_tls::connect_account` turns an
+`ImapProviderConfig` plus a resolved secret into a logged-in provider —
+resolving the secret from the keychain is the one piece still open, so the
+MCP server keeps serving fixture data until it lands. `SecretRef` redacts
+itself in any Debug output.
 
 The permissions set in the app reach the server through an internal policy
 document: the app publishes `~/Library/Application Support/TorroMail/policy.json`

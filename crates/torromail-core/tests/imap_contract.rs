@@ -3,10 +3,12 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io::{Cursor, Read, Write};
 use std::rc::Rc;
 
 use torromail_core::{
     AccountId, CoreResult, ImapClient, ImapMailProvider, ImapTransport, MailProvider, MarkChange,
+    StreamImapTransport,
 };
 
 #[derive(Debug)]
@@ -227,6 +229,50 @@ fn marking_sends_a_uid_store_and_reuses_the_selection() {
     let sent = log.lines();
     assert_eq!(sent[2], "t3 UID STORE 101 +FLAGS (\\Seen)");
     assert_eq!(sent[3], "t4 UID STORE 101 +FLAGS (\\Flagged)");
+}
+
+/// In-memory duplex stream: canned input, shared view on the output.
+struct DuplexStream {
+    input: Cursor<Vec<u8>>,
+    output: Rc<RefCell<Vec<u8>>>,
+}
+
+impl Read for DuplexStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.input.read(buffer)
+    }
+}
+
+impl Write for DuplexStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.output.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_stream_transport_strips_crlf_frames_literals_and_appends_crlf() {
+    let written = Rc::new(RefCell::new(Vec::new()));
+    let stream = DuplexStream {
+        input: Cursor::new(b"* OK ready\r\nabcde rest\r\n".to_vec()),
+        output: written.clone(),
+    };
+    let mut transport = StreamImapTransport::new(stream);
+
+    assert_eq!(transport.read_line().expect("line arrives"), "* OK ready");
+    assert_eq!(transport.read_bytes(5).expect("literal arrives"), b"abcde");
+    assert_eq!(transport.read_line().expect("rest arrives"), " rest");
+    assert!(
+        transport.read_line().is_err(),
+        "a closed stream is an error"
+    );
+
+    transport.send_line("t1 NOOP").expect("send succeeds");
+    assert_eq!(written.borrow().as_slice(), b"t1 NOOP\r\n");
 }
 
 #[test]
