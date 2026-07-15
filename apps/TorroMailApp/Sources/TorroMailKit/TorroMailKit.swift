@@ -37,6 +37,20 @@ public struct NewsItem: Identifiable, Hashable {
     }
 }
 
+/// The product boundary, stated as data so the contract test can hold the
+/// codebase to it: TorroMail configures and controls mail access — it never
+/// becomes the place where a human reads mail.
+public enum TorroMailProductBoundary {
+    public static let allowedAppRole = "Setup, consent, MCP lifecycle, status, audit, and diagnostics"
+
+    public static let disallowedUserMailSurfaces = [
+        "Inbox UI",
+        "Message reader",
+        "Thread browser",
+        "Manual triage workflow"
+    ]
+}
+
 public enum Provider: String, CaseIterable, Identifiable, Hashable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"

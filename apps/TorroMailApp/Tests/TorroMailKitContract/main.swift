@@ -115,6 +115,22 @@ require(
     "with the Dock icon on TorroMail stays in the Dock without a window"
 )
 
+// The product boundary is part of the contract: the app is a control
+// surface, never a mail client.
+require(
+    TorroMailProductBoundary.disallowedUserMailSurfaces == [
+        "Inbox UI",
+        "Message reader",
+        "Thread browser",
+        "Manual triage workflow"
+    ],
+    "product boundary should reject mail-client surfaces"
+)
+require(
+    TorroMailProductBoundary.allowedAppRole == "Setup, consent, MCP lifecycle, status, audit, and diagnostics",
+    "app role should be control-surface only"
+)
+
 // Account lifecycle stays in the GUI: add opens the new account, remove
 // drops back to the account list.
 model.addAccount(name: "Club", email: "club@example.org", provider: .imapSmtp, loginMethod: .password)
