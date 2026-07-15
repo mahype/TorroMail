@@ -329,12 +329,27 @@ struct TorroMailApp: App {
         MenuBarExtra(
             L("TorroMail"),
             systemImage: "envelope.fill",
-            isInserted: $model.generalSettings.showMenuBarIcon
+            isInserted: menuBarInserted
         ) {
             MenuBarContent()
                 .environmentObject(model)
                 .environmentObject(presence)
         }
+    }
+
+    /// `MenuBarExtra` writes `isInserted` back on every scene update, including
+    /// when the value has not changed. Writing into `generalSettings` — a
+    /// struct behind `@Published` — republishes regardless, which re-runs this
+    /// scene body, which writes again: the app spins at 100% CPU and never
+    /// takes a click. Swallowing the no-op writes breaks the cycle.
+    private var menuBarInserted: Binding<Bool> {
+        Binding(
+            get: { model.generalSettings.showMenuBarIcon },
+            set: { show in
+                guard show != model.generalSettings.showMenuBarIcon else { return }
+                model.generalSettings.showMenuBarIcon = show
+            }
+        )
     }
 }
 
