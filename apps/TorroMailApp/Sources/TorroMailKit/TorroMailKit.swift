@@ -630,6 +630,17 @@ public struct MCPExecutableLocator: Hashable {
     }
 
     public func resolve(fileManager: FileManager = .default) -> MCPLaunchCommand? {
+        // The app ships its own server: the bundled copy wins, so nothing
+        // depends on the working directory or a shell PATH.
+        if let bundled = Bundle.main.url(forAuxiliaryExecutable: executableName),
+           fileManager.isExecutableFile(atPath: bundled.path) {
+            return MCPLaunchCommand(
+                executableURL: bundled,
+                arguments: [],
+                displayPath: bundled.path
+            )
+        }
+
         for candidate in candidatePaths {
             if candidate.contains("/") {
                 if fileManager.isExecutableFile(atPath: candidate) {
