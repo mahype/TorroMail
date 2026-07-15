@@ -82,37 +82,177 @@ public enum ConnectionState: Hashable {
     }
 }
 
-public struct PermissionSet: Hashable {
-    public var readHeaders: Bool
-    public var readBody: Bool
-    public var attachments: Bool
+/// How deep assistants may read. The levels build on each other: the message
+/// implies its header, attachments imply the message.
+public enum ReadAccess: Int, CaseIterable, Identifiable, Hashable, Comparable, Sendable {
+    case none = 0
+    case headers = 1
+    case fullMessage = 2
+    case withAttachments = 3
+
+    public var id: Self { self }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+/// Mailbox mutations — everything that changes the mailbox but stays on the
+/// server. Sending is deliberately not in here: it is the one right that acts
+/// on the outside world.
+public struct WriteAccess: Hashable, Sendable {
     public var drafts: Bool
-    public var send: Bool
     public var mark: Bool
     public var move: Bool
-    public var delete: Bool
+    public var trash: Bool
+    /// Escalation of `trash`; meaningless without it, so `sanitized()` clears
+    /// it when the trash right falls. Never part of a preset.
     public var permanentDelete: Bool
 
     public init(
-        readHeaders: Bool = true,
-        readBody: Bool = false,
-        attachments: Bool = false,
         drafts: Bool = false,
-        send: Bool = false,
         mark: Bool = false,
         move: Bool = false,
-        delete: Bool = false,
+        trash: Bool = false,
         permanentDelete: Bool = false
     ) {
-        self.readHeaders = readHeaders
-        self.readBody = readBody
-        self.attachments = attachments
         self.drafts = drafts
-        self.send = send
         self.mark = mark
         self.move = move
-        self.delete = delete
+        self.trash = trash
         self.permanentDelete = permanentDelete
+    }
+
+    public static let nothing = WriteAccess()
+
+    public var isEmpty: Bool {
+        !(drafts || mark || move || trash || permanentDelete)
+    }
+
+    /// Permanent delete cannot outlive the trash right it escalates.
+    public func sanitized() -> WriteAccess {
+        var copy = self
+        if !copy.trash {
+            copy.permanentDelete = false
+        }
+        return copy
+    }
+}
+
+/// Per-mailbox exception to the account-wide groups. `true` means "the group
+/// applies here" — the effective right is always the intersection with the
+/// account, so a folder can never allow more than the account does.
+public struct FolderRule: Hashable, Sendable {
+    public var read: Bool
+    public var write: Bool
+
+    public init(read: Bool = true, write: Bool = true) {
+        self.read = read
+        self.write = write
+    }
+
+    /// What every folder starts as: follow the account.
+    public static let standard = FolderRule()
+}
+
+/// What connected assistants may do with an account, in three groups modelled
+/// on the file system: read (changes nothing), write (changes the mailbox but
+/// stays on the server), send (leaves the house). Folder exceptions scope the
+/// first two; sending is account-wide because SMTP is not bound to a mailbox.
+public struct PermissionSet: Hashable, Sendable {
+    public var read: ReadAccess
+    public var write: WriteAccess
+    public var send: Bool
+    /// Whether folder exceptions apply. Off means the groups rule every
+    /// folder; stored exceptions are kept, just inert.
+    public var perFolder: Bool
+    /// Exceptions by mailbox name. No entry = standard (follow the account).
+    /// Folders the server reports later start with no entry, so they follow
+    /// the account automatically.
+    public var folderRules: [String: FolderRule]
+
+    public init(
+        read: ReadAccess = .fullMessage,
+        write: WriteAccess = WriteAccess(drafts: true),
+        send: Bool = false,
+        perFolder: Bool = false,
+        folderRules: [String: FolderRule] = [:]
+    ) {
+        self.read = read
+        self.write = write
+        self.send = send
+        self.perFolder = perFolder
+        self.folderRules = folderRules
+    }
+
+    public func rule(for mailbox: String) -> FolderRule {
+        guard perFolder else { return .standard }
+        return folderRules[mailbox] ?? .standard
+    }
+
+    public func readAccess(in mailbox: String) -> ReadAccess {
+        rule(for: mailbox).read ? read : .none
+    }
+
+    public func writeAccess(in mailbox: String) -> WriteAccess {
+        rule(for: mailbox).write ? write.sanitized() : .nothing
+    }
+
+    /// A mailbox with no effective rights is invisible to assistants.
+    public func canAccess(_ mailbox: String) -> Bool {
+        readAccess(in: mailbox) != .none || !writeAccess(in: mailbox).isEmpty
+    }
+}
+
+/// The named starting points. A preset is a fact about the current values —
+/// derived, never stored — so a "custom" state can never drift out of sync
+/// with the switches.
+public enum PermissionPreset: CaseIterable, Identifiable, Hashable, Sendable {
+    /// Read everything, change nothing.
+    case readOnly
+    /// The everyday default: read mail and prepare drafts, send nothing.
+    case readAndDrafts
+    /// Let an assistant keep the mailbox in shape: mark, move, delete —
+    /// without composing or sending.
+    case tidyUp
+    /// Everything except permanent deletion, which is never preset.
+    case fullAccess
+
+    public var id: Self { self }
+
+    public var read: ReadAccess {
+        self == .fullAccess ? .withAttachments : .fullMessage
+    }
+
+    public var write: WriteAccess {
+        switch self {
+        case .readOnly: WriteAccess()
+        case .readAndDrafts: WriteAccess(drafts: true)
+        case .tidyUp: WriteAccess(mark: true, move: true, trash: true)
+        case .fullAccess: WriteAccess(drafts: true, mark: true, move: true, trash: true)
+        }
+    }
+
+    public var send: Bool {
+        self == .fullAccess
+    }
+}
+
+extension PermissionSet {
+    /// The preset these values match, if any. Folder exceptions do not count:
+    /// presets decide the groups, exceptions only scope them.
+    public var matchingPreset: PermissionPreset? {
+        PermissionPreset.allCases.first {
+            $0.read == read && $0.write == write && $0.send == send
+        }
+    }
+
+    /// Applies the preset's groups. Folder exceptions survive — switching the
+    /// profile is not meant to throw away per-folder decisions.
+    public mutating func apply(_ preset: PermissionPreset) {
+        read = preset.read
+        write = preset.write
+        send = preset.send
     }
 }
 
@@ -176,7 +316,10 @@ public struct MailAccount: Identifiable, Hashable {
     public var smtpHost: String
     public var username: String
     public var connectionState: ConnectionState
-    public var selectedMailboxes: Set<String>
+    /// Mailboxes the server reported (`mail_list_mailboxes`), in display
+    /// order. Rights are decided in `permissions`; folders that appear here
+    /// later automatically follow the account-wide standard.
+    public var knownMailboxes: [String]
     public var permissions: PermissionSet
     public var searchCache: SearchCacheSettings
     public var pendingActions: [PendingAction]
@@ -191,7 +334,7 @@ public struct MailAccount: Identifiable, Hashable {
         smtpHost: String = "",
         username: String = "",
         connectionState: ConnectionState = .notConfigured,
-        selectedMailboxes: Set<String> = ["INBOX"],
+        knownMailboxes: [String] = ["INBOX"],
         permissions: PermissionSet = PermissionSet(),
         searchCache: SearchCacheSettings = SearchCacheSettings(),
         pendingActions: [PendingAction] = []
@@ -205,7 +348,7 @@ public struct MailAccount: Identifiable, Hashable {
         self.smtpHost = smtpHost
         self.username = username
         self.connectionState = connectionState
-        self.selectedMailboxes = selectedMailboxes
+        self.knownMailboxes = knownMailboxes
         self.permissions = permissions
         self.searchCache = searchCache
         self.pendingActions = pendingActions
@@ -516,12 +659,19 @@ extension TorroMailModel {
                     smtpHost: "smtp.office365.com",
                     username: "work@example.com",
                     connectionState: .connected,
-                    selectedMailboxes: ["INBOX", "Archive", "Sent"],
+                    knownMailboxes: [
+                        "INBOX", "Archive", "Sent", "Drafts", "Trash",
+                        "Invoices 2026", "Private"
+                    ],
                     permissions: PermissionSet(
-                        readBody: true,
-                        drafts: true,
-                        mark: true,
-                        move: true
+                        read: .withAttachments,
+                        write: WriteAccess(drafts: true, mark: true, move: true, trash: true),
+                        send: true,
+                        perFolder: true,
+                        folderRules: [
+                            "Archive": FolderRule(read: true, write: false),
+                            "Private": FolderRule(read: false, write: false)
+                        ]
                     ),
                     searchCache: SearchCacheSettings(
                         cacheMode: .headers,

@@ -24,6 +24,28 @@ private func label(for mode: CacheMode) -> String {
     }
 }
 
+private func label(for preset: PermissionPreset) -> String {
+    switch preset {
+    case .readOnly: L("Read only")
+    case .readAndDrafts: L("Read + drafts")
+    case .tidyUp: L("Tidy up")
+    case .fullAccess: L("Full access")
+    }
+}
+
+/// SF Symbol for a mailbox by its common IMAP name; a plain folder otherwise.
+private func mailboxSymbol(_ name: String) -> String {
+    switch name.lowercased() {
+    case "inbox": "tray"
+    case "archive": "archivebox"
+    case "sent": "paperplane"
+    case "drafts": "pencil"
+    case "trash", "deleted items": "trash"
+    case "junk", "spam": "xmark.bin"
+    default: "folder"
+    }
+}
+
 /// Brand colors from torro-design `tokens/tokens.json`.
 extension Color {
     /// torro-red #D50C0C — the binding brand value.
@@ -977,6 +999,10 @@ private struct AccountDetailView: View {
     // Transient until Keychain storage lands; never persisted.
     @State private var password = ""
     @State private var confirmRemoval = false
+    // Remembered so switching a group off and on again restores the last
+    // sub-selection instead of resetting the user's choice.
+    @State private var lastRead: ReadAccess = .fullMessage
+    @State private var lastWrite = WriteAccess(drafts: true, mark: true)
 
     var body: some View {
         Form {
@@ -1042,32 +1068,298 @@ private struct AccountDetailView: View {
 
     private var permissionsSection: some View {
         Section {
-            Toggle(L("Read headers"), isOn: $account.permissions.readHeaders)
-            Toggle(L("Read body"), isOn: $account.permissions.readBody)
-            Toggle(L("Attachments"), isOn: $account.permissions.attachments)
-            Toggle(L("Drafts"), isOn: $account.permissions.drafts)
-            Toggle(L("Send"), isOn: $account.permissions.send)
-            Toggle(L("Mark"), isOn: $account.permissions.mark)
-            Toggle(L("Move"), isOn: $account.permissions.move)
-            Toggle(L("Delete"), isOn: $account.permissions.delete)
-            Toggle(L("Permanent delete"), isOn: $account.permissions.permanentDelete)
+            groupRow(icon: "eye", title: L("Read"), subtitle: readSummary) {
+                if account.permissions.read != .none {
+                    Picker(L("Read depth"), selection: $account.permissions.read) {
+                        Text(L("Subject and sender")).tag(ReadAccess.headers)
+                        Text(L("Full message")).tag(ReadAccess.fullMessage)
+                        Text(L("Message and attachments")).tag(ReadAccess.withAttachments)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                Toggle(L("Read"), isOn: readEnabled)
+                    .labelsHidden()
+            }
+
+            groupRow(icon: "pencil", title: L("Write"), subtitle: writeSummary) {
+                Toggle(L("Write"), isOn: writeEnabled)
+                    .labelsHidden()
+            }
+            if !account.permissions.write.isEmpty {
+                subToggle(L("Create drafts"), isOn: $account.permissions.write.drafts)
+                subToggle(L("Mark"), annotation: L("read state, flags"), isOn: $account.permissions.write.mark)
+                subToggle(L("Move"), isOn: $account.permissions.write.move)
+                subToggle(L("Delete"), annotation: L("to the Trash"), isOn: trashEnabled)
+                subToggle(
+                    L("Permanent delete"),
+                    annotation: L("never preset, manual only"),
+                    isOn: $account.permissions.write.permanentDelete
+                )
+                .disabled(!account.permissions.write.trash)
+            }
+
+            groupRow(
+                icon: "paperplane",
+                title: L("Send"),
+                subtitle: L("Applies to the whole account. Every send waits for your approval in TorroMail.")
+            ) {
+                Toggle(L("Send"), isOn: $account.permissions.send)
+                    .labelsHidden()
+            }
         } header: {
-            Text(L("Permissions"))
-        } footer: {
-            Text(L("What connected assistants may do with this account. Send, move, and delete always require your confirmation."))
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("Permissions"))
+                    Text(L("What connected assistants may do with this account."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                PresetChips(permissions: $account.permissions)
+            }
         }
+    }
+
+    /// One rights group: icon, name, a summary line that reads as the current
+    /// decision, and the switch (plus inline detail control) trailing.
+    private func groupRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        @ViewBuilder trailing: () -> some View
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            trailing()
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// A sub-right beneath its group, indented to the group's text column,
+    /// with an optional muted annotation after the name.
+    private func subToggle(_ title: String, annotation: String? = nil, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 4) {
+                Text(title)
+                if let annotation {
+                    Text(verbatim: "– \(annotation)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.leading, 32)
+    }
+
+    private var readSummary: String {
+        switch account.permissions.read {
+        case .none: L("No read access")
+        case .headers: L("Subject and sender")
+        case .fullMessage: L("Full message")
+        case .withAttachments: L("Message and attachments")
+        }
+    }
+
+    private var writeSummary: String {
+        let names = [
+            account.permissions.write.drafts ? L("Drafts") : nil,
+            account.permissions.write.mark ? L("Mark") : nil,
+            account.permissions.write.move ? L("Move") : nil,
+            account.permissions.write.trash ? L("Delete") : nil
+        ].compactMap { $0 }
+        return names.isEmpty ? L("No mailbox changes") : names.joined(separator: ", ")
     }
 
     private var foldersSection: some View {
         Section {
-            ForEach(["INBOX", "Archive", "Sent", "Trash"], id: \.self) { name in
-                mailboxToggle(name)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Per-folder permissions"))
+                    Text(L("Off: all folders use the permissions above."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle(L("Per-folder permissions"), isOn: $account.permissions.perFolder)
+                    .labelsHidden()
+            }
+            .padding(.vertical, 2)
+            if account.permissions.perFolder {
+                folderColumnHeader
+                standardFolderRow
+                ForEach(account.knownMailboxes, id: \.self) { name in
+                    folderRow(name)
+                }
             }
         } header: {
             Text(L("Folders"))
         } footer: {
-            Text(L("Folders the assistant may access."))
+            if account.permissions.perFolder {
+                Text(L("New folders follow the account automatically. Write access to Drafts, Sent, and Trash follows from the decisions above."))
+            }
         }
+    }
+
+    private var folderColumnHeader: some View {
+        HStack {
+            Text(L("Folder"))
+            Spacer()
+            Text(L("Read")).frame(width: 64)
+            Text(L("Write")).frame(width: 64)
+            Color.clear.frame(width: 74, height: 1)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    /// The row every folder inherits from — it mirrors the groups above, so
+    /// it is display-only here.
+    private var standardFolderRow: some View {
+        HStack {
+            Label {
+                Text(L("Standard – all folders")).fontWeight(.medium)
+            } icon: {
+                Image(systemName: "asterisk")
+            }
+            Spacer()
+            standardMark(account.permissions.read != .none)
+            standardMark(!account.permissions.write.isEmpty)
+            Color.clear.frame(width: 74, height: 1)
+        }
+    }
+
+    private func standardMark(_ allowed: Bool) -> some View {
+        Image(systemName: allowed ? "checkmark" : "minus")
+            .foregroundStyle(allowed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            .frame(width: 64)
+    }
+
+    private func folderRow(_ name: String) -> some View {
+        let overridden = account.permissions.folderRules[name] != nil
+        let accessible = account.permissions.canAccess(name)
+        return HStack {
+            Label {
+                HStack(spacing: 4) {
+                    Text(name)
+                    if !accessible {
+                        Text(verbatim: "· \(L("no access"))")
+                            .font(.caption)
+                    }
+                }
+            } icon: {
+                Image(systemName: mailboxSymbol(name))
+            }
+            .foregroundStyle(accessible ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            Spacer()
+            folderCheckbox(L("Read"), folderRuleBinding(name, \.read), enabled: account.permissions.read != .none)
+            folderCheckbox(L("Write"), folderRuleBinding(name, \.write), enabled: !account.permissions.write.isEmpty)
+            // The exception marker doubles as the way back: clicking it
+            // restores the standard.
+            Group {
+                if overridden {
+                    Button {
+                        account.permissions.folderRules[name] = nil
+                    } label: {
+                        folderChip(L("adjusted"), prominent: true)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("Reset to standard"))
+                } else {
+                    folderChip(L("Standard"), prominent: false)
+                }
+            }
+            .frame(width: 74, alignment: .trailing)
+        }
+    }
+
+    private func folderChip(_ text: String, prominent: Bool) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(
+                prominent ? Color.orange.opacity(0.16) : Color.primary.opacity(0.06),
+                in: Capsule()
+            )
+            .foregroundStyle(prominent ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+    }
+
+    /// A bare checkbox in a fixed column; the title stays for accessibility.
+    private func folderCheckbox(_ title: String, _ isOn: Binding<Bool>, enabled: Bool) -> some View {
+        Toggle(title, isOn: isOn)
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .disabled(!enabled)
+            .frame(width: 64)
+    }
+
+    private var readEnabled: Binding<Bool> {
+        Binding(
+            get: { account.permissions.read != .none },
+            set: { on in
+                if on {
+                    account.permissions.read = lastRead
+                } else {
+                    if account.permissions.read != .none {
+                        lastRead = account.permissions.read
+                    }
+                    account.permissions.read = .none
+                }
+            }
+        )
+    }
+
+    private var writeEnabled: Binding<Bool> {
+        Binding(
+            get: { !account.permissions.write.isEmpty },
+            set: { on in
+                if on {
+                    account.permissions.write = lastWrite
+                } else {
+                    if !account.permissions.write.isEmpty {
+                        lastWrite = account.permissions.write
+                    }
+                    account.permissions.write = .nothing
+                }
+            }
+        )
+    }
+
+    /// Permanent delete escalates the trash right, so it falls with it.
+    private var trashEnabled: Binding<Bool> {
+        Binding(
+            get: { account.permissions.write.trash },
+            set: { on in
+                account.permissions.write.trash = on
+                if !on {
+                    account.permissions.write.permanentDelete = false
+                }
+            }
+        )
+    }
+
+    /// An exception that ends up equal to the standard dissolves — so the
+    /// reset arrow only ever shows on rows that truly differ.
+    private func folderRuleBinding(_ name: String, _ keyPath: WritableKeyPath<FolderRule, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { (account.permissions.folderRules[name] ?? .standard)[keyPath: keyPath] },
+            set: { allowed in
+                var rule = account.permissions.folderRules[name] ?? .standard
+                rule[keyPath: keyPath] = allowed
+                account.permissions.folderRules[name] = rule == .standard ? nil : rule
+            }
+        )
     }
 
     private var cacheSection: some View {
@@ -1122,20 +1414,47 @@ private struct AccountDetailView: View {
         }
     }
 
-    private func mailboxToggle(_ name: String) -> some View {
-        Toggle(
-            name,
-            isOn: Binding(
-                get: { account.selectedMailboxes.contains(name) },
-                set: { enabled in
-                    if enabled {
-                        account.selectedMailboxes.insert(name)
-                    } else {
-                        account.selectedMailboxes.remove(name)
+}
+
+/// The named profiles as a compact chip strip — like a segmented control,
+/// with the one difference a segmented control cannot show: in a custom
+/// state, nothing is selected.
+private struct PresetChips: View {
+    @Binding var permissions: PermissionSet
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(PermissionPreset.allCases) { preset in
+                chip(preset)
+            }
+        }
+        .padding(2)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private func chip(_ preset: PermissionPreset) -> some View {
+        let isActive = permissions.matchingPreset == preset
+        return Button {
+            permissions.apply(preset)
+        } label: {
+            Text(label(for: preset))
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .background {
+                    if isActive {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(.background)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(.separator, lineWidth: 0.5)
+                            }
                     }
                 }
-            )
-        )
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
     }
 }
 

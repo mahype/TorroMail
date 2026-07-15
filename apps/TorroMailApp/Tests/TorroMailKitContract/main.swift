@@ -136,6 +136,70 @@ require(
     "removing the open account falls back to the account list"
 )
 
+// Permissions are three groups — read, write, send — with named presets on
+// top and folder exceptions below. The preset is derived from the values, so
+// a "custom" state can never drift out of sync with the switches.
+require(
+    PermissionSet().matchingPreset == .readAndDrafts,
+    "a new account starts at read + drafts"
+)
+require(
+    !PermissionSet().send,
+    "sending is never on by default"
+)
+require(
+    PermissionPreset.allCases.allSatisfy { !$0.write.permanentDelete },
+    "no preset enables permanent deletion"
+)
+
+var permissions = PermissionSet()
+permissions.apply(.fullAccess)
+require(
+    permissions.matchingPreset == .fullAccess,
+    "applying a preset is recognized as that preset"
+)
+permissions.write.mark = false
+require(
+    permissions.matchingPreset == nil,
+    "any manual change turns the preset custom"
+)
+
+// Folder exceptions scope the groups but can never exceed them; switching
+// per-folder off keeps them stored, just inert.
+permissions.apply(.readAndDrafts)
+permissions.perFolder = true
+permissions.folderRules["Private"] = FolderRule(read: false, write: false)
+permissions.folderRules["Archive"] = FolderRule(read: true, write: false)
+require(
+    !permissions.canAccess("Private"),
+    "a folder without rights is invisible to assistants"
+)
+require(
+    permissions.readAccess(in: "INBOX") == .fullMessage
+        && permissions.writeAccess(in: "INBOX").drafts,
+    "folders without an exception follow the account"
+)
+require(
+    permissions.readAccess(in: "Archive") == .fullMessage
+        && permissions.writeAccess(in: "Archive").isEmpty,
+    "a read-only folder takes no writes"
+)
+permissions.perFolder = false
+require(
+    permissions.canAccess("Private") && permissions.folderRules["Private"] != nil,
+    "switching per-folder off keeps exceptions stored but inert"
+)
+
+// Permanent delete is an escalation of the trash right and falls with it.
+require(
+    !WriteAccess(trash: false, permanentDelete: true).sanitized().permanentDelete,
+    "permanent delete cannot outlive the trash right"
+)
+require(
+    model.accounts[0].permissions.matchingPreset == .fullAccess,
+    "the preview work account demonstrates a preset with folder exceptions"
+)
+
 // MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(
     executableName: "torromail-mcp",

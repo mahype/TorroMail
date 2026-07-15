@@ -96,6 +96,10 @@ Read/search tools:
 - `mail_get_thread`
 - `mail_list_mailboxes`
 
+Direct write tools (no approval, gated by the mark permission):
+
+- `mail_mark`
+
 Prepared action tools:
 
 - `mail_create_draft`

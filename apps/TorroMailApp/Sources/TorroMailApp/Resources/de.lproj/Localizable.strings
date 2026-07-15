@@ -51,20 +51,42 @@
 
 /* Permissions */
 "Permissions" = "Berechtigungen";
-"Read headers" = "Kopfzeilen lesen";
-"Read body" = "Inhalte lesen";
-"Attachments" = "Anhänge";
+"What connected assistants may do with this account." = "Was verbundene Assistenten mit diesem Konto dürfen.";
+"Read only" = "Nur lesen";
+"Read + drafts" = "Lesen + Entwürfe";
+"Tidy up" = "Aufräumen";
+"Full access" = "Voller Zugriff";
+"Read" = "Lesen";
+"Read depth" = "Lesetiefe";
+"No read access" = "Kein Lesezugriff";
+"Subject and sender" = "Betreff und Absender";
+"Full message" = "Ganze E-Mail";
+"Message and attachments" = "E-Mail und Anhänge";
+"Write" = "Schreiben";
+"No mailbox changes" = "Keine Änderungen am Postfach";
+"Create drafts" = "Entwürfe erstellen";
 "Drafts" = "Entwürfe";
 "Send" = "Senden";
 "Mark" = "Markieren";
+"read state, flags" = "gelesen, Flaggen";
 "Move" = "Verschieben";
 "Delete" = "Löschen";
+"to the Trash" = "in den Papierkorb";
 "Permanent delete" = "Endgültig löschen";
-"What connected assistants may do with this account. Send, move, and delete always require your confirmation." = "Was verbundene Assistenten mit diesem Konto tun dürfen. Senden, Verschieben und Löschen erfordern immer deine Bestätigung.";
+"never preset, manual only" = "in keiner Voreinstellung, nur manuell";
+"Applies to the whole account. Every send waits for your approval in TorroMail." = "Gilt für das ganze Konto. Jeder Versand wartet auf Freigabe in TorroMail.";
 
 /* Folders */
 "Folders" = "Ordner";
-"Folders the assistant may access." = "Ordner, auf die der Assistent zugreifen darf.";
+"Folder" = "Ordner";
+"Per-folder permissions" = "Rechte pro Ordner";
+"Off: all folders use the permissions above." = "Aus: Alle Ordner verwenden die Rechte oben.";
+"Standard – all folders" = "Standard – alle Ordner";
+"Standard" = "Standard";
+"adjusted" = "angepasst";
+"no access" = "kein Zugriff";
+"Reset to standard" = "Auf Standard zurücksetzen";
+"New folders follow the account automatically. Write access to Drafts, Sent, and Trash follows from the decisions above." = "Neue Ordner übernehmen automatisch den Standard. Schreibzugriff auf Entwürfe, Gesendet und Papierkorb ergibt sich von selbst aus den Entscheidungen oben.";
 
 /* Search & Cache */
 "Search & Cache" = "Suche & Cache";
