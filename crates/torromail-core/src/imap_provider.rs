@@ -115,6 +115,17 @@ pub struct FetchedMessage {
     pub flagged: bool,
 }
 
+/// A search hit's headers, without its body. Search fans out across mailboxes
+/// and would otherwise pull every match in full for a subject line it shows
+/// and a body it never returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedSummary {
+    pub uid: u32,
+    pub subject: String,
+    pub sender: String,
+    pub date: String,
+}
+
 /// One untagged response line, with any literals it carried in order.
 struct ResponseLine {
     text: String,
@@ -303,6 +314,34 @@ impl<T: ImapTransport> ImapClient<T> {
         })
     }
 
+    /// Just the headers a search hit shows — no `BODY[TEXT]`, so a search over
+    /// many mailboxes stops pulling every match in full.
+    pub fn uid_fetch_summary(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedSummary> {
+        self.select(mailbox)?;
+        let lines = self.command(&format!(
+            "UID FETCH {uid} (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
+        ))?;
+        let fetch = lines
+            .iter()
+            .find(|line| line.text.contains("FETCH"))
+            .ok_or_else(|| {
+                CoreError::ProviderFailure(format!("no FETCH response for uid {uid}"))
+            })?;
+
+        let headers = fetch
+            .literals
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
+
+        Ok(FetchedSummary {
+            uid,
+            subject: header_field(&headers, "subject").unwrap_or_default(),
+            sender: header_field(&headers, "from").unwrap_or_default(),
+            date: header_field(&headers, "date").unwrap_or_default(),
+        })
+    }
+
     pub fn uid_store(&mut self, mailbox: &str, uid: u32, change: MarkChange) -> CoreResult<()> {
         self.select(mailbox)?;
         let (sign, flag) = match change {
@@ -420,16 +459,18 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
                 if hits.len() >= limit {
                     break;
                 }
-                let message = client.uid_fetch(&mailbox, uid)?;
+                // Headers only: the snippet a full body would buy is not part
+                // of a search result, so paying for the body is pure waste.
+                let summary = client.uid_fetch_summary(&mailbox, uid)?;
                 hits.push(
                     SearchHit::new(
                         format!("{mailbox}/{uid}"),
                         mailbox.clone(),
-                        message.subject,
-                        message.sender,
-                        snippet(&message.body),
+                        summary.subject,
+                        summary.sender,
+                        String::new(),
                     )
-                    .with_date(message.date),
+                    .with_date(summary.date),
                 );
             }
         }

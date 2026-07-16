@@ -173,6 +173,42 @@ fn searching_selects_searches_and_fetches_hits() {
 }
 
 #[test]
+fn search_fetches_headers_only_never_the_body() {
+    let mut script = login_script();
+    script.extend([
+        line("* 1 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("* SEARCH 101"),
+        line("t3 OK SEARCH completed"),
+    ]);
+    script.extend(fetch_script("t4", 101, "", HEADERS, BODY));
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    provider
+        .search(&account_id, "invoice", Some("INBOX"), 10, &SearchWindow::default())
+        .expect("search succeeds");
+
+    // The hit's FETCH asks for headers and nothing else — no body pulled for
+    // a snippet the search never returns.
+    let fetch = log
+        .lines()
+        .into_iter()
+        .find(|command| command.contains("UID FETCH"))
+        .expect("a hit is fetched");
+    assert!(fetch.contains("HEADER.FIELDS"), "got: {fetch}");
+    assert!(!fetch.contains("BODY[TEXT]"), "got: {fetch}");
+    assert!(!fetch.contains("BODY.PEEK[TEXT]"), "got: {fetch}");
+}
+
+#[test]
 fn fetched_messages_carry_flags_and_body() {
     let mut script = login_script();
     script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
