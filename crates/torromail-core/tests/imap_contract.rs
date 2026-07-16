@@ -368,6 +368,35 @@ fn append_sends_the_message_as_a_literal_after_the_continuation() {
 }
 
 #[test]
+fn moving_and_expunging_send_the_right_uid_commands() {
+    let mut script = login_script();
+    script.extend([
+        line("* 1 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("t3 OK MOVE completed"),
+        line("t4 OK STORE completed"),
+        line("t5 OK EXPUNGE completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+
+    client.uid_move("INBOX", 7, "Archive").expect("move ok");
+    client.uid_expunge("INBOX", 7).expect("expunge ok");
+
+    let sent = log.lines();
+    assert_eq!(sent[1], "t2 SELECT \"INBOX\"");
+    assert_eq!(sent[2], "t3 UID MOVE 7 \"Archive\"");
+    // Permanent delete is a flag then a targeted expunge, not a blanket one.
+    assert_eq!(sent[3], "t4 UID STORE 7 +FLAGS (\\Deleted)");
+    assert_eq!(sent[4], "t5 UID EXPUNGE 7");
+}
+
+#[test]
 fn marking_sends_a_uid_store_and_reuses_the_selection() {
     let mut script = login_script();
     script.extend([

@@ -73,6 +73,23 @@ impl MailProvider for FailingOnce {
     ) -> CoreResult<()> {
         self.inner.append_draft(account_id, mailbox, message)
     }
+
+    fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()> {
+        self.inner.move_messages(account_id, message_ids, target)
+    }
+
+    fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()> {
+        self.inner.expunge_messages(account_id, message_ids)
+    }
 }
 
 /// One INBOX message for `work`, so `list_mailboxes` has an accessible folder
@@ -776,6 +793,143 @@ fn drafting_is_refused_without_the_draft_right() {
 
     assert!(response.contains(r#""code":-32000"#), "got: {response}");
     assert!(response.contains("Draft"), "got: {response}");
+}
+
+/// Pull a string field out of a tool response whose payload is JSON escaped
+/// inside the JSON-RPC text block (so quotes appear as `\"`).
+fn payload_field(response: &str, key: &str) -> String {
+    let needle = format!("\\\"{key}\\\":\\\"");
+    let start = response.find(&needle).expect("field present") + needle.len();
+    let rest = &response[start..];
+    let end = rest.find("\\\"").expect("field end");
+    rest[..end].to_owned()
+}
+
+fn tidy_up_document(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true,"mark":true,"move":true,"trash":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+}
+
+#[test]
+fn a_prepared_move_executes_only_after_confirmation() {
+    let path = temp_policy_path("prepare-move");
+    tidy_up_document(&path);
+
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([StoredMessage::new(
+            AccountId::new("work"),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Subject",
+            "s@example.com",
+            "snippet",
+            "body",
+        )])) as Box<dyn MailProvider>)
+    });
+
+    let prepare = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"mail_prepare_move","arguments":{"account_id":"work","message_ids":["m1"],"target_mailbox":"Archive"}}}"#,
+        )
+        .expect("a response");
+    assert!(prepare.contains("pending_action_id"), "got: {prepare}");
+    assert!(prepare.contains("Move 1 message(s) to Archive"), "got: {prepare}");
+
+    let pending_id = payload_field(&prepare, "pending_action_id");
+    let code = payload_field(&prepare, "confirmation_code");
+
+    let confirm = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":81,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"{code}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(confirm.contains("moved"), "got: {confirm}");
+}
+
+#[test]
+fn a_wrong_confirmation_code_is_refused() {
+    let path = temp_policy_path("wrong-code");
+    tidy_up_document(&path);
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let prepare = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":82,"method":"tools/call","params":{"name":"mail_prepare_delete","arguments":{"account_id":"work","message_ids":["m1"]}}}"#,
+        )
+        .expect("a response");
+    let pending_id = payload_field(&prepare, "pending_action_id");
+
+    let confirm = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":83,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"not-the-code"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(confirm.contains(r#""code":-32602"#), "got: {confirm}");
+}
+
+#[test]
+fn preparing_a_move_needs_the_move_right() {
+    let path = temp_policy_path("no-move");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true,"move":false},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":84,"method":"tools/call","params":{"name":"mail_prepare_move","arguments":{"account_id":"work","message_ids":["m1"],"target_mailbox":"Archive"}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert!(response.contains("Move"), "got: {response}");
+}
+
+#[test]
+fn preparing_a_permanent_delete_needs_the_permanent_right() {
+    // trash is granted, permanent delete is not — the escalation the presets
+    // never include.
+    let path = temp_policy_path("no-permanent");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"trash":true,"permanent_delete":false},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":85,"method":"tools/call","params":{"name":"mail_prepare_delete","arguments":{"account_id":"work","message_ids":["m1"],"permanent":true}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert!(response.contains("DeletePermanent"), "got: {response}");
+}
+
+#[test]
+fn confirming_an_unknown_action_is_refused() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":86,"method":"tools/call","params":{"name":"mail_confirm_action","arguments":{"pending_action_id":"pending-999","confirmation_code":"abc"}}}"#,
+        )
+        .expect("a response");
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert!(response.contains("pending action not found"), "got: {response}");
 }
 
 #[test]

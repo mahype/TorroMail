@@ -213,6 +213,74 @@ enum ConnIdentity {
 /// resolves the rest from the reloaded document itself.
 type ConnectOverride = Box<dyn Fn(&AccountId) -> CoreResult<Box<dyn MailProvider>>>;
 
+/// The mailbox mutation a prepared action will carry out once confirmed.
+enum Operation {
+    Move {
+        message_ids: Vec<String>,
+        target: String,
+    },
+    Trash {
+        message_ids: Vec<String>,
+    },
+    Expunge {
+        message_ids: Vec<String>,
+    },
+}
+
+/// A risky action held between `prepare` and `confirm`. The code is the
+/// handshake that ties a confirmation back to exactly this preparation; the
+/// GUI is meant to be where a human reads the preview and approves.
+struct PreparedAction {
+    account_id: AccountId,
+    code: String,
+    operation: Operation,
+    expires_at: u64,
+}
+
+/// Prepared actions by id, with a single-use, time-bounded confirm. Kept in
+/// the server so a `prepare` and its `confirm` can be different tool calls.
+#[derive(Default)]
+struct PendingActions {
+    next_id: u64,
+    actions: HashMap<String, PreparedAction>,
+}
+
+impl PendingActions {
+    /// Store an action and return its id and confirmation code.
+    fn prepare(&mut self, mut action: PreparedAction) -> (String, String) {
+        self.next_id += 1;
+        let id = format!("pending-{}", self.next_id);
+        let code = confirmation_code(&id);
+        action.code = code.clone();
+        self.actions.insert(id.clone(), action);
+        (id, code)
+    }
+
+    /// Validate a confirmation and take the action out — single use. A wrong
+    /// code is the caller's mistake; a missing or expired action is not.
+    fn confirm(&mut self, id: &str, code: &str, now: u64) -> Result<PreparedAction, ToolFailure> {
+        let (expires_at, stored_code) = {
+            let action = self.actions.get(id).ok_or_else(|| {
+                ToolFailure::Core(CoreError::PendingActionNotFound(id.to_owned()))
+            })?;
+            (action.expires_at, action.code.clone())
+        };
+
+        if stored_code != code {
+            return Err(ToolFailure::InvalidParams(
+                "confirmation_code does not match the prepared action".to_owned(),
+            ));
+        }
+        if now > expires_at {
+            self.actions.remove(id);
+            return Err(ToolFailure::Core(CoreError::PendingActionExpired(id.to_owned())));
+        }
+        self.actions
+            .remove(id)
+            .ok_or_else(|| ToolFailure::Core(CoreError::PendingActionNotFound(id.to_owned())))
+    }
+}
+
 pub struct LineMcpServer {
     catalog: ToolCatalog,
     /// Where the app publishes the account permissions. `None` runs the
@@ -231,6 +299,8 @@ pub struct LineMcpServer {
     /// Search result sets, kept so `mail_refine_search` can narrow a prior
     /// search by its id without rescanning every mailbox.
     sessions: RefCell<SearchSessionStore>,
+    /// Risky actions awaiting confirmation, between their prepare and confirm.
+    pending: RefCell<PendingActions>,
     /// Test seam: when set, this makes the mailbox instead of a TLS session.
     connect_override: Option<ConnectOverride>,
 }
@@ -245,6 +315,7 @@ impl LineMcpServer {
             fixtures_for_unconfigured_accounts: false,
             connections: RefCell::default(),
             sessions: RefCell::default(),
+            pending: RefCell::default(),
             connect_override: None,
         }
     }
@@ -338,9 +409,21 @@ impl LineMcpServer {
             return self.handle_mail_refine_search(arguments, id);
         }
 
+        // Confirming names a prepared action, not an account — the account
+        // rides along with the action it was prepared for.
+        if name == ToolName::MailConfirmAction.as_str() {
+            return self.handle_mail_confirm_action(arguments, id);
+        }
+
         let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
         if name == ToolName::MailGetPolicy.as_str() {
             return self.handle_mail_get_policy(&account_id, id);
+        }
+        if name == ToolName::MailPrepareMove.as_str() {
+            return self.handle_mail_prepare_move(arguments, &account_id, id);
+        }
+        if name == ToolName::MailPrepareDelete.as_str() {
+            return self.handle_mail_prepare_delete(arguments, &account_id, id);
         }
 
         if name == ToolName::MailSearch.as_str() {
@@ -439,6 +522,125 @@ impl LineMcpServer {
             Some(connect) => connect(account_id),
             None => open_provider(account_id, facts),
         }
+    }
+
+    /// Prepare a move for confirmation. The account-wide right is checked now,
+    /// so a forbidden move is refused before anyone is asked to approve it; the
+    /// folder-scoped check runs again at execution.
+    fn handle_mail_prepare_move(&self, arguments: &Value, account_id: &AccountId, id: &Value) -> String {
+        let message_ids = string_array(&arguments["message_ids"]);
+        let target = arguments["target_mailbox"].as_str().unwrap_or_default();
+        if message_ids.is_empty() {
+            return json_rpc_error(id, -32602, "message_ids must not be empty");
+        }
+        if target.is_empty() {
+            return json_rpc_error(id, -32602, "target_mailbox is required");
+        }
+
+        let engine = match self.runtime_for(account_id) {
+            Ok((engine, _facts)) => engine,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        if let Err(error) = engine.authorize(account_id, Capability::Move) {
+            return json_rpc_error(id, -32000, &error.to_string());
+        }
+
+        let preview = format!("Move {} message(s) to {target}", message_ids.len());
+        self.store_prepared(
+            account_id,
+            preview,
+            Operation::Move {
+                message_ids,
+                target: target.to_owned(),
+            },
+            id,
+        )
+    }
+
+    /// Prepare a delete for confirmation — a soft delete (a move to Trash) or,
+    /// with `permanent`, an outright expunge. Each is gated by its own right.
+    fn handle_mail_prepare_delete(
+        &self,
+        arguments: &Value,
+        account_id: &AccountId,
+        id: &Value,
+    ) -> String {
+        let message_ids = string_array(&arguments["message_ids"]);
+        let permanent = arguments["permanent"].as_bool().unwrap_or(false);
+        if message_ids.is_empty() {
+            return json_rpc_error(id, -32602, "message_ids must not be empty");
+        }
+
+        let engine = match self.runtime_for(account_id) {
+            Ok((engine, _facts)) => engine,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        let capability = if permanent {
+            Capability::DeletePermanent
+        } else {
+            Capability::DeleteSoft
+        };
+        if let Err(error) = engine.authorize(account_id, capability) {
+            return json_rpc_error(id, -32000, &error.to_string());
+        }
+
+        let (preview, operation) = if permanent {
+            (
+                format!("Permanently delete {} message(s)", message_ids.len()),
+                Operation::Expunge { message_ids },
+            )
+        } else {
+            (
+                format!("Move {} message(s) to Trash", message_ids.len()),
+                Operation::Trash { message_ids },
+            )
+        };
+        self.store_prepared(account_id, preview, operation, id)
+    }
+
+    /// Store a prepared action and answer with its id, code and preview.
+    fn store_prepared(
+        &self,
+        account_id: &AccountId,
+        preview: String,
+        operation: Operation,
+        id: &Value,
+    ) -> String {
+        let action = PreparedAction {
+            account_id: account_id.clone(),
+            code: String::new(),
+            operation,
+            expires_at: now_secs() + PENDING_TTL_SECONDS,
+        };
+        let (pending_id, code) = self.pending.borrow_mut().prepare(action);
+        json_rpc_text_result(
+            id,
+            &json!({
+                "pending_action_id": pending_id,
+                "confirmation_code": code,
+                "preview": preview,
+                "expires_in_seconds": PENDING_TTL_SECONDS
+            }),
+        )
+    }
+
+    /// Confirm and carry out a prepared action. The action names its own
+    /// account, so this opens that account's connection and runs the mutation
+    /// through the policy one more time.
+    fn handle_mail_confirm_action(&self, arguments: &Value, id: &Value) -> String {
+        let pending_id = arguments["pending_action_id"].as_str().unwrap_or_default();
+        let code = arguments["confirmation_code"].as_str().unwrap_or_default();
+
+        let action = match self.pending.borrow_mut().confirm(pending_id, code, now_secs()) {
+            Ok(action) => action,
+            Err(failure) => return failure.into_response(id),
+        };
+        let account_id = action.account_id.clone();
+        let operation = action.operation;
+
+        self.run_with_connection(&account_id, id, &|provider, engine| {
+            execute_operation(&operation, &account_id, provider, engine)
+        })
     }
 
     /// The account's own address, for the `From` of a draft. Read from the
@@ -1016,6 +1218,17 @@ fn string_array(value: &Value) -> Vec<String> {
 /// The mailbox a draft belongs in: one whose final path segment is "Drafts",
 /// else the bare name for a server that will create it.
 fn drafts_mailbox(mailboxes: &[String]) -> String {
+    named_mailbox(mailboxes, "Drafts")
+}
+
+/// The Trash folder a soft delete moves into, by the same rule.
+fn trash_mailbox(mailboxes: &[String]) -> String {
+    named_mailbox(mailboxes, "Trash")
+}
+
+/// A mailbox whose final path segment matches `name` (so `INBOX.Trash` and a
+/// plain `Trash` both count), or the bare name as a fallback.
+fn named_mailbox(mailboxes: &[String], name: &str) -> String {
     mailboxes
         .iter()
         .find(|mailbox| {
@@ -1023,10 +1236,72 @@ fn drafts_mailbox(mailboxes: &[String]) -> String {
                 .rsplit(['.', '/'])
                 .next()
                 .unwrap_or(mailbox)
-                .eq_ignore_ascii_case("Drafts")
+                .eq_ignore_ascii_case(name)
         })
         .cloned()
-        .unwrap_or_else(|| "Drafts".to_owned())
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// How long a prepared action waits for its confirmation.
+const PENDING_TTL_SECONDS: u64 = 300;
+
+/// Carry out a confirmed action against a live connection.
+fn execute_operation(
+    operation: &Operation,
+    account_id: &AccountId,
+    provider: &mut dyn MailProvider,
+    engine: PolicyEngine,
+) -> ToolResult {
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    match operation {
+        Operation::Move {
+            message_ids,
+            target,
+        } => {
+            service
+                .move_messages(account_id, message_ids, target)
+                .map_err(ToolFailure::Core)?;
+            Ok(json!({ "status": "moved", "moved": message_ids.len(), "target": target }))
+        }
+        Operation::Trash { message_ids } => {
+            let mailboxes = service.list_mailboxes(account_id).map_err(ToolFailure::Core)?;
+            let trash = trash_mailbox(&mailboxes);
+            service
+                .trash_messages(account_id, message_ids, &trash)
+                .map_err(ToolFailure::Core)?;
+            Ok(json!({ "status": "trashed", "trashed": message_ids.len(), "mailbox": trash }))
+        }
+        Operation::Expunge { message_ids } => {
+            service
+                .expunge_messages(account_id, message_ids)
+                .map_err(ToolFailure::Core)?;
+            Ok(json!({ "status": "deleted", "deleted": message_ids.len() }))
+        }
+    }
+}
+
+/// Seconds since the Unix epoch. A clock is fine here — this is the MCP
+/// facade, not the portable core — and a prepared action needs a real
+/// expiry, not the fixed clock the search sessions run on.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// A short, stable confirmation code derived from the action id (FNV-1a). Not
+/// a secret — the caller is handed it by `prepare` — but it ties a confirm to
+/// one specific preparation and guards against confusing two pending actions.
+fn confirmation_code(seed: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in seed.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:06x}", hash % 0x0100_0000)
 }
 
 fn handle_mail_mark(

@@ -1069,6 +1069,22 @@ pub trait MailProvider {
         mailbox: &str,
         message: &str,
     ) -> CoreResult<()>;
+
+    /// Move each message to `target`. A soft delete is one of these — a move
+    /// to the Trash folder.
+    fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()>;
+
+    /// Delete each message for good — flagged and expunged, no Trash.
+    fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()>;
 }
 
 /// A `&mut` to a provider is itself a provider. This is what lets a caller
@@ -1119,6 +1135,23 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         message: &str,
     ) -> CoreResult<()> {
         (**self).append_draft(account_id, mailbox, message)
+    }
+
+    fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()> {
+        (**self).move_messages(account_id, message_ids, target)
+    }
+
+    fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()> {
+        (**self).expunge_messages(account_id, message_ids)
     }
 }
 
@@ -1238,6 +1271,41 @@ impl MailProvider for FixtureMailProvider {
             "",
             message,
         ));
+        Ok(())
+    }
+
+    fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()> {
+        for message_id in message_ids {
+            let message = self
+                .messages
+                .iter_mut()
+                .find(|message| {
+                    &message.account_id == account_id && &message.message_id == message_id
+                })
+                .ok_or_else(|| CoreError::MessageNotFound(message_id.clone()))?;
+            message.mailbox = target.to_owned();
+        }
+        Ok(())
+    }
+
+    fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()> {
+        for message_id in message_ids {
+            let before = self.messages.len();
+            self.messages
+                .retain(|message| !(&message.account_id == account_id && &message.message_id == message_id));
+            if self.messages.len() == before {
+                return Err(CoreError::MessageNotFound(message_id.clone()));
+            }
+        }
         Ok(())
     }
 }
@@ -1374,6 +1442,55 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         self.policy_engine
             .authorize(account_id, Capability::Draft)?;
         self.provider.append_draft(account_id, mailbox, message)
+    }
+
+    /// Move messages, each authorized on both ends: a message can only leave a
+    /// folder the account may write and land in one it may write too. The
+    /// source folder is the message's own, found by a lookup, not whatever the
+    /// caller claims.
+    pub fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()> {
+        for message_id in message_ids {
+            let message = self.provider.get_message(account_id, message_id)?;
+            self.policy_engine
+                .authorize_move(account_id, message.mailbox(), target)?;
+        }
+        self.provider.move_messages(account_id, message_ids, target)
+    }
+
+    /// Soft-delete messages: a move to the Trash folder, gated by the trash
+    /// right in each message's own folder.
+    pub fn trash_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        trash: &str,
+    ) -> CoreResult<()> {
+        for message_id in message_ids {
+            let message = self.provider.get_message(account_id, message_id)?;
+            self.policy_engine
+                .authorize_in(account_id, message.mailbox(), Capability::DeleteSoft)?;
+        }
+        self.provider.move_messages(account_id, message_ids, trash)
+    }
+
+    /// Permanently delete messages, gated by the permanent-delete right — which
+    /// cannot outlive the trash right it escalates — in each message's folder.
+    pub fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()> {
+        for message_id in message_ids {
+            let message = self.provider.get_message(account_id, message_id)?;
+            self.policy_engine
+                .authorize_in(account_id, message.mailbox(), Capability::DeletePermanent)?;
+        }
+        self.provider.expunge_messages(account_id, message_ids)
     }
 
     /// Only folders the policy grants anything on exist for assistants —

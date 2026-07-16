@@ -441,6 +441,25 @@ impl<T: ImapTransport> ImapClient<T> {
         Ok(())
     }
 
+    /// Move one message to another mailbox (RFC 6851). MOVE both copies and
+    /// removes in one atomic step, so a soft delete — a move to Trash — cannot
+    /// leave the message in two places.
+    pub fn uid_move(&mut self, mailbox: &str, uid: u32, target: &str) -> CoreResult<()> {
+        self.select(mailbox)?;
+        self.command(&format!("UID MOVE {uid} {}", imap_quoted(target)))?;
+        Ok(())
+    }
+
+    /// Delete one message for good: flag it `\Deleted`, then expunge that one
+    /// UID (RFC 4315), so no other flagged message in the mailbox is caught up
+    /// in it.
+    pub fn uid_expunge(&mut self, mailbox: &str, uid: u32) -> CoreResult<()> {
+        self.select(mailbox)?;
+        self.command(&format!("UID STORE {uid} +FLAGS (\\Deleted)"))?;
+        self.command(&format!("UID EXPUNGE {uid}"))?;
+        Ok(())
+    }
+
     fn select(&mut self, mailbox: &str) -> CoreResult<()> {
         if self.selected.as_deref() == Some(mailbox) {
             return Ok(());
@@ -663,6 +682,35 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     ) -> CoreResult<()> {
         self.guard(account_id)?;
         self.client.borrow_mut().append(mailbox, "\\Draft", message)
+    }
+
+    fn move_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+        target: &str,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        let mut client = self.client.borrow_mut();
+        for message_id in message_ids {
+            let (mailbox, uid) = self.split_message_id(message_id)?;
+            client.uid_move(mailbox, uid, target)?;
+        }
+        Ok(())
+    }
+
+    fn expunge_messages(
+        &mut self,
+        account_id: &AccountId,
+        message_ids: &[String],
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        let mut client = self.client.borrow_mut();
+        for message_id in message_ids {
+            let (mailbox, uid) = self.split_message_id(message_id)?;
+            client.uid_expunge(mailbox, uid)?;
+        }
+        Ok(())
     }
 }
 

@@ -110,10 +110,16 @@ Prepared action tools:
 
 - `mail_create_draft` — composes the message and appends it to the drafts
   folder with `\Draft`; gated by the drafts right.
-- `mail_prepare_send` — **not implemented**. Needs SMTP and a `PendingActionStore`.
-- `mail_prepare_move` — **not implemented**. Needs a `PendingActionStore`.
-- `mail_prepare_delete` — **not implemented**. Needs a `PendingActionStore`.
-- `mail_confirm_action` — **not implemented**. Executes a prepared action.
+- `mail_prepare_move` — holds a move for confirmation; gated by the move right.
+- `mail_prepare_delete` — holds a soft delete (move to Trash) or, with
+  `permanent`, an expunge; gated by the matching right.
+- `mail_confirm_action` — runs a prepared action once, matched by its code
+  and inside its TTL, re-checking the policy per folder at execution.
+- `mail_prepare_send` — **not implemented**. Needs SMTP.
+
+Prepared actions live in the server between prepare and confirm. The
+confirmation code is the handshake tying a confirm to one preparation; the GUI
+is the intended place for a human to read the preview and approve.
 
 Read-only admin tools. These answer from the policy document alone and are
 dispatched before any account lookup or connection — `mail_list_accounts` is
