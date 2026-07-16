@@ -6,15 +6,16 @@
 mod keychain;
 mod policy_document;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use torromail_core::{
     AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
     ImapProviderConfig, MailAccessService, MailProvider, MarkChange, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
+    PolicyEngine, ReadAccess, SearchSessionStore, SearchWindow, StoredMessage,
 };
-use torromail_imap_tls::TlsImapMailProvider;
 use torromail_oauth::TokenSet;
 
 use crate::policy_document::{DocumentAccount, OAuthFacts, parse_policy_document};
@@ -190,7 +191,28 @@ impl ToolCatalog {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// One account's live connection, kept between tool calls. The identity is
+/// what it was built for; if the document later describes a different
+/// configuration, the stored session no longer matches and is rebuilt.
+struct PooledConnection {
+    identity: ConnIdentity,
+    provider: Box<dyn MailProvider>,
+}
+
+/// What a pooled connection was opened for. Reusing one across calls is only
+/// safe while this still matches the document — a changed host, user or auth
+/// means a different mailbox.
+#[derive(PartialEq, Eq)]
+enum ConnIdentity {
+    Fixture,
+    Configured(ImapProviderConfig),
+}
+
+/// How a connection is opened, so tests can supply a scripted mailbox in
+/// place of a TLS session. Takes only the account id — the production path
+/// resolves the rest from the reloaded document itself.
+type ConnectOverride = Box<dyn Fn(&AccountId) -> CoreResult<Box<dyn MailProvider>>>;
+
 pub struct LineMcpServer {
     catalog: ToolCatalog,
     /// Where the app publishes the account permissions. `None` runs the
@@ -202,22 +224,33 @@ pub struct LineMcpServer {
     /// tests: in the product that fallback would hand an assistant demo
     /// messages and call them the user's mail.
     fixtures_for_unconfigured_accounts: bool,
+    /// Live connections kept between tool calls, one per account, so a burst
+    /// of calls is one login rather than one login each. `RefCell` because
+    /// the stdio server hands out `&self`; single-threaded, so no lock.
+    connections: RefCell<HashMap<AccountId, PooledConnection>>,
+    /// Test seam: when set, this makes the mailbox instead of a TLS session.
+    connect_override: Option<ConnectOverride>,
 }
 
 impl LineMcpServer {
     /// A server wired to fixture data — the same policy-checked path real
     /// providers will use, minus the network.
     pub fn fixture() -> Self {
-        Self::default()
+        Self {
+            catalog: ToolCatalog::default(),
+            policy_path: None,
+            fixtures_for_unconfigured_accounts: false,
+            connections: RefCell::default(),
+            connect_override: None,
+        }
     }
 
     /// A server that enforces the policy document at `path`, reloading it on
     /// every tool call so permission changes in the app apply immediately.
     pub fn with_policy_path(path: impl Into<PathBuf>) -> Self {
         Self {
-            catalog: ToolCatalog::default(),
             policy_path: Some(path.into()),
-            fixtures_for_unconfigured_accounts: false,
+            ..Self::fixture()
         }
     }
 
@@ -228,6 +261,22 @@ impl LineMcpServer {
     pub fn with_policy_path_and_fixtures(path: impl Into<PathBuf>) -> Self {
         Self {
             fixtures_for_unconfigured_accounts: true,
+            ..Self::with_policy_path(path)
+        }
+    }
+
+    /// Test-only: a server whose connections come from `connect` rather than a
+    /// TLS handshake, so pooling and reconnection can be exercised without a
+    /// network. `connect` is called once per real open — reuse from the pool
+    /// never calls it.
+    #[doc(hidden)]
+    pub fn with_connect_override<F>(path: impl Into<PathBuf>, fixtures: bool, connect: F) -> Self
+    where
+        F: Fn(&AccountId) -> CoreResult<Box<dyn MailProvider>> + 'static,
+    {
+        Self {
+            fixtures_for_unconfigured_accounts: fixtures,
+            connect_override: Some(Box::new(connect)),
             ..Self::with_policy_path(path)
         }
     }
@@ -284,29 +333,90 @@ impl LineMcpServer {
             return self.handle_mail_get_policy(&account_id, id);
         }
 
-        let (engine, imap) = match self.runtime_for(&account_id) {
-            Ok(runtime) => runtime,
-            Err(message) => return json_rpc_error(id, -32000, &message),
-        };
-        let provider = match connect_provider(&account_id, imap) {
-            Ok(provider) => provider,
-            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
-        };
-
         if name == ToolName::MailSearch.as_str() {
-            return handle_mail_search(arguments, &account_id, provider, engine, id);
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_search(arguments, &account_id, provider, engine)
+            });
         }
         if name == ToolName::MailGetMessage.as_str() {
-            return handle_mail_get_message(arguments, &account_id, provider, engine, id);
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_get_message(arguments, &account_id, provider, engine)
+            });
         }
         if name == ToolName::MailMark.as_str() {
-            return handle_mail_mark(arguments, &account_id, provider, engine, id);
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_mark(arguments, &account_id, provider, engine)
+            });
         }
         if name == ToolName::MailListMailboxes.as_str() {
-            return handle_mail_list_mailboxes(&account_id, provider, engine, id);
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_list_mailboxes(&account_id, provider, engine)
+            });
         }
 
         json_rpc_error(id, -32000, "tool not implemented yet")
+    }
+
+    /// Run one mail operation against a pooled connection. The connection is
+    /// reused across calls; if it went stale — the server dropped it while we
+    /// idled — the first command fails, and this rebuilds it and tries once
+    /// more. A logical refusal (policy, missing message) is not a connection
+    /// fault and is returned as-is.
+    fn run_with_connection(
+        &self,
+        account_id: &AccountId,
+        id: &Value,
+        run: &dyn Fn(&mut dyn MailProvider, PolicyEngine) -> ToolResult,
+    ) -> String {
+        let mut rebuilt = false;
+        loop {
+            let (engine, facts) = match self.runtime_for(account_id) {
+                Ok(runtime) => runtime,
+                Err(message) => return json_rpc_error(id, -32000, &message),
+            };
+            let identity = match ConnIdentity::from_facts(&facts) {
+                Ok(identity) => identity,
+                Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+            };
+
+            let mut pool = self.connections.borrow_mut();
+            let stale = pool
+                .get(account_id)
+                .is_none_or(|connection| connection.identity != identity);
+            if stale {
+                let provider = match self.open_connection(account_id, facts) {
+                    Ok(provider) => provider,
+                    Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+                };
+                pool.insert(account_id.clone(), PooledConnection { identity, provider });
+            }
+            let connection = pool
+                .get_mut(account_id)
+                .expect("a connection was just ensured");
+
+            match run(connection.provider.as_mut(), engine) {
+                Ok(payload) => return json_rpc_text_result(id, &payload),
+                Err(failure) if failure.is_connection() && !rebuilt => {
+                    // The session is suspect: drop it so the retry opens a
+                    // fresh one, and do not loop forever.
+                    pool.remove(account_id);
+                    rebuilt = true;
+                }
+                Err(failure) => return failure.into_response(id),
+            }
+        }
+    }
+
+    /// Open a real connection, or defer to the test override when one is set.
+    fn open_connection(
+        &self,
+        account_id: &AccountId,
+        facts: ConnectionFacts,
+    ) -> CoreResult<Box<dyn MailProvider>> {
+        match &self.connect_override {
+            Some(connect) => connect(account_id),
+            None => open_provider(account_id, facts),
+        }
     }
 
     /// The accounts the document describes, reloaded per call. `None` means
@@ -526,19 +636,38 @@ enum ConnectionFacts {
     Unconfigured,
 }
 
-/// Connects a real mailbox when the document has connection facts for the
-/// account. Every call is a fresh session — no pooling yet.
-fn connect_provider(
+impl ConnIdentity {
+    /// The identity a pool entry must still match to be reused. Unconfigured
+    /// accounts have no connection at all, so there is nothing to key.
+    fn from_facts(facts: &ConnectionFacts) -> CoreResult<Self> {
+        match facts {
+            ConnectionFacts::FixtureMode => Ok(Self::Fixture),
+            ConnectionFacts::Configured(config, _) => {
+                Ok(Self::Configured((**config).clone()))
+            }
+            ConnectionFacts::Unconfigured => Err(CoreError::ProviderFailure(
+                "account has no connection configured — finish setting it up in TorroMail"
+                    .to_owned(),
+            )),
+        }
+    }
+}
+
+/// Opens a real mailbox when the document has connection facts for the
+/// account. The caller keeps the result in the pool; this is the expensive
+/// step — a TLS handshake and a LOGIN — that pooling exists to avoid
+/// repeating.
+fn open_provider(
     account_id: &AccountId,
     facts: ConnectionFacts,
-) -> CoreResult<RuntimeProvider> {
+) -> CoreResult<Box<dyn MailProvider>> {
     match facts {
         ConnectionFacts::Configured(config, oauth) => {
             let secret = resolve_credential(&config, oauth.as_ref())?;
             let provider = torromail_imap_tls::connect_account(&config, &secret)?;
-            Ok(RuntimeProvider::Imap(Box::new(provider)))
+            Ok(Box::new(provider))
         }
-        ConnectionFacts::FixtureMode => Ok(RuntimeProvider::Fixture(fixture_provider(account_id))),
+        ConnectionFacts::FixtureMode => Ok(Box::new(fixture_provider(account_id))),
         ConnectionFacts::Unconfigured => Err(CoreError::ProviderFailure(format!(
             "account {account_id} has no connection configured — finish setting it up in TorroMail"
         ))),
@@ -579,54 +708,6 @@ fn resolve_credential(
             // refresh token would be lost outright.
             keychain::store_secret(&config.secret_ref, &fresh.to_json())?;
             Ok(fresh.access_token)
-        }
-    }
-}
-
-/// The two mailbox sources one server can serve, behind one provider face.
-enum RuntimeProvider {
-    Fixture(FixtureMailProvider),
-    Imap(Box<TlsImapMailProvider>),
-}
-
-impl MailProvider for RuntimeProvider {
-    fn search(
-        &self,
-        account_id: &AccountId,
-        query: &str,
-        mailbox: Option<&str>,
-        limit: usize,
-        window: &SearchWindow,
-    ) -> CoreResult<Vec<SearchHit>> {
-        match self {
-            Self::Fixture(provider) => provider.search(account_id, query, mailbox, limit, window),
-            Self::Imap(provider) => provider.search(account_id, query, mailbox, limit, window),
-        }
-    }
-
-    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
-        match self {
-            Self::Fixture(provider) => provider.get_message(account_id, message_id),
-            Self::Imap(provider) => provider.get_message(account_id, message_id),
-        }
-    }
-
-    fn mark(
-        &mut self,
-        account_id: &AccountId,
-        message_id: &str,
-        change: MarkChange,
-    ) -> CoreResult<()> {
-        match self {
-            Self::Fixture(provider) => provider.mark(account_id, message_id, change),
-            Self::Imap(provider) => provider.mark(account_id, message_id, change),
-        }
-    }
-
-    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
-        match self {
-            Self::Fixture(provider) => provider.list_mailboxes(account_id),
-            Self::Imap(provider) => provider.list_mailboxes(account_id),
         }
     }
 }
@@ -672,49 +753,69 @@ fn default_engine(account_id: &AccountId) -> PolicyEngine {
     PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())])
 }
 
+/// A tool's result payload, or why it could not be produced. Kept apart from
+/// JSON-RPC formatting so the connection pool can tell a stale-session failure
+/// (rebuild and retry) from a logical one (report as-is).
+type ToolResult = Result<Value, ToolFailure>;
+
+enum ToolFailure {
+    /// The client asked for something malformed — a bad flag, a bad date.
+    InvalidParams(String),
+    /// Everything the domain can refuse or fail at: policy denials, missing
+    /// messages, and provider (connection) failures.
+    Core(CoreError),
+}
+
+impl ToolFailure {
+    /// Whether the connection itself is suspect, as opposed to a refusal the
+    /// connection reported faithfully.
+    fn is_connection(&self) -> bool {
+        matches!(self, Self::Core(CoreError::ProviderFailure(_)))
+    }
+
+    fn into_response(self, id: &Value) -> String {
+        match self {
+            Self::InvalidParams(message) => json_rpc_error(id, -32602, &message),
+            Self::Core(error) => json_rpc_error(id, -32000, &error.to_string()),
+        }
+    }
+}
+
 fn handle_mail_search(
     arguments: &Value,
     account_id: &AccountId,
-    provider: RuntimeProvider,
+    provider: &mut dyn MailProvider,
     engine: PolicyEngine,
-    id: &Value,
-) -> String {
+) -> ToolResult {
     let query = arguments["query"].as_str().unwrap_or_default();
     let mailbox = arguments["mailbox"].as_str();
     let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
 
-    let window = match search_window(arguments) {
-        Ok(window) => window,
-        Err(message) => return json_rpc_error(id, -32602, &message),
-    };
+    let window = search_window(arguments).map_err(ToolFailure::InvalidParams)?;
 
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
-    match service.search(account_id, query, mailbox, limit, &window, 100) {
-        Ok(result_set) => {
-            let hits = result_set
-                .hits()
-                .iter()
-                .map(|hit| {
-                    json!({
-                        "message_id": hit.message_id(),
-                        "mailbox": hit.mailbox(),
-                        "subject": hit.subject(),
-                        "date": hit.date()
-                    })
-                })
-                .collect::<Vec<_>>();
-            json_rpc_text_result(
-                id,
-                &json!({
-                    "result_set_id": result_set.id(),
-                    "hits": hits
-                }),
-            )
-        }
-        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
-    }
+    let result_set = service
+        .search(account_id, query, mailbox, limit, &window, 100)
+        .map_err(ToolFailure::Core)?;
+
+    let hits = result_set
+        .hits()
+        .iter()
+        .map(|hit| {
+            json!({
+                "message_id": hit.message_id(),
+                "mailbox": hit.mailbox(),
+                "subject": hit.subject(),
+                "date": hit.date()
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "result_set_id": result_set.id(),
+        "hits": hits
+    }))
 }
 
 /// The `since` / `before` arguments as an IMAP-ready date window. Clients
@@ -761,49 +862,42 @@ fn to_imap_date(iso: &str) -> Option<String> {
 fn handle_mail_get_message(
     arguments: &Value,
     account_id: &AccountId,
-    provider: RuntimeProvider,
+    provider: &mut dyn MailProvider,
     engine: PolicyEngine,
-    id: &Value,
-) -> String {
+) -> ToolResult {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
 
     let mut sessions = SearchSessionStore::default();
     let service = MailAccessService::new(provider, engine, &mut sessions);
 
-    match service.get_message(account_id, message_id, include_body) {
-        Ok(message) => json_rpc_text_result(
-            id,
-            &json!({
-                "message_id": message.message_id(),
-                "mailbox": message.mailbox(),
-                "thread_id": message.thread_id(),
-                "subject": message.subject(),
-                "sender": message.sender(),
-                "date": message.date(),
-                "snippet": message.snippet(),
-                "body": message.body(),
-                "seen": message.seen(),
-                "flagged": message.flagged()
-            }),
-        ),
-        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
-    }
+    let message = service
+        .get_message(account_id, message_id, include_body)
+        .map_err(ToolFailure::Core)?;
+    Ok(json!({
+        "message_id": message.message_id(),
+        "mailbox": message.mailbox(),
+        "thread_id": message.thread_id(),
+        "subject": message.subject(),
+        "sender": message.sender(),
+        "date": message.date(),
+        "snippet": message.snippet(),
+        "body": message.body(),
+        "seen": message.seen(),
+        "flagged": message.flagged()
+    }))
 }
 
 fn handle_mail_mark(
     arguments: &Value,
     account_id: &AccountId,
-    provider: RuntimeProvider,
+    provider: &mut dyn MailProvider,
     engine: PolicyEngine,
-    id: &Value,
-) -> String {
+) -> ToolResult {
     let Some(change) = arguments["mark"].as_str().and_then(MarkChange::parse) else {
-        return json_rpc_error(
-            id,
-            -32602,
-            "mark must be one of seen, unseen, flagged, unflagged",
-        );
+        return Err(ToolFailure::InvalidParams(
+            "mark must be one of seen, unseen, flagged, unflagged".to_owned(),
+        ));
     };
     let message_ids: Vec<&str> = arguments["message_ids"]
         .as_array()
@@ -815,32 +909,31 @@ fn handle_mail_mark(
 
     let mut marked = Vec::new();
     for message_id in message_ids {
-        match service.mark(account_id, message_id, change) {
-            Ok(message) => marked.push(json!({
-                "message_id": message.message_id(),
-                "seen": message.seen(),
-                "flagged": message.flagged()
-            })),
-            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
-        }
+        let message = service
+            .mark(account_id, message_id, change)
+            .map_err(ToolFailure::Core)?;
+        marked.push(json!({
+            "message_id": message.message_id(),
+            "seen": message.seen(),
+            "flagged": message.flagged()
+        }));
     }
 
-    json_rpc_text_result(id, &json!({ "marked": marked }))
+    Ok(json!({ "marked": marked }))
 }
 
 fn handle_mail_list_mailboxes(
     account_id: &AccountId,
-    provider: RuntimeProvider,
+    provider: &mut dyn MailProvider,
     engine: PolicyEngine,
-    id: &Value,
-) -> String {
+) -> ToolResult {
     let mut sessions = SearchSessionStore::default();
     let service = MailAccessService::new(provider, engine, &mut sessions);
 
-    match service.list_mailboxes(account_id) {
-        Ok(mailboxes) => json_rpc_text_result(id, &json!({ "mailboxes": mailboxes })),
-        Err(error) => json_rpc_error(id, -32000, &error.to_string()),
-    }
+    let mailboxes = service
+        .list_mailboxes(account_id)
+        .map_err(ToolFailure::Core)?;
+    Ok(json!({ "mailboxes": mailboxes }))
 }
 
 /// Tool payloads travel as MCP text content: JSON inside a text block.

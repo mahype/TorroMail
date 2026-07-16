@@ -1019,6 +1019,40 @@ pub trait MailProvider {
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>>;
 }
 
+/// A `&mut` to a provider is itself a provider. This is what lets a caller
+/// keep a long-lived connection in a pool and lend it to `MailAccessService`
+/// for one operation without giving up ownership — `?Sized` so it covers
+/// `&mut dyn MailProvider`, the form a boxed, pooled connection takes.
+impl<T: MailProvider + ?Sized> MailProvider for &mut T {
+    fn search(
+        &self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+        window: &SearchWindow,
+    ) -> CoreResult<Vec<SearchHit>> {
+        (**self).search(account_id, query, mailbox, limit, window)
+    }
+
+    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
+        (**self).get_message(account_id, message_id)
+    }
+
+    fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<()> {
+        (**self).mark(account_id, message_id, change)
+    }
+
+    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        (**self).list_mailboxes(account_id)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FixtureMailProvider {
     messages: Vec<StoredMessage>,

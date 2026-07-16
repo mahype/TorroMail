@@ -1,4 +1,159 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
+use torromail_core::{
+    AccountId, CoreError, CoreResult, FixtureMailProvider, MailProvider, MarkChange, SearchHit,
+    SearchWindow, StoredMessage,
+};
 use torromail_mcp::{AccessLevel, LineMcpServer, ToolCatalog, ToolName, TransportMode};
+
+/// A fixture mailbox that fails its first `list_mailboxes` with a connection
+/// error, then behaves — a stand-in for a pooled session the server dropped
+/// while idle.
+struct FailingOnce {
+    inner: FixtureMailProvider,
+    healthy: Cell<bool>,
+}
+
+impl FailingOnce {
+    fn new(inner: FixtureMailProvider) -> Self {
+        Self {
+            inner,
+            healthy: Cell::new(false),
+        }
+    }
+}
+
+impl MailProvider for FailingOnce {
+    fn search(
+        &self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+        window: &SearchWindow,
+    ) -> CoreResult<Vec<SearchHit>> {
+        self.inner.search(account_id, query, mailbox, limit, window)
+    }
+
+    fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
+        self.inner.get_message(account_id, message_id)
+    }
+
+    fn mark(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        change: MarkChange,
+    ) -> CoreResult<()> {
+        self.inner.mark(account_id, message_id, change)
+    }
+
+    fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        if !self.healthy.get() {
+            self.healthy.set(true);
+            return Err(CoreError::ProviderFailure("IMAP connection closed".to_owned()));
+        }
+        self.inner.list_mailboxes(account_id)
+    }
+}
+
+/// One INBOX message for `work`, so `list_mailboxes` has an accessible folder
+/// to report.
+fn one_message_mailbox() -> FixtureMailProvider {
+    FixtureMailProvider::new([StoredMessage::new(
+        AccountId::new("work"),
+        "INBOX",
+        "m1",
+        "thread-1",
+        "Subject",
+        "sender@example.com",
+        "snippet",
+        "body",
+    )])
+}
+
+/// A policy document naming `work` with full read — no `imap` block, so with
+/// fixtures enabled the account runs in fixture mode.
+fn fixture_account_document(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+}
+
+const LIST_MAILBOXES: &str = r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"mail_list_mailboxes","arguments":{"account_id":"work"}}}"#;
+
+#[test]
+fn a_second_call_reuses_the_pooled_connection() {
+    let path = temp_policy_path("pool-reuse");
+    fixture_account_document(&path);
+
+    let opens = Rc::new(Cell::new(0usize));
+    let counter = opens.clone();
+    let server = LineMcpServer::with_connect_override(path.clone(), true, move |_account_id| {
+        counter.set(counter.get() + 1);
+        Ok(Box::new(one_message_mailbox()) as Box<dyn MailProvider>)
+    });
+
+    let first = server.handle_line(LIST_MAILBOXES).expect("a response");
+    let second = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(first.contains("INBOX"));
+    assert!(second.contains("INBOX"));
+    // Two calls, one login: the second reused the pooled connection.
+    assert_eq!(opens.get(), 1);
+}
+
+#[test]
+fn a_stale_connection_is_rebuilt_within_the_same_call() {
+    let path = temp_policy_path("pool-reconnect");
+    fixture_account_document(&path);
+
+    let opens = Rc::new(Cell::new(0usize));
+    let counter = opens.clone();
+    let server = LineMcpServer::with_connect_override(path.clone(), true, move |_account_id| {
+        let opened = counter.get();
+        counter.set(opened + 1);
+        // The first session is stale and fails once; the rebuilt one works.
+        if opened == 0 {
+            Ok(Box::new(FailingOnce::new(one_message_mailbox())) as Box<dyn MailProvider>)
+        } else {
+            Ok(Box::new(one_message_mailbox()) as Box<dyn MailProvider>)
+        }
+    });
+
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    // The stale session's failure was absorbed: rebuilt once, answered.
+    assert!(response.contains("INBOX"), "got: {response}");
+    assert!(!response.contains("error"), "got: {response}");
+    assert_eq!(opens.get(), 2);
+}
+
+#[test]
+fn a_stale_connection_that_stays_broken_gives_up_after_one_rebuild() {
+    let path = temp_policy_path("pool-persistent-failure");
+    fixture_account_document(&path);
+
+    let opens = Rc::new(Cell::new(0usize));
+    let counter = opens.clone();
+    // Every session fails its first list — the rebuild cannot save this call.
+    let server = LineMcpServer::with_connect_override(path.clone(), true, move |_account_id| {
+        counter.set(counter.get() + 1);
+        Ok(Box::new(FailingOnce::new(one_message_mailbox())) as Box<dyn MailProvider>)
+    });
+
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    // Opened once, rebuilt once, then stopped — never an endless loop.
+    assert_eq!(opens.get(), 2);
+}
 
 #[test]
 fn stdio_is_the_default_transport() {

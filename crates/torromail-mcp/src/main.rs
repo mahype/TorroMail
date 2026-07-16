@@ -47,7 +47,7 @@ fn main() -> io::Result<()> {
 
     let server = match policy_path() {
         Some(path) => LineMcpServer::with_policy_path(path),
-        None => LineMcpServer::default(),
+        None => LineMcpServer::fixture(),
     };
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
