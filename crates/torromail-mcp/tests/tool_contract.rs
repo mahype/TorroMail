@@ -197,7 +197,7 @@ fn policy_document_permissions_reach_the_tools() {
     )
     .expect("policy document written");
 
-    let server = LineMcpServer::with_policy_path(path.clone());
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
     let response = server.handle_line(
         r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"seen"}}}"#,
     ).expect("a request gets a response");
@@ -243,6 +243,34 @@ fn corrupt_policy_documents_fail_closed() {
 }
 
 #[test]
+fn an_unconfigured_account_reports_it_rather_than_serving_fixtures() {
+    let path = temp_policy_path("unconfigured");
+    // A real account, fully permissioned, whose setup was never finished —
+    // exactly what the app publishes between "Add Account" and a working
+    // login.
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"invoice"}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    // The assistant must hear "not set up", never the fixture mailbox: demo
+    // messages presented as this account's mail is a lie it cannot detect.
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("no connection configured"));
+    assert!(!response.contains("result-set-1"));
+    assert!(!response.contains("Quarterly invoice"));
+}
+
+#[test]
 fn a_missing_policy_document_falls_back_to_the_product_default() {
     let server = LineMcpServer::with_policy_path(temp_policy_path("never-written"));
     let response = server.handle_line(
@@ -261,7 +289,7 @@ fn mail_list_mailboxes_hides_blocked_folders() {
     )
     .expect("policy document written");
 
-    let server = LineMcpServer::with_policy_path(path.clone());
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
     let response = server.handle_line(
         r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mail_list_mailboxes","arguments":{"account_id":"work"}}}"#,
     ).expect("a request gets a response");
@@ -269,6 +297,143 @@ fn mail_list_mailboxes_hides_blocked_folders() {
 
     assert!(response.contains("INBOX"));
     assert!(!response.contains("Archive"));
+}
+
+#[test]
+fn mail_list_accounts_names_the_accounts_without_being_told_one() {
+    let path = temp_policy_path("list-accounts");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","name":"Work","email":"me@example.com","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    // No account_id: this tool is where one is learned, so demanding one
+    // would leave a fresh client with no way in.
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"mail_list_accounts","arguments":{}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#"\"account_id\":\"work\""#));
+    assert!(response.contains("Work"));
+    assert!(response.contains("me@example.com"));
+}
+
+#[test]
+fn admin_reads_never_touch_a_mailbox() {
+    // Connection facts that would fail hard if anything tried to use them:
+    // the admin tools must answer from the document alone.
+    let path = temp_policy_path("admin-offline");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","name":"Work","email":"me@example.com","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"unreachable.invalid","port":993,"username":"me@example.com","secret_ref":"keychain://TorroMail/nonexistent"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let accounts = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"mail_list_accounts","arguments":{}}}"#,
+        )
+        .expect("a request gets a response");
+    let cache = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"mail_get_cache_status","arguments":{}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(!accounts.contains("error"));
+    assert!(!cache.contains("error"));
+    assert!(accounts.contains(r#"\"connected\":true"#));
+}
+
+#[test]
+fn mail_get_policy_reports_the_switches_and_what_they_permit() {
+    let path = temp_policy_path("get-policy");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","name":"Work","email":"me@example.com","read":"full_message","write":{"drafts":true,"mark":false},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"mail_get_policy","arguments":{"account_id":"work"}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    // The switches as the user set them...
+    assert!(response.contains(r#"\"read\":\"full_message\""#));
+    assert!(response.contains(r#"\"mark\":false"#));
+    // ...and the whole verdict they add up to. Pinned as a set, so the
+    // absent rights — mark, send, move, delete — are part of the assertion.
+    assert!(response.contains(
+        r#"\"capabilities\":[\"search\",\"read_headers\",\"read_body\",\"draft\"]"#
+    ));
+}
+
+#[test]
+fn mail_get_policy_refuses_accounts_the_document_does_not_name() {
+    let path = temp_policy_path("get-policy-unknown");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"personal","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"mail_get_policy","arguments":{"account_id":"work"}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("account not found"));
+}
+
+#[test]
+fn mail_get_cache_status_reports_the_published_facts() {
+    let path = temp_policy_path("cache-status");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{},"cache":{"local_cache_enabled":true,"mode":"headers","index_bodies":false,"index_attachments":false,"storage":"12 MB"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"mail_get_cache_status","arguments":{"account_id":"work"}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#"\"mode\":\"headers\""#));
+    assert!(response.contains("12 MB"));
+}
+
+#[test]
+fn an_empty_query_asks_for_the_latest_mail_instead_of_failing() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work"}}}"#,
+        )
+        .expect("a request gets a response");
+
+    // "What came in lately?" has no query to give, so no query must mean no
+    // filter — everything the fixture holds, not an error.
+    assert!(response.contains("Quarterly invoice"));
+    assert!(response.contains("Team notes"));
 }
 
 #[test]
@@ -280,4 +445,63 @@ fn tool_list_serializes_without_secrets_or_local_paths() {
     assert!(!manifest.contains("password"));
     assert!(!manifest.contains("token"));
     assert!(!manifest.contains("/Users/"));
+}
+
+#[test]
+fn an_xoauth2_account_is_accepted_and_reaches_the_keychain() {
+    // Byte-for-byte what the Swift app publishes for a Gmail account. There
+    // is no token in this test's keychain, so the furthest this can get is
+    // the lookup — which is the point: getting that far proves the document
+    // parsed, the mechanism was understood, and the renewal facts were taken.
+    let path = temp_policy_path("xoauth2");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"gmail","name":"Sven","email":"sven@gmail.com","read":"full_message","write":{},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"imap.gmail.com","port":993,"username":"sven@gmail.com","secret_ref":"keychain://TorroMail/torromail-absent-test-account","auth":"xoauth2","token_endpoint":"https://oauth2.googleapis.com/token","client_id":"abc.apps.googleusercontent.com"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let error = torromail_mcp::check_account("gmail", Some(path.clone()))
+        .expect_err("no token is stored for this account");
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        error.contains("keychain"),
+        "should fail at the secret, not before it — got: {error}"
+    );
+}
+
+#[test]
+fn an_xoauth2_account_without_renewal_facts_is_refused() {
+    // Half a contract is worse than none: this would connect once and then
+    // fail an hour later with nothing to point at.
+    let path = temp_policy_path("xoauth2-incomplete");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"gmail","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"imap.gmail.com","username":"s@gmail.com","secret_ref":"keychain://TorroMail/gmail","auth":"xoauth2"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let error = torromail_mcp::check_account("gmail", Some(path.clone()))
+        .expect_err("an xoauth2 block without a token endpoint must not parse");
+    std::fs::remove_file(&path).ok();
+
+    assert!(error.contains("token_endpoint"), "got: {error}");
+}
+
+#[test]
+fn an_unknown_auth_mechanism_is_refused_rather_than_guessed_at() {
+    // Guessing "password" here would send the stored secret as a cleartext
+    // LOGIN to a server that asked for something else.
+    let path = temp_policy_path("unknown-auth");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"imap.example.com","username":"w","secret_ref":"keychain://TorroMail/work","auth":"ntlm"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let error = torromail_mcp::check_account("work", Some(path.clone()))
+        .expect_err("an unknown mechanism must not fall back to a password");
+    std::fs::remove_file(&path).ok();
+
+    assert!(error.contains("ntlm"), "got: {error}");
 }

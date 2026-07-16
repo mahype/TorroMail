@@ -3,8 +3,8 @@
 pub mod imap_provider;
 
 pub use imap_provider::{
-    FetchedMessage, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport, SecretRef,
-    StreamImapTransport, TcpImapTransport,
+    FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport,
+    SecretRef, StreamImapTransport, TcpImapTransport,
 };
 
 use std::collections::BTreeMap;
@@ -468,6 +468,10 @@ impl Policy {
         }
     }
 
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
     pub fn permissions(&self) -> &PermissionSet {
         &self.permissions
     }
@@ -685,6 +689,7 @@ pub struct SearchHit {
     subject: String,
     sender: String,
     snippet: String,
+    date: String,
 }
 
 impl SearchHit {
@@ -701,7 +706,16 @@ impl SearchHit {
             subject: subject.into(),
             sender: sender.into(),
             snippet: snippet.into(),
+            date: String::new(),
         }
+    }
+
+    /// The `Date` header as the server states it, verbatim. Not every
+    /// provider has one, so it is a separate step and empty means unknown —
+    /// never a guessed timestamp.
+    pub fn with_date(mut self, date: impl Into<String>) -> Self {
+        self.date = date.into();
+        self
     }
 
     pub fn message_id(&self) -> &str {
@@ -714,6 +728,10 @@ impl SearchHit {
 
     pub fn subject(&self) -> &str {
         &self.subject
+    }
+
+    pub fn date(&self) -> &str {
+        &self.date
     }
 
     fn searchable_text(&self) -> String {
@@ -852,6 +870,7 @@ pub struct StoredMessage {
     sender: String,
     snippet: String,
     body: String,
+    date: String,
     seen: bool,
     flagged: bool,
 }
@@ -877,13 +896,25 @@ impl StoredMessage {
             sender: sender.into(),
             snippet: snippet.into(),
             body: body.into(),
+            date: String::new(),
             seen: false,
             flagged: false,
         }
     }
 
+    /// The `Date` header as the server states it, verbatim. Empty means the
+    /// provider has none — never a guessed timestamp.
+    pub fn with_date(mut self, date: impl Into<String>) -> Self {
+        self.date = date.into();
+        self
+    }
+
     pub fn mailbox(&self) -> &str {
         &self.mailbox
+    }
+
+    pub fn date(&self) -> &str {
+        &self.date
     }
 
     pub fn seen(&self) -> bool {
@@ -943,6 +974,9 @@ impl StoredMessage {
 /// The boundary fixture-backed tests and real IMAP retrieval share: search
 /// and single-message fetch, nothing that smells like an inbox.
 pub trait MailProvider {
+    /// A blank query means "no filter": the newest messages the mailbox has.
+    /// That is how "what came in lately?" is answered without a browsing
+    /// tool — the caller's `limit` cuts off the oldest, never the newest.
     fn search(
         &self,
         account_id: &AccountId,
@@ -999,6 +1033,7 @@ impl MailProvider for FixtureMailProvider {
                     message.sender(),
                     message.snippet(),
                 )
+                .with_date(message.date())
             })
             .collect())
     }

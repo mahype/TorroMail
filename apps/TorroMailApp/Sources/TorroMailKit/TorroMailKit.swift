@@ -95,12 +95,31 @@ public enum KeychainStore {
         }
         guard updateStatus == errSecSuccess else { throw Failure(status: updateStatus) }
     }
+
+    /// Drops a secret. An abandoned setup writes a password to the keychain
+    /// before it knows whether the account will exist; without this, cancelling
+    /// would leave it there forever under an id nothing refers to.
+    public static func deletePassword(forAccount accountID: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: accountID
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
 }
 
 /// Runs the MCP binary's `--check-account`: the same secret resolution,
 /// TLS and LOGIN the tools use — so a green dot means the real path works.
 public enum AccountCheck {
-    public static func run(accountID: String, executableName: String) -> ConnectionState {
+    /// Checks an account the app has already published. `policyURL` overrides
+    /// which document to check against — the wizard points it at a throwaway
+    /// document so a candidate account can be proven before it joins the list.
+    public static func run(
+        accountID: String,
+        executableName: String,
+        policyURL: URL? = nil
+    ) -> ConnectionState {
         let locator = MCPExecutableLocator(
             executableName: executableName,
             workspaceRoot: FileManager.default.currentDirectoryPath
@@ -113,8 +132,8 @@ public enum AccountCheck {
         process.executableURL = command.executableURL
         process.arguments = command.arguments + ["--check-account", accountID]
         var environment = ProcessInfo.processInfo.environment
-        if let policyURL = try? PolicyDocument.defaultURL() {
-            environment["TORROMAIL_POLICY_PATH"] = policyURL.path
+        if let url = policyURL ?? (try? PolicyDocument.defaultURL()) {
+            environment["TORROMAIL_POLICY_PATH"] = url.path
         }
         process.environment = environment
         let errorPipe = Pipe()
@@ -136,6 +155,158 @@ public enum AccountCheck {
             encoding: .utf8
         )?.trimmingCharacters(in: .whitespacesAndNewlines)
         return .failed(detail?.isEmpty == false ? detail ?? "" : "connection check failed")
+    }
+}
+
+/// An assistant TorroMail can wire itself into. A client is defined by where
+/// it keeps its MCP servers, not by what it is called: Claude Desktop, Gemini
+/// CLI and Cursor all read a JSON file with a top-level `mcpServers` object,
+/// so they differ only in path.
+public struct MCPClient: Identifiable, Hashable {
+    public enum Setup: Hashable {
+        /// A JSON file with a top-level `mcpServers` object we own and merge.
+        case mcpServersJSON(configURL: URL)
+        /// ChatGPT keeps its servers in TOML and bundles the codex CLI that
+        /// owns that file. Handing the edit to that tool beats writing TOML
+        /// here — preserving the user's other servers stays its problem. The
+        /// config is read (not launched) to tell whether we are set up.
+        case codexCLI(executableURL: URL, configURL: URL)
+        /// Claude Code owns a large, frequently-rewritten JSON file
+        /// (`~/.claude.json`). Editing it by hand would race its own writes,
+        /// so we register through its `claude mcp add -s user` CLI and only
+        /// read the file to detect our server.
+        case claudeCodeCLI(executableURL: URL, configURL: URL)
+    }
+
+    public let id: String
+    public let displayName: String
+    public let setup: Setup
+
+    public init(id: String, displayName: String, setup: Setup) {
+        self.id = id
+        self.displayName = displayName
+        self.setup = setup
+    }
+}
+
+/// The clients TorroMail knows how to configure, and where each keeps its
+/// servers. Only what is installed is listed: TorroMail does not offer to
+/// set up an assistant that is not on this Mac.
+public enum MCPClientRegistry {
+    /// The name TorroMail registers itself under in every client.
+    public static let serverName = "torromail"
+
+    public static func installed(fileManager: FileManager = .default) -> [MCPClient] {
+        let home = fileManager.homeDirectoryForCurrentUser
+        var clients: [MCPClient] = []
+
+        let claudeDirectory = home
+            .appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+        if fileManager.fileExists(atPath: claudeDirectory.path) {
+            clients.append(MCPClient(
+                id: "claude-desktop",
+                displayName: "Claude Desktop",
+                setup: .mcpServersJSON(
+                    configURL: claudeDirectory.appendingPathComponent("claude_desktop_config.json")
+                )
+            ))
+        }
+
+        let codex = URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
+        if fileManager.isExecutableFile(atPath: codex.path) {
+            clients.append(MCPClient(
+                id: "chatgpt",
+                displayName: "ChatGPT",
+                setup: .codexCLI(
+                    executableURL: codex,
+                    configURL: home.appendingPathComponent(".codex/config.toml")
+                )
+            ))
+        }
+
+        let geminiDirectory = home.appendingPathComponent(".gemini", isDirectory: true)
+        if fileManager.fileExists(atPath: geminiDirectory.path) {
+            clients.append(MCPClient(
+                id: "gemini-cli",
+                displayName: "Gemini CLI",
+                setup: .mcpServersJSON(
+                    configURL: geminiDirectory.appendingPathComponent("settings.json")
+                )
+            ))
+        }
+
+        let cursorDirectory = home.appendingPathComponent(".cursor", isDirectory: true)
+        if fileManager.fileExists(atPath: cursorDirectory.path) {
+            clients.append(MCPClient(
+                id: "cursor",
+                displayName: "Cursor",
+                setup: .mcpServersJSON(
+                    configURL: cursorDirectory.appendingPathComponent("mcp.json")
+                )
+            ))
+        }
+
+        // Claude Code is a CLI: a GUI app inherits no shell PATH, so the
+        // binary is found by absolute path across the ways it ships.
+        if let claude = resolveExecutable(
+            candidates: [
+                home.appendingPathComponent(".claude/local/claude").path,
+                "/opt/homebrew/bin/claude",
+                "/usr/local/bin/claude",
+                home.appendingPathComponent(".local/bin/claude").path
+            ],
+            fileManager: fileManager
+        ) {
+            clients.append(MCPClient(
+                id: "claude-code",
+                displayName: "Claude Code",
+                setup: .claudeCodeCLI(
+                    executableURL: claude,
+                    configURL: home.appendingPathComponent(".claude.json")
+                )
+            ))
+        }
+
+        return clients
+    }
+
+    /// First executable candidate that exists, or nil. Used for CLIs whose
+    /// install location depends on how the user installed them.
+    public static func resolveExecutable(candidates: [String], fileManager: FileManager) -> URL? {
+        for path in candidates where fileManager.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+}
+
+/// Proves a candidate account before it becomes one.
+///
+/// The setup wizard needs the real answer — TLS, login, mailboxes — from an
+/// account that does not exist yet. Publishing it to the live policy document
+/// first would mean an unproven account is briefly reachable by assistants,
+/// so this writes a throwaway document instead and points the check at that.
+public enum AccountTrial {
+    /// Runs the same `--check-account` path the app's own button uses, against
+    /// a document containing only this candidate.
+    public static func check(
+        account: MailAccount,
+        executableName: String
+    ) -> ConnectionState {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("torromail-trial-\(account.id).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        do {
+            try PolicyDocument.data(for: [account]).write(to: url, options: .atomic)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        return AccountCheck.run(
+            accountID: account.id,
+            executableName: executableName,
+            policyURL: url
+        )
     }
 }
 
@@ -167,24 +338,35 @@ public enum MCPClientSetup {
     /// Which assistants are set up to reach TorroMail. Read from their own
     /// configuration — the app does not guess, and does not pretend.
     public static func configuredClientNames(fileManager: FileManager = .default) -> [String] {
-        guard let support = try? fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        ) else {
-            return []
+        MCPClientRegistry.installed(fileManager: fileManager)
+            .filter { isConfigured($0) }
+            .map(\.displayName)
+    }
+
+    /// Whether a client already points at TorroMail.
+    public static func isConfigured(_ client: MCPClient) -> Bool {
+        switch client.setup {
+        case let .mcpServersJSON(configURL), let .claudeCodeCLI(_, configURL):
+            return jsonConfigHasServer(at: configURL)
+        case let .codexCLI(_, configURL):
+            // Reading the file beats launching the CLI on every refresh, and
+            // a TOML table header is unambiguous enough to scan for.
+            guard let text = try? String(contentsOf: configURL, encoding: .utf8) else {
+                return false
+            }
+            return text.contains("[mcp_servers.\(MCPClientRegistry.serverName)]")
         }
-        let config = support
-            .appendingPathComponent("Claude", isDirectory: true)
-            .appendingPathComponent("claude_desktop_config.json")
-        guard let data = try? Data(contentsOf: config),
+    }
+
+    /// Whether a top-level `mcpServers` object names our server. Shared by the
+    /// clients whose config is JSON, including Claude Code's `~/.claude.json`.
+    private static func jsonConfigHasServer(at configURL: URL) -> Bool {
+        guard let data = try? Data(contentsOf: configURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let servers = root["mcpServers"] as? [String: Any],
-              servers["torromail"] != nil else {
-            return []
+              let servers = root["mcpServers"] as? [String: Any] else {
+            return false
         }
-        return ["Claude Desktop"]
+        return servers[MCPClientRegistry.serverName] != nil
     }
 
     public static func configSnippet(commandPath: String) -> String {
@@ -199,37 +381,43 @@ public enum MCPClientSetup {
         """
     }
 
-    /// Merges the torromail server into Claude Desktop's configuration.
-    /// Other servers survive; an unreadable existing file is an error and
-    /// never overwritten.
-    @discardableResult
-    public static func addToClaudeDesktop(
+    /// Registers the server with a client. Servers the user configured
+    /// elsewhere survive: the JSON path merges, and the CLI paths hand the
+    /// file to the tool that owns it. An unreadable configuration is an error
+    /// and is never overwritten.
+    public static func add(
+        to client: MCPClient,
         commandPath: String,
-        configURL: URL? = nil,
         fileManager: FileManager = .default
-    ) throws -> URL {
-        let target: URL
-        if let configURL {
-            target = configURL
-        } else {
-            let claudeDirectory = try fileManager
-                .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
-                .appendingPathComponent("Claude", isDirectory: true)
-            guard fileManager.fileExists(atPath: claudeDirectory.path) else {
-                throw Failure("Claude Desktop was not found.")
-            }
-            target = claudeDirectory.appendingPathComponent("claude_desktop_config.json")
+    ) throws {
+        switch client.setup {
+        case let .mcpServersJSON(configURL):
+            try addToJSONConfig(at: configURL, commandPath: commandPath, fileManager: fileManager)
+        case let .codexCLI(executableURL, _):
+            try addViaCLI(executableURL: executableURL, extraArguments: [], commandPath: commandPath)
+        case let .claudeCodeCLI(executableURL, _):
+            // `-s user` registers globally; the default scope is the current
+            // project, which for a background app would be nowhere useful.
+            try addViaCLI(executableURL: executableURL, extraArguments: ["-s", "user"], commandPath: commandPath)
         }
+    }
 
+    private static func addToJSONConfig(
+        at target: URL,
+        commandPath: String,
+        fileManager: FileManager
+    ) throws {
         var root: [String: Any] = [:]
-        if let data = try? Data(contentsOf: target) {
+        if let data = try? Data(contentsOf: target), !data.isEmpty {
+            // A client may ship an empty placeholder file (Cursor does); that
+            // is a fresh start, not a corrupt config.
             guard let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                 throw Failure("The existing configuration could not be read.")
             }
             root = existing
         }
         var servers = root["mcpServers"] as? [String: Any] ?? [:]
-        servers["torromail"] = ["command": commandPath]
+        servers[MCPClientRegistry.serverName] = ["command": commandPath]
         root["mcpServers"] = servers
 
         try fileManager.createDirectory(
@@ -238,7 +426,32 @@ public enum MCPClientSetup {
         )
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: target, options: .atomic)
-        return target
+    }
+
+    /// Runs `<cli> mcp add <name> [extraArguments] -- <commandPath>`. The tool
+    /// that owns the config does the merge, so other servers are safe.
+    private static func addViaCLI(
+        executableURL: URL,
+        extraArguments: [String],
+        commandPath: String
+    ) throws {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["mcp", "add", MCPClientRegistry.serverName]
+            + extraArguments + ["--", commandPath]
+        let errorPipe = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw Failure("The assistant's setup tool could not be started.")
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw Failure("The assistant's setup tool reported an error.")
+        }
     }
 }
 
@@ -358,6 +571,10 @@ public enum PolicyDocument {
     private static func accountObject(for account: MailAccount) -> [String: Any] {
         var object: [String: Any] = [
             "id": account.id,
+            // Labels, not rights: `mail_list_accounts` has to name the
+            // account the way the user does, or nobody can pick one.
+            "name": account.name,
+            "email": account.email,
             "read": name(for: account.permissions.read),
             "write": [
                 "drafts": account.permissions.write.drafts,
@@ -370,17 +587,38 @@ public enum PolicyDocument {
             "per_folder": account.permissions.perFolder,
             "folder_rules": account.permissions.folderRules.mapValues { rule in
                 ["read": rule.read, "write": rule.write]
-            }
+            },
+            // The server reports these rather than acting on them, so an
+            // assistant can say why a body is missing or a search is slow.
+            "cache": [
+                "local_cache_enabled": account.searchCache.localCacheEnabled,
+                "mode": account.searchCache.cacheMode.rawValue,
+                "index_bodies": account.searchCache.indexBodies,
+                "index_attachments": account.searchCache.indexAttachments,
+                "storage": account.searchCache.storage
+            ]
         ]
-        // Connection facts travel once the user has provided them; the
-        // password itself stays in the keychain, only the reference moves.
-        if account.loginMethod == .password, !account.imapHost.isEmpty, !account.username.isEmpty {
-            object["imap"] = [
+        // Connection facts travel once the account has them, whatever the
+        // login method — the secret itself stays in the keychain, only the
+        // reference moves. An account without this block has no mail to give:
+        // the server refuses it rather than inventing any.
+        if !account.imapHost.isEmpty, !account.username.isEmpty {
+            var imap: [String: Any] = [
                 "host": account.imapHost,
-                "port": 993,
+                "port": account.imapPort,
                 "username": account.username,
                 "secret_ref": KeychainStore.secretReference(forAccount: account.id)
             ]
+            // OAuth accounts keep a token set behind that reference instead of
+            // a password. The server renews it on its own, which is why the
+            // endpoint and client id have to travel with the facts: an MCP
+            // client can spawn the server while TorroMail is closed.
+            if account.loginMethod == .oauth, let issuer = account.oauthIssuer {
+                imap["auth"] = "xoauth2"
+                imap["token_endpoint"] = issuer.tokenEndpoint.absoluteString
+                imap["client_id"] = issuer.clientID
+            }
+            object["imap"] = imap
         }
         return object
     }
@@ -395,7 +633,7 @@ public enum PolicyDocument {
     }
 }
 
-public enum Provider: String, CaseIterable, Identifiable, Hashable, Codable {
+public enum Provider: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
     case microsoft = "Microsoft 365"
@@ -404,14 +642,14 @@ public enum Provider: String, CaseIterable, Identifiable, Hashable, Codable {
     public var id: Self { self }
 }
 
-public enum LoginMethod: String, CaseIterable, Identifiable, Hashable, Codable {
+public enum LoginMethod: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case password
     case oauth
 
     public var id: Self { self }
 }
 
-public enum CacheMode: String, CaseIterable, Identifiable, Hashable, Codable {
+public enum CacheMode: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case metadata
     case headers
     case body
@@ -422,7 +660,7 @@ public enum CacheMode: String, CaseIterable, Identifiable, Hashable, Codable {
 
 /// Connection health of one account. The UI stays quiet while everything is
 /// fine and only surfaces states that need the user's attention.
-public enum ConnectionState: Hashable {
+public enum ConnectionState: Hashable, Sendable {
     case notConfigured
     case needsTest
     case connected
@@ -614,7 +852,7 @@ extension PermissionSet {
     }
 }
 
-public struct SearchCacheSettings: Hashable, Codable {
+public struct SearchCacheSettings: Hashable, Sendable, Codable {
     public var localCacheEnabled: Bool
     public var cacheMode: CacheMode
     public var indexBodies: Bool
@@ -636,7 +874,7 @@ public struct SearchCacheSettings: Hashable, Codable {
     }
 }
 
-public struct PendingAction: Identifiable, Hashable {
+public struct PendingAction: Identifiable, Hashable, Sendable {
     public var id: String
     public var accountID: String
     public var toolCall: String
@@ -664,14 +902,23 @@ public struct PendingAction: Identifiable, Hashable {
     }
 }
 
-public struct MailAccount: Identifiable, Hashable {
+public struct MailAccount: Identifiable, Hashable, Sendable {
     public var id: String
     public var name: String
     public var email: String
     public var provider: Provider
     public var loginMethod: LoginMethod
+    /// Who issued the token behind this account's keychain entry. Only set
+    /// for OAuth accounts, and the reason the policy document can name a
+    /// token endpoint the server renews against.
+    public var oauthIssuer: OAuthIssuer?
     public var imapHost: String
+    /// Autodiscovery fills these in; the wizard only shows them when the user
+    /// opens the manual details. 993/587 are the defaults, not a rule —
+    /// providers do differ.
+    public var imapPort: Int
     public var smtpHost: String
+    public var smtpPort: Int
     public var username: String
     public var connectionState: ConnectionState
     /// Mailboxes the server reported (`mail_list_mailboxes`), in display
@@ -688,8 +935,11 @@ public struct MailAccount: Identifiable, Hashable {
         email: String,
         provider: Provider,
         loginMethod: LoginMethod,
+        oauthIssuer: OAuthIssuer? = nil,
         imapHost: String = "",
+        imapPort: Int = 993,
         smtpHost: String = "",
+        smtpPort: Int = 587,
         username: String = "",
         connectionState: ConnectionState = .notConfigured,
         knownMailboxes: [String] = ["INBOX"],
@@ -702,8 +952,11 @@ public struct MailAccount: Identifiable, Hashable {
         self.email = email
         self.provider = provider
         self.loginMethod = loginMethod
+        self.oauthIssuer = oauthIssuer
         self.imapHost = imapHost
+        self.imapPort = imapPort
         self.smtpHost = smtpHost
+        self.smtpPort = smtpPort
         self.username = username
         self.connectionState = connectionState
         self.knownMailboxes = knownMailboxes
@@ -725,6 +978,7 @@ extension MailAccount: Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, email, provider, loginMethod, imapHost, smtpHost
         case username, knownMailboxes, permissions, searchCache, isVerified
+        case imapPort, smtpPort, oauthIssuer
     }
 
     public init(from decoder: Decoder) throws {
@@ -739,8 +993,13 @@ extension MailAccount: Codable {
             email: try container.decode(String.self, forKey: .email),
             provider: try container.decode(Provider.self, forKey: .provider),
             loginMethod: try container.decode(LoginMethod.self, forKey: .loginMethod),
+            oauthIssuer: try container.decodeIfPresent(OAuthIssuer.self, forKey: .oauthIssuer),
             imapHost: imapHost,
+            // Accounts written before ports were configurable carry neither
+            // key; they were all implicitly 993/587.
+            imapPort: try container.decodeIfPresent(Int.self, forKey: .imapPort) ?? 993,
             smtpHost: try container.decode(String.self, forKey: .smtpHost),
+            smtpPort: try container.decodeIfPresent(Int.self, forKey: .smtpPort) ?? 587,
             username: username,
             connectionState: MailAccount.restoredState(
                 isVerified: isVerified,
@@ -760,8 +1019,11 @@ extension MailAccount: Codable {
         try container.encode(email, forKey: .email)
         try container.encode(provider, forKey: .provider)
         try container.encode(loginMethod, forKey: .loginMethod)
+        try container.encodeIfPresent(oauthIssuer, forKey: .oauthIssuer)
         try container.encode(imapHost, forKey: .imapHost)
+        try container.encode(imapPort, forKey: .imapPort)
         try container.encode(smtpHost, forKey: .smtpHost)
+        try container.encode(smtpPort, forKey: .smtpPort)
         try container.encode(username, forKey: .username)
         try container.encode(knownMailboxes, forKey: .knownMailboxes)
         try container.encode(permissions, forKey: .permissions)
@@ -786,9 +1048,9 @@ public struct GeneralSettings: Hashable, Codable {
     /// MCP server) starts automatically at login. Everything else is derived.
     public var launchAtLogin: Bool
 
-    /// Whether TorroMail keeps a Dock tile while it has no window open. Off by
-    /// default: the app's job is done in the background, so it stays out of the
-    /// Dock until the user opens the window.
+    /// Whether TorroMail keeps a Dock tile while it has no window open. On by
+    /// default: with it off and no window open the app is unreachable, so the
+    /// Dock tile is the way back in until the user opts into the menu bar.
     public var showDockIcon: Bool
 
     /// Whether TorroMail sits in the menu bar. Off by default for the same
@@ -801,7 +1063,7 @@ public struct GeneralSettings: Hashable, Codable {
 
     public init(
         launchAtLogin: Bool = true,
-        showDockIcon: Bool = false,
+        showDockIcon: Bool = true,
         showMenuBarIcon: Bool = false,
         mcpExecutable: String = "torromail-mcp"
     ) {
@@ -1063,16 +1325,9 @@ public final class TorroMailModel: ObservableObject {
         showAccountWizard = true
     }
 
-    public func addAccount(name: String, email: String, provider: Provider, loginMethod: LoginMethod) {
-        let account = MailAccount(
-            id: UUID().uuidString,
-            name: name,
-            email: email,
-            provider: provider,
-            loginMethod: loginMethod,
-            username: email,
-            connectionState: .notConfigured
-        )
+    /// Takes an account the wizard has already proven: connected, with rights
+    /// chosen. Nothing half-configured reaches this list.
+    public func addAccount(_ account: MailAccount) {
         accounts.append(account)
         openAccount(id: account.id)
     }
@@ -1109,7 +1364,7 @@ extension TorroMailModel {
             NewsItem(
                 id: "news-oauth",
                 title: "Gmail und Microsoft 365 ohne Passwort",
-                detail: "Konten lassen sich jetzt per OAuth anmelden — kein App-Passwort mehr nötig.",
+                detail: "Die Einrichtung findet den Anbieter selbst und meldet dich per OAuth direkt bei ihm an.",
                 symbol: "key.fill",
                 isNew: true
             ),

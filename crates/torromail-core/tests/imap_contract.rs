@@ -7,8 +7,8 @@ use std::io::{Cursor, Read, Write};
 use std::rc::Rc;
 
 use torromail_core::{
-    AccountId, CoreResult, ImapClient, ImapMailProvider, ImapTransport, MailProvider, MarkChange,
-    StreamImapTransport,
+    AccountId, CoreResult, ImapAuth, ImapClient, ImapMailProvider, ImapTransport, MailProvider,
+    MarkChange, SearchHit, StreamImapTransport,
 };
 
 #[derive(Debug)]
@@ -290,4 +290,184 @@ fn the_provider_answers_only_for_its_own_account() {
             .search(&AccountId::new("other"), "invoice", None, 10)
             .is_err()
     );
+}
+
+/// The real shape of a subject with non-ASCII in it: RFC 2047 encoded-words,
+/// folded across lines because the encoding made it long. Taken from live
+/// mail — decoding one word but dropping the continuation would look like it
+/// worked while quietly truncating.
+/// The `?Q?=F0…` word matters: a payload opening with an escape is where
+/// searching for the `?=` terminator finds a false one inside the word.
+const ENCODED_HEADERS: &str = concat!(
+    "Subject: =?UTF-8?B?4pyI77iPIEZsw7xnZQ==?=\r\n",
+    " =?UTF-8?Q?=F0=9F=99=8C_nach_Hanoi_jetzt_ab_1=2E081?=\r\n",
+    "From: =?ISO-8859-1?Q?Fl=FCge?= <deals@example.com>\r\n",
+    "Date: Wed, 15 Jul 2026 20:52:22 +0000\r\n",
+    "\r\n"
+);
+
+#[test]
+fn encoded_and_folded_headers_arrive_as_readable_text() {
+    let mut script = login_script();
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    script.extend(fetch_script("t3", 101, "", ENCODED_HEADERS, BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let message = provider
+        .get_message(&account_id, "INBOX/101")
+        .expect("fetch succeeds");
+
+    // Both words, joined without the fold's whitespace between them.
+    assert_eq!(message.subject(), "✈️ Flüge🙌 nach Hanoi jetzt ab 1.081");
+    // Latin-1 and a mix of encoded and plain text in one line.
+    assert_eq!(message.sender(), "Flüge <deals@example.com>");
+    assert_eq!(message.date(), "Wed, 15 Jul 2026 20:52:22 +0000");
+}
+
+#[test]
+fn plain_headers_are_left_exactly_as_they_are() {
+    let mut script = login_script();
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    // A subject that merely looks like an encoded-word must survive intact.
+    let headers = "Subject: Re: =?what?= is this\r\nFrom: a@example.com\r\n\r\n";
+    script.extend(fetch_script("t3", 101, "", headers, BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let message = provider
+        .get_message(&account_id, "INBOX/101")
+        .expect("fetch succeeds");
+
+    assert_eq!(message.subject(), "Re: =?what?= is this");
+}
+
+#[test]
+fn an_empty_query_asks_the_server_for_everything_newest_first() {
+    let mut script = login_script();
+    script.extend([
+        line("* 3 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("* SEARCH 101 102"),
+        line("t3 OK SEARCH completed"),
+    ]);
+    // Newest first, so the higher UID is fetched before the lower one.
+    script.extend(fetch_script("t4", 102, "", HEADERS, BODY));
+    script.extend(fetch_script("t5", 101, "", HEADERS, BODY));
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let hits = provider
+        .search(&account_id, "", None, 10)
+        .expect("search succeeds");
+
+    // No mailbox and no query: the inbox, unfiltered — never a LIST that
+    // would rank messages from different mailboxes against each other.
+    let sent = log.lines();
+    assert_eq!(sent[1], "t2 SELECT \"INBOX\"");
+    assert_eq!(sent[2], "t3 UID SEARCH ALL");
+    assert_eq!(
+        hits.iter().map(SearchHit::message_id).collect::<Vec<_>>(),
+        ["INBOX/102", "INBOX/101"]
+    );
+}
+
+#[test]
+fn a_limit_cuts_off_the_oldest_mail_not_the_newest() {
+    let mut script = login_script();
+    script.extend([
+        line("* 3 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("* SEARCH 101 102 103"),
+        line("t3 OK SEARCH completed"),
+    ]);
+    script.extend(fetch_script("t4", 103, "", HEADERS, BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let hits = provider
+        .search(&account_id, "", Some("INBOX"), 1)
+        .expect("search succeeds");
+
+    // One hit asked for, out of three: it must be the newest, and the other
+    // two must never be fetched at all.
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id(), "INBOX/103");
+}
+
+#[test]
+fn xoauth2_sends_the_bearer_blob_and_logs_in() {
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 OK me@gmail.com authenticated (Success)"),
+    ];
+    let log = SentLog::default();
+
+    let client = ImapClient::connect_with(
+        ScriptedTransport::new(script, log.clone()),
+        "me@gmail.com",
+        "ya29.token",
+        ImapAuth::XOAuth2,
+    );
+    assert!(client.is_ok(), "xoauth2 login succeeds");
+
+    // base64("user=me@gmail.com\x01auth=Bearer ya29.token\x01\x01") — the
+    // exact bytes Gmail expects, control characters and all.
+    assert_eq!(
+        log.lines(),
+        ["t1 AUTHENTICATE XOAUTH2 dXNlcj1tZUBnbWFpbC5jb20BYXV0aD1CZWFyZXIgeWEyOS50b2tlbgEB"]
+    );
+}
+
+#[test]
+fn a_rejected_token_gets_the_empty_reply_the_server_waits_for() {
+    // Gmail answers a bad token with a `+` continuation carrying a base64
+    // error, and will not send the tagged NO until the client replies. A
+    // client that skips the empty line hangs here forever.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("+ eyJzdGF0dXMiOiI0MDEiLCJzY2hlbWVzIjoiQmVhcmVyIn0="),
+        line("t1 NO Invalid credentials (Failure)"),
+    ];
+    let log = SentLog::default();
+
+    let result = ImapClient::connect_with(
+        ScriptedTransport::new(script, log.clone()),
+        "me@gmail.com",
+        "expired",
+        ImapAuth::XOAuth2,
+    );
+
+    let error = match result {
+        Ok(_) => panic!("an expired token must not authenticate"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("Invalid credentials"), "got: {error}");
+    assert_eq!(log.lines().len(), 2, "the empty continuation reply is owed");
+    assert_eq!(log.lines()[1], "", "and it must be an empty line");
 }

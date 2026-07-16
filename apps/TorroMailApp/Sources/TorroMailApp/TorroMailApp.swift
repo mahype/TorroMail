@@ -4,7 +4,7 @@ import TorroMailKit
 
 /// Localized user-facing string. English keys are the development language;
 /// translations live in `Resources/<lang>.lproj/Localizable.strings`.
-private func L(_ key: String) -> String {
+func L(_ key: String) -> String {
     NSLocalizedString(key, bundle: .module, comment: "")
 }
 
@@ -24,7 +24,7 @@ private func label(for mode: CacheMode) -> String {
     }
 }
 
-private func label(for preset: PermissionPreset) -> String {
+func label(for preset: PermissionPreset) -> String {
     switch preset {
     case .readOnly: L("Read only")
     case .readAndDrafts: L("Read + drafts")
@@ -54,6 +54,15 @@ extension Color {
     static let torroRedDeep = Color(red: 165 / 255, green: 10 / 255, blue: 10 / 255)
     /// silver #C4C3C3 — the wordmark's second half.
     static let torroSilver = Color(red: 196 / 255, green: 195 / 255, blue: 195 / 255)
+}
+
+extension View {
+    /// The stock macOS push button. The brand red is a background and accent
+    /// color — on a control it tints the label instead of the fill, which is
+    /// unreadable, so buttons opt out of the app-wide tint entirely.
+    func torroButton() -> some View {
+        buttonStyle(.bordered).tint(nil)
+    }
 }
 
 /// Frutiger LT 95 Ultra Black is the brand's display cut (torro-design
@@ -460,7 +469,7 @@ private struct TorroMailRootView: View {
             detailView
         }
         .sheet(isPresented: $model.showAccountWizard) {
-            AccountWizardView()
+            AccountSetupWizard()
                 .environmentObject(model)
         }
         // The Dock tile and the menu bar item both need to reopen the window,
@@ -591,9 +600,15 @@ private struct ServiceStatusCard: View {
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
-        DashboardCard(title: L("Status")) {
-            VStack(spacing: 0) {
-                StatusRow(
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L("Status"))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            // Two independent services, so two boxes side by side rather than a
+            // stacked list: each tile is one service and its own state, and the
+            // pair costs a fraction of the height the list did.
+            HStack(alignment: .top, spacing: 10) {
+                StatusTile(
                     color: mcpSupervisor.status.isRunning ? .green : .red,
                     title: mcpSupervisor.status.isRunning
                         ? L("Ready for assistants")
@@ -602,8 +617,7 @@ private struct ServiceStatusCard: View {
                         ? L("TorroMail is running in the background.")
                         : L("Start TorroMail in Settings so assistants can reach your mail.")
                 )
-                Divider().padding(.leading, 22)
-                StatusRow(
+                StatusTile(
                     color: model.connectedClients.isEmpty ? .orange : .green,
                     title: model.connectedClients.isEmpty
                         ? L("No assistant connected")
@@ -613,6 +627,7 @@ private struct ServiceStatusCard: View {
                         : L("Every access is logged.")
                 )
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -621,27 +636,33 @@ private struct ServiceStatusCard: View {
     }
 }
 
-private struct StatusRow: View {
+private struct StatusTile: View {
     var color: Color
     var title: String
     var detail: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        // The dot gets its own column so title and detail share one left edge —
+        // as siblings under the dot, the detail would hang out to its left.
+        HStack(alignment: .top, spacing: 7) {
             Circle()
                 .fill(color)
-                .frame(width: 9, height: 9)
-                .padding(.top, 4)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.headline)
+                .frame(width: 8, height: 8)
+                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .torroCard()
     }
 }
 
@@ -673,7 +694,7 @@ private struct PendingApprovalsCard: View {
                             .foregroundStyle(.secondary)
                         Button(L("Reject"), role: .destructive) {}
                         Button(L("Approve")) {}
-                            .buttonStyle(.borderedProminent)
+                            .torroButton()
                     }
                     .padding(.vertical, 10)
                 }
@@ -789,7 +810,7 @@ private struct GettingStartedCard: View {
                 Button(L("Add Account")) {
                     model.beginAccountWizard()
                 }
-                .buttonStyle(.borderedProminent)
+                .torroButton()
             }
         }
     }
@@ -1103,10 +1124,12 @@ private struct AccountDetailView: View {
                 Spacer()
                 if account.loginMethod == .oauth {
                     Button(L("Sign In…")) {}
+                        .torroButton()
                 }
                 Button(L("Test Connection")) {
                     testConnection()
                 }
+                .torroButton()
                 .disabled(isCheckingConnection)
             }
         }
@@ -1448,6 +1471,7 @@ private struct AccountDetailView: View {
                 LabeledContent(L("Storage")) {
                     Text(account.searchCache.storage)
                     Button(L("Delete")) {}
+                        .torroButton()
                 }
             }
         } header: {
@@ -1475,7 +1499,7 @@ private struct AccountDetailView: View {
                         .foregroundStyle(.secondary)
                     Button(L("Reject"), role: .destructive) {}
                     Button(L("Approve")) {}
-                        .buttonStyle(.borderedProminent)
+                        .torroButton()
                 }
                 .padding(.vertical, 2)
             }
@@ -1491,7 +1515,9 @@ private struct AccountDetailView: View {
 /// The named profiles as a compact chip strip — like a segmented control,
 /// with the one difference a segmented control cannot show: in a custom
 /// state, nothing is selected.
-private struct PresetChips: View {
+/// Shared with the setup wizard: the same control in both places, so the
+/// choice made during setup is the one the user finds again later.
+struct PresetChips: View {
     @Binding var permissions: PermissionSet
 
     var body: some View {
@@ -1565,7 +1591,10 @@ private struct ConnectionStatusBadge: View {
 private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
-    @State private var clientSetupNote: String?
+    @State private var installedClients: [MCPClient] = []
+    @State private var configuredClientIDs: Set<String> = []
+    @State private var clientSetupNotes: [String: String] = [:]
+    @State private var snippetNote: String?
 
     var body: some View {
         Form {
@@ -1595,10 +1624,12 @@ private struct SettingsView: View {
                         Button(L("Stop")) {
                             mcpSupervisor.stop()
                         }
+                        .torroButton()
                     } else {
                         Button(L("Start")) {
                             mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                         }
+                        .torroButton()
                     }
                 }
                 if let errorDetail {
@@ -1609,57 +1640,96 @@ private struct SettingsView: View {
             }
 
             Section {
-                Button(L("Add to Claude Desktop")) {
-                    addToClaudeDesktop()
+                if installedClients.isEmpty {
+                    Text(L("No supported assistant found on this Mac."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Button(L("Copy Config Snippet")) {
-                    copyConfigSnippet()
+                ForEach(installedClients) { client in
+                    HStack {
+                        Text(client.displayName)
+                        Spacer()
+                        if configuredClientIDs.contains(client.id) {
+                            Label(L("Connected"), systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .labelStyle(.titleAndIcon)
+                        } else {
+                            Button(L("Connect")) {
+                                connect(client)
+                            }
+                            .torroButton()
+                        }
+                    }
+                    if let note = clientSetupNotes[client.id] {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                if let clientSetupNote {
-                    Text(clientSetupNote)
+                HStack {
+                    Button(L("Copy Config Snippet")) {
+                        copyConfigSnippet()
+                    }
+                    .torroButton()
+                    Spacer()
+                }
+                if let snippetNote {
+                    Text(snippetNote)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             } header: {
                 Text(L("AI Clients"))
             } footer: {
-                Text(L("Connect an assistant so it can use your mail through TorroMail."))
+                Text(L("Connect an assistant so it can use your mail through TorroMail. Restart the assistant afterwards."))
             }
         }
         .formStyle(.grouped)
         .navigationTitle(L("Settings"))
+        .onAppear { refreshClients() }
     }
 
-    /// Writes the server into Claude Desktop's configuration — the one-click
-    /// path. The note below the buttons reports what actually happened.
-    private func addToClaudeDesktop() {
+    private func refreshClients() {
+        installedClients = MCPClientRegistry.installed()
+        configuredClientIDs = Set(
+            installedClients.filter { MCPClientSetup.isConfigured($0) }.map(\.id)
+        )
+        model.connectedClients = installedClients
+            .filter { configuredClientIDs.contains($0.id) }
+            .map(\.displayName)
+    }
+
+    /// Writes the server into one client's configuration — the one-click
+    /// path. The note below the row reports what actually happened.
+    private func connect(_ client: MCPClient) {
         guard let commandPath = MCPClientSetup.serverCommandPath(
             executableName: model.generalSettings.mcpExecutable
         ) else {
-            clientSetupNote = L("The MCP server binary was not found.")
+            clientSetupNotes[client.id] = L("The MCP server binary was not found.")
             return
         }
         do {
-            try MCPClientSetup.addToClaudeDesktop(commandPath: commandPath)
-            clientSetupNote = L("Added. Restart Claude Desktop to connect.")
+            try MCPClientSetup.add(to: client, commandPath: commandPath)
+            clientSetupNotes[client.id] = L("Added. Restart the assistant to connect.")
         } catch let failure as MCPClientSetup.Failure {
-            clientSetupNote = L(failure.reason)
+            clientSetupNotes[client.id] = L(failure.reason)
         } catch {
-            clientSetupNote = L("Could not update Claude Desktop's configuration.")
+            clientSetupNotes[client.id] = L("Could not update the configuration.")
         }
+        refreshClients()
     }
 
     private func copyConfigSnippet() {
         guard let commandPath = MCPClientSetup.serverCommandPath(
             executableName: model.generalSettings.mcpExecutable
         ) else {
-            clientSetupNote = L("The MCP server binary was not found.")
+            snippetNote = L("The MCP server binary was not found.")
             return
         }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(MCPClientSetup.configSnippet(commandPath: commandPath), forType: .string)
-        clientSetupNote = L("Copied to the clipboard.")
+        snippetNote = L("Copied to the clipboard.")
     }
 
     private var statusColor: Color {
@@ -1710,56 +1780,5 @@ private struct LogView: View {
                 Label(L("Export…"), systemImage: "square.and.arrow.up")
             }
         }
-    }
-}
-
-private struct AccountWizardView: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var model: TorroMailModel
-    @State private var name = ""
-    @State private var email = ""
-    @State private var provider = Provider.imapSmtp
-    @State private var loginMethod = LoginMethod.password
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section(L("New Account")) {
-                    TextField(L("Sender Name"), text: $name, prompt: Text(verbatim: "Sven Wagener"))
-                    TextField(L("Email"), text: $email, prompt: Text(verbatim: "name@example.com"))
-                    Picker(L("Provider"), selection: $provider) {
-                        ForEach(Provider.allCases) { provider in
-                            Text(provider.rawValue).tag(provider)
-                        }
-                    }
-                    Picker(L("Login"), selection: $loginMethod) {
-                        ForEach(LoginMethod.allCases) { method in
-                            Text(label(for: method)).tag(method)
-                        }
-                    }
-                }
-            }
-            .formStyle(.grouped)
-
-            HStack {
-                Spacer()
-                Button(L("Cancel"), role: .cancel) {
-                    dismiss()
-                }
-                Button(L("Add")) {
-                    model.addAccount(
-                        name: name,
-                        email: email,
-                        provider: provider,
-                        loginMethod: loginMethod
-                    )
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(name.isEmpty || email.isEmpty)
-            }
-            .padding()
-        }
-        .frame(width: 480, height: 340)
     }
 }

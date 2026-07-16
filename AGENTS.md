@@ -88,19 +88,27 @@ actions, and inspect read-only admin state.
 
 ## Current MCP Tool Surface
 
+The catalog is the full planned surface; tools not yet implemented are in the
+catalog on purpose and answer `-32000 tool not implemented yet` rather than
+vanishing. Keep this list honest — a tool that looks available but is not is
+worse than one that says so.
+
 Read/search tools:
 
 - `mail_search`
-- `mail_refine_search`
 - `mail_get_message`
-- `mail_get_thread`
 - `mail_list_mailboxes`
+- `mail_refine_search` — **not implemented**. Needs result sets that outlive a
+  tool call; `SearchSessionStore` is built per call today.
+- `mail_get_thread` — **not implemented**. Plain IMAP has no thread identity,
+  so the provider reports each message as its own thread.
 
 Direct write tools (no approval, gated by the mark permission):
 
 - `mail_mark`
 
-Prepared action tools:
+Prepared action tools — **none implemented**. They need a `PendingActionStore`
+that survives a tool call, the GUI confirmation loop, and SMTP:
 
 - `mail_create_draft`
 - `mail_prepare_send`
@@ -108,11 +116,18 @@ Prepared action tools:
 - `mail_prepare_delete`
 - `mail_confirm_action`
 
-Read-only admin tools:
+Read-only admin tools. These answer from the policy document alone and are
+dispatched before any account lookup or connection — `mail_list_accounts` is
+where an `account_id` is learned, so requiring one would lock every client out:
 
 - `mail_list_accounts`
 - `mail_get_policy`
 - `mail_get_cache_status`
+
+Reading mail has no browsing tool by design. "What came in lately?" is
+`mail_search` with an empty query: no filter, newest first, INBOX unless a
+mailbox is named. Ordering follows IMAP UIDs — arrival at the server — not the
+`Date` header, which is the sender's claim.
 
 ## Verification
 

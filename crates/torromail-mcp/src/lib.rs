@@ -10,13 +10,14 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use torromail_core::{
-    AccountId, CoreResult, FixtureMailProvider, ImapProviderConfig, MailAccessService,
-    MailProvider, MarkChange, PermissionSet, Policy, PolicyEngine, SearchHit, SearchSessionStore,
-    StoredMessage,
+    AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
+    ImapProviderConfig, MailAccessService, MailProvider, MarkChange, PermissionSet, Policy,
+    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, StoredMessage,
 };
 use torromail_imap_tls::TlsImapMailProvider;
+use torromail_oauth::TokenSet;
 
-use crate::policy_document::parse_policy_document;
+use crate::policy_document::{DocumentAccount, OAuthFacts, parse_policy_document};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
@@ -104,7 +105,7 @@ impl ToolDescriptor {
     fn input_schema_json(&self) -> &'static str {
         match self.name {
             ToolName::MailSearch => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"query":{"type":"string"},"mailbox":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"query":{"type":"string","description":"Full-text query. Leave empty for the newest messages, no filter."},"mailbox":{"type":"string","description":"Defaults to every readable mailbox; an empty query defaults to INBOX."},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["account_id"]}"#
             }
             ToolName::MailRefineSearch => {
                 r#"{"type":"object","properties":{"result_set_id":{"type":"string"},"refinement":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["result_set_id","refinement"]}"#
@@ -196,6 +197,11 @@ pub struct LineMcpServer {
     /// product default (read + drafts) for any account — the fixture mode
     /// tests use.
     policy_path: Option<PathBuf>,
+    /// Whether an account the document describes but never finished
+    /// configuring may fall back to fixture mailboxes. Only ever true for
+    /// tests: in the product that fallback would hand an assistant demo
+    /// messages and call them the user's mail.
+    fixtures_for_unconfigured_accounts: bool,
 }
 
 impl LineMcpServer {
@@ -211,6 +217,18 @@ impl LineMcpServer {
         Self {
             catalog: ToolCatalog::default(),
             policy_path: Some(path.into()),
+            fixtures_for_unconfigured_accounts: false,
+        }
+    }
+
+    /// Test-only: a policy document *and* fixture mailboxes, so the permission
+    /// plumbing can be exercised without an IMAP server. The product must
+    /// never take this door — an account with no connection facts has no mail,
+    /// and the honest answer is an error.
+    pub fn with_policy_path_and_fixtures(path: impl Into<PathBuf>) -> Self {
+        Self {
+            fixtures_for_unconfigured_accounts: true,
+            ..Self::with_policy_path(path)
         }
     }
 
@@ -249,7 +267,23 @@ impl LineMcpServer {
         }
 
         let arguments = &request["params"]["arguments"];
+
+        // The admin reads answer from the policy document alone. They run
+        // before any account lookup on purpose: naming an account is what
+        // `mail_list_accounts` is for, so requiring one here would leave a
+        // fresh client with no way in.
+        if name == ToolName::MailListAccounts.as_str() {
+            return self.handle_mail_list_accounts(id);
+        }
+        if name == ToolName::MailGetCacheStatus.as_str() {
+            return self.handle_mail_get_cache_status(arguments, id);
+        }
+
         let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
+        if name == ToolName::MailGetPolicy.as_str() {
+            return self.handle_mail_get_policy(&account_id, id);
+        }
+
         let (engine, imap) = match self.runtime_for(&account_id) {
             Ok(runtime) => runtime,
             Err(message) => return json_rpc_error(id, -32000, &message),
@@ -275,6 +309,22 @@ impl LineMcpServer {
         json_rpc_error(id, -32000, "tool not implemented yet")
     }
 
+    /// The accounts the document describes, reloaded per call. `None` means
+    /// there is no document at all — fixture mode, or an app that has not
+    /// published yet. An empty list is a different answer entirely: a
+    /// document that names no accounts grants nothing.
+    fn document_accounts(&self) -> Result<Option<Vec<DocumentAccount>>, String> {
+        let Some(path) = &self.policy_path else {
+            return Ok(None);
+        };
+
+        match std::fs::read_to_string(path) {
+            Ok(text) => parse_policy_document(&text).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("policy document unreadable: {error}")),
+        }
+    }
+
     /// The policy engine and connection facts for this call. With a policy
     /// path the document decides — reloaded every time, failing closed when
     /// unreadable, refusing accounts it does not contain. Without one, the
@@ -282,48 +332,254 @@ impl LineMcpServer {
     fn runtime_for(
         &self,
         account_id: &AccountId,
-    ) -> Result<(PolicyEngine, Option<ImapProviderConfig>), String> {
-        let Some(path) = &self.policy_path else {
-            return Ok((default_engine(account_id), None));
+    ) -> Result<(PolicyEngine, ConnectionFacts), String> {
+        let Some(accounts) = self.document_accounts()? else {
+            return Ok((default_engine(account_id), ConnectionFacts::FixtureMode));
         };
 
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let accounts = parse_policy_document(&text)?;
-                let imap = accounts
-                    .iter()
-                    .find(|account| {
-                        account
-                            .imap
-                            .as_ref()
-                            .is_some_and(|config| &config.account_id == account_id)
-                    })
-                    .and_then(|account| account.imap.clone());
-                let engine = PolicyEngine::new(accounts.into_iter().map(|account| account.policy));
-                Ok((engine, imap))
+        // An account the document does not name is refused here, before any
+        // connection is opened. The engine would refuse it too, but only after
+        // `connect_provider` had already run a TLS handshake and a LOGIN for a
+        // mailbox this call was never allowed to touch.
+        let Some(account) = accounts
+            .iter()
+            .find(|account| account.policy.account_id() == account_id)
+        else {
+            return Err(CoreError::AccountNotFound(account_id.clone()).to_string());
+        };
+
+        // A document exists, so an account without connection facts is an
+        // unfinished account — never a reason to reach for the fixtures.
+        let facts = match &account.imap {
+            Some(config) => {
+                ConnectionFacts::Configured(Box::new(config.clone()), account.oauth.clone())
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok((default_engine(account_id), None))
-            }
-            Err(error) => Err(format!("policy document unreadable: {error}")),
+            None if self.fixtures_for_unconfigured_accounts => ConnectionFacts::FixtureMode,
+            None => ConnectionFacts::Unconfigured,
+        };
+        let engine = PolicyEngine::new(accounts.into_iter().map(|account| account.policy));
+        Ok((engine, facts))
+    }
+
+    /// The way in: every other tool needs an `account_id`, and this is the
+    /// only place one can be learned.
+    fn handle_mail_list_accounts(&self, id: &Value) -> String {
+        let accounts = match self.document_accounts() {
+            Ok(accounts) => accounts.unwrap_or_default(),
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+
+        let accounts = accounts
+            .iter()
+            .map(|account| {
+                json!({
+                    "account_id": account.policy.account_id().as_str(),
+                    "name": account.name,
+                    "email": account.email,
+                    "connected": account.imap.is_some(),
+                    "permissions": permissions_json(account.policy.permissions())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        json_rpc_text_result(id, &json!({ "accounts": accounts }))
+    }
+
+    fn handle_mail_get_policy(&self, account_id: &AccountId, id: &Value) -> String {
+        let accounts = match self.document_accounts() {
+            Ok(accounts) => accounts.unwrap_or_default(),
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        let Some(account) = accounts
+            .iter()
+            .find(|account| account.policy.account_id() == account_id)
+        else {
+            return json_rpc_error(
+                id,
+                -32000,
+                &CoreError::AccountNotFound(account_id.clone()).to_string(),
+            );
+        };
+
+        // Both halves, because they answer different questions: the switches
+        // as the user set them, and what those switches actually permit.
+        json_rpc_text_result(
+            id,
+            &json!({
+                "account_id": account_id.as_str(),
+                "permissions": permissions_json(account.policy.permissions()),
+                "capabilities": capabilities_json(&account.policy)
+            }),
+        )
+    }
+
+    /// Cache facts for one account, or all of them when none is named —
+    /// "what is TorroMail keeping on disk?" is a fair question to ask whole.
+    fn handle_mail_get_cache_status(&self, arguments: &Value, id: &Value) -> String {
+        let accounts = match self.document_accounts() {
+            Ok(accounts) => accounts.unwrap_or_default(),
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        let wanted = arguments["account_id"].as_str();
+
+        let reports = accounts
+            .iter()
+            .filter(|account| wanted.is_none_or(|id| account.policy.account_id().as_str() == id))
+            .map(|account| {
+                json!({
+                    "account_id": account.policy.account_id().as_str(),
+                    "local_cache_enabled": account.cache.local_cache_enabled,
+                    "mode": account.cache.mode,
+                    "index_bodies": account.cache.index_bodies,
+                    "index_attachments": account.cache.index_attachments,
+                    "storage": account.cache.storage
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(wanted) = wanted
+            && reports.is_empty()
+        {
+            return json_rpc_error(
+                id,
+                -32000,
+                &CoreError::AccountNotFound(AccountId::new(wanted)).to_string(),
+            );
         }
+
+        json_rpc_text_result(id, &json!({ "accounts": reports }))
     }
 }
 
+fn permissions_json(permissions: &PermissionSet) -> Value {
+    let write = permissions.write.sanitized();
+    json!({
+        "read": read_access_name(permissions.read),
+        "write": {
+            "drafts": write.drafts,
+            "mark": write.mark,
+            "move": write.move_messages,
+            "trash": write.trash,
+            "permanent_delete": write.permanent_delete
+        },
+        "send": permissions.send,
+        "per_folder": permissions.per_folder,
+        "folder_rules": permissions
+            .folder_rules
+            .iter()
+            .map(|(mailbox, rule)| {
+                (mailbox.clone(), json!({"read": rule.read, "write": rule.write}))
+            })
+            .collect::<serde_json::Map<_, _>>()
+    })
+}
+
+/// The account-wide verdicts, named the way tools ask for them. Folder rules
+/// can still say no to any of these in a given mailbox.
+fn capabilities_json(policy: &Policy) -> Value {
+    let capabilities = [
+        (Capability::Search, "search"),
+        (Capability::ReadHeaders, "read_headers"),
+        (Capability::ReadBody, "read_body"),
+        (Capability::DownloadAttachments, "download_attachments"),
+        (Capability::Draft, "draft"),
+        (Capability::Send, "send"),
+        (Capability::Mark, "mark"),
+        (Capability::Move, "move"),
+        (Capability::DeleteSoft, "delete_soft"),
+        (Capability::DeletePermanent, "delete_permanent"),
+    ];
+
+    capabilities
+        .into_iter()
+        .filter(|(capability, _)| policy.allows(*capability))
+        .map(|(_, name)| Value::from(name))
+        .collect()
+}
+
+fn read_access_name(read: ReadAccess) -> &'static str {
+    match read {
+        ReadAccess::None => "none",
+        ReadAccess::Headers => "headers",
+        ReadAccess::FullMessage => "full_message",
+        ReadAccess::WithAttachments => "with_attachments",
+    }
+}
+
+/// Where one account's mail comes from on this call.
+///
+/// The distinction between `FixtureMode` and `Unconfigured` is the whole point:
+/// both used to arrive as a bare `None` and both got fixture data, which meant
+/// an account whose setup was never finished served demo messages to the
+/// assistant as if they were the user's mail.
+enum ConnectionFacts {
+    /// No policy document at all — nothing has been published, so the fixture
+    /// mailbox is the product default rather than a stand-in for real mail.
+    FixtureMode,
+    /// The document describes this account's connection. `oauth` rides along
+    /// for `xoauth2` accounts — the token in the keychain may need renewing
+    /// before it can be used.
+    Configured(Box<ImapProviderConfig>, Option<OAuthFacts>),
+    /// The document knows the account but carries no connection facts for it.
+    /// Setup is unfinished; there is no mail to serve and saying so is the
+    /// only honest answer.
+    Unconfigured,
+}
+
 /// Connects a real mailbox when the document has connection facts for the
-/// account; fixture data otherwise. Every call is a fresh session — no
-/// pooling yet.
+/// account. Every call is a fresh session — no pooling yet.
 fn connect_provider(
     account_id: &AccountId,
-    imap: Option<ImapProviderConfig>,
+    facts: ConnectionFacts,
 ) -> CoreResult<RuntimeProvider> {
-    match imap {
-        Some(config) => {
-            let secret = keychain::resolve_secret(&config.secret_ref)?;
+    match facts {
+        ConnectionFacts::Configured(config, oauth) => {
+            let secret = resolve_credential(&config, oauth.as_ref())?;
             let provider = torromail_imap_tls::connect_account(&config, &secret)?;
             Ok(RuntimeProvider::Imap(Box::new(provider)))
         }
-        None => Ok(RuntimeProvider::Fixture(fixture_provider(account_id))),
+        ConnectionFacts::FixtureMode => Ok(RuntimeProvider::Fixture(fixture_provider(account_id))),
+        ConnectionFacts::Unconfigured => Err(CoreError::ProviderFailure(format!(
+            "account {account_id} has no connection configured — finish setting it up in TorroMail"
+        ))),
+    }
+}
+
+/// The secret to hand the IMAP session: a password as stored, or a bearer
+/// token that is good for right now.
+///
+/// The renewal has to happen here rather than in the app. MCP clients spawn
+/// this binary themselves, so it must cope with a token that went stale while
+/// TorroMail was closed — an hour is the whole life of a Google access token.
+fn resolve_credential(
+    config: &ImapProviderConfig,
+    oauth: Option<&OAuthFacts>,
+) -> CoreResult<String> {
+    let stored = keychain::resolve_secret(&config.secret_ref)?;
+
+    match config.auth {
+        ImapAuth::Password => Ok(stored),
+        ImapAuth::XOAuth2 => {
+            let facts = oauth.ok_or_else(|| {
+                CoreError::ProviderFailure(
+                    "an xoauth2 account needs a token endpoint and client id".to_owned(),
+                )
+            })?;
+            let tokens = TokenSet::from_json(&stored)
+                .map_err(|error| CoreError::ProviderFailure(error.to_string()))?;
+
+            if tokens.is_usable_at(torromail_oauth::now_unix()) {
+                return Ok(tokens.access_token);
+            }
+
+            let fresh = torromail_oauth::refresh(&facts.token_endpoint, &facts.client_id, &tokens)
+                .map_err(|error| CoreError::ProviderFailure(error.to_string()))?;
+            // Store before use: a token this process fetched but never wrote
+            // back would be fetched again by the next one, and a rotated
+            // refresh token would be lost outright.
+            keychain::store_secret(&config.secret_ref, &fresh.to_json())?;
+            Ok(fresh.access_token)
+        }
     }
 }
 
@@ -382,17 +638,24 @@ pub fn check_account(account_id: &str, policy_path: Option<PathBuf>) -> Result<S
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("policy document unreadable: {error}"))?;
     let accounts = parse_policy_document(&text)?;
-    let config = accounts
+    let account = accounts
         .iter()
-        .find_map(|account| {
+        .find(|account| {
             account
                 .imap
                 .as_ref()
-                .filter(|config| config.account_id.as_str() == account_id)
+                .is_some_and(|config| config.account_id.as_str() == account_id)
         })
         .ok_or(format!("no IMAP configuration for account {account_id}"))?;
+    let config = account
+        .imap
+        .as_ref()
+        .ok_or(format!("no IMAP configuration for account {account_id}"))?;
 
-    let secret = keychain::resolve_secret(&config.secret_ref).map_err(|error| error.to_string())?;
+    // The same credential path the tools take, token renewal included — so a
+    // green dot in the app means an assistant would get in too.
+    let secret =
+        resolve_credential(config, account.oauth.as_ref()).map_err(|error| error.to_string())?;
     let provider =
         torromail_imap_tls::connect_account(config, &secret).map_err(|error| error.to_string())?;
     let mailboxes = provider
@@ -431,7 +694,8 @@ fn handle_mail_search(
                     json!({
                         "message_id": hit.message_id(),
                         "mailbox": hit.mailbox(),
-                        "subject": hit.subject()
+                        "subject": hit.subject(),
+                        "date": hit.date()
                     })
                 })
                 .collect::<Vec<_>>();
@@ -469,6 +733,7 @@ fn handle_mail_get_message(
                 "thread_id": message.thread_id(),
                 "subject": message.subject(),
                 "sender": message.sender(),
+                "date": message.date(),
                 "snippet": message.snippet(),
                 "body": message.body(),
                 "seen": message.seen(),
@@ -588,7 +853,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
     vec![
         read(
             ToolName::MailSearch,
-            "Search configured mail accounts and return a reusable result set.",
+            "Search one mail account and return a reusable result set, newest first. An empty query returns the latest messages instead of filtering.",
         ),
         read(
             ToolName::MailRefineSearch,
@@ -634,7 +899,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
         },
         admin_read(
             ToolName::MailListAccounts,
-            "List accounts already configured in the GUI.",
+            "List accounts already configured in the GUI. Start here: every other tool needs an account_id from this list.",
         ),
         admin_read(
             ToolName::MailGetPolicy,

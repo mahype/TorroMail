@@ -3,6 +3,7 @@ members = [
     "crates/torromail-core",
     "crates/torromail-imap-tls",
     "crates/torromail-mcp",
+    "crates/torromail-oauth",
 ]
 resolver = "3"
 

@@ -37,6 +37,20 @@ impl fmt::Debug for SecretRef {
     }
 }
 
+/// How the session proves who it is. Only the mechanism lives here — where a
+/// token comes from and how it is renewed is somebody else's problem, which
+/// is what keeps this crate free of a network stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImapAuth {
+    /// `LOGIN user secret` — a password or an app password.
+    #[default]
+    Password,
+    /// `AUTHENTICATE XOAUTH2` — the secret is a bearer access token. What
+    /// Gmail and Microsoft 365 require; both have retired plain passwords for
+    /// everything but Google's personal app passwords.
+    XOAuth2,
+}
+
 /// Everything the IMAP adapter needs to connect, minus the secret it
 /// resolves at connect time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +60,7 @@ pub struct ImapProviderConfig {
     pub port: u16,
     pub username: String,
     pub secret_ref: SecretRef,
+    pub auth: ImapAuth,
 }
 
 impl ImapProviderConfig {
@@ -62,7 +77,14 @@ impl ImapProviderConfig {
             port,
             username: username.into(),
             secret_ref,
+            auth: ImapAuth::Password,
         }
+    }
+
+    #[must_use]
+    pub fn with_auth(mut self, auth: ImapAuth) -> Self {
+        self.auth = auth;
+        self
     }
 }
 
@@ -84,6 +106,7 @@ pub struct FetchedMessage {
     pub uid: u32,
     pub subject: String,
     pub sender: String,
+    pub date: String,
     pub body: String,
     pub seen: bool,
     pub flagged: bool,
@@ -106,8 +129,19 @@ pub struct ImapClient<T: ImapTransport> {
 }
 
 impl<T: ImapTransport> ImapClient<T> {
-    /// Reads the greeting and logs in.
+    /// Reads the greeting and logs in with a password.
     pub fn connect(transport: T, username: &str, secret: &str) -> CoreResult<Self> {
+        Self::connect_with(transport, username, secret, ImapAuth::Password)
+    }
+
+    /// Reads the greeting and authenticates the way `auth` says. For
+    /// `XOAuth2` the secret is an access token, not a password.
+    pub fn connect_with(
+        transport: T,
+        username: &str,
+        secret: &str,
+        auth: ImapAuth,
+    ) -> CoreResult<Self> {
         let mut client = Self {
             transport,
             next_tag: 0,
@@ -119,12 +153,58 @@ impl<T: ImapTransport> ImapClient<T> {
                 "unexpected IMAP greeting: {greeting}"
             )));
         }
-        client.command(&format!(
-            "LOGIN {} {}",
-            imap_quoted(username),
-            imap_quoted(secret)
-        ))?;
+
+        match auth {
+            ImapAuth::Password => {
+                client.command(&format!(
+                    "LOGIN {} {}",
+                    imap_quoted(username),
+                    imap_quoted(secret)
+                ))?;
+            }
+            ImapAuth::XOAuth2 => client.authenticate_xoauth2(username, secret)?,
+        }
         Ok(client)
+    }
+
+    /// SASL XOAUTH2: one base64 blob carrying the user and a bearer token.
+    ///
+    /// The failure path is the awkward part. A rejected token does not get a
+    /// tagged NO straight away — the server sends a `+` continuation holding
+    /// a base64 error, and the client owes it an empty line before the real
+    /// verdict arrives. Skipping that reply leaves the session wedged
+    /// mid-handshake.
+    fn authenticate_xoauth2(&mut self, username: &str, access_token: &str) -> CoreResult<()> {
+        let initial = encode_base64(
+            format!("user={username}\x01auth=Bearer {access_token}\x01\x01").as_bytes(),
+        );
+        self.next_tag += 1;
+        let tag = format!("t{}", self.next_tag);
+        self.transport
+            .send_line(&format!("{tag} AUTHENTICATE XOAUTH2 {initial}"))?;
+
+        loop {
+            let line = self.transport.read_line()?;
+
+            if let Some(rest) = line.strip_prefix(&format!("{tag} ")) {
+                if rest.starts_with("OK") {
+                    return Ok(());
+                }
+                return Err(CoreError::ProviderFailure(format!(
+                    "IMAP rejected the access token: {rest}"
+                )));
+            }
+
+            if line.starts_with('+') {
+                // The rejection detail, and a server waiting on us. `command`
+                // cannot be used for this exchange precisely because it would
+                // sit here waiting for a tagged line that only arrives after
+                // this empty reply.
+                self.transport.send_line("")?;
+                continue;
+            }
+            // Untagged chatter (`* CAPABILITY …`) — not our business.
+        }
     }
 
     pub fn list_mailboxes(&mut self) -> CoreResult<Vec<String>> {
@@ -135,9 +215,18 @@ impl<T: ImapTransport> ImapClient<T> {
             .collect())
     }
 
+    /// UIDs matching `query`, ascending — oldest first, as IMAP hands them
+    /// over. A blank query asks for the whole mailbox: `TEXT ""` would tell
+    /// the server to match every message against nothing, which servers
+    /// answer inconsistently, so the criterion becomes `ALL`.
     pub fn uid_search(&mut self, mailbox: &str, query: &str) -> CoreResult<Vec<u32>> {
         self.select(mailbox)?;
-        let lines = self.command(&format!("UID SEARCH TEXT {}", imap_quoted(query)))?;
+        let criteria = if query.trim().is_empty() {
+            "ALL".to_owned()
+        } else {
+            format!("TEXT {}", imap_quoted(query))
+        };
+        let lines = self.command(&format!("UID SEARCH {criteria}"))?;
         let mut uids = Vec::new();
         for line in &lines {
             if let Some(rest) = line.text.strip_prefix("* SEARCH") {
@@ -154,7 +243,7 @@ impl<T: ImapTransport> ImapClient<T> {
     pub fn uid_fetch(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedMessage> {
         self.select(mailbox)?;
         let lines = self.command(&format!(
-            "UID FETCH {uid} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)] BODY.PEEK[TEXT])"
+            "UID FETCH {uid} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)] BODY.PEEK[TEXT])"
         ))?;
         let fetch = lines
             .iter()
@@ -180,6 +269,7 @@ impl<T: ImapTransport> ImapClient<T> {
             uid,
             subject: header_field(&headers, "subject").unwrap_or_default(),
             sender: header_field(&headers, "from").unwrap_or_default(),
+            date: header_field(&headers, "date").unwrap_or_default(),
             body,
             seen: fetch.text.contains("\\Seen"),
             flagged: fetch.text.contains("\\Flagged"),
@@ -279,8 +369,12 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     ) -> CoreResult<Vec<SearchHit>> {
         self.guard(account_id)?;
         let mut client = self.client.borrow_mut();
+        // An unfiltered search means "the latest mail", and the latest mail
+        // means the inbox: UIDs only rank messages within one mailbox, so
+        // folding several together would order them by nothing at all.
         let mailboxes = match mailbox {
             Some(name) => vec![name.to_owned()],
+            None if query.trim().is_empty() => vec!["INBOX".to_owned()],
             None => client.list_mailboxes()?,
         };
 
@@ -289,18 +383,25 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
             if hits.len() >= limit {
                 break;
             }
-            for uid in client.uid_search(&mailbox, query)? {
+            // Newest first: UIDs ascend with arrival, and a limit has to cut
+            // off the oldest messages, not the ones the caller asked about.
+            let mut uids = client.uid_search(&mailbox, query)?;
+            uids.reverse();
+            for uid in uids {
                 if hits.len() >= limit {
                     break;
                 }
                 let message = client.uid_fetch(&mailbox, uid)?;
-                hits.push(SearchHit::new(
-                    format!("{mailbox}/{uid}"),
-                    mailbox.clone(),
-                    message.subject,
-                    message.sender,
-                    snippet(&message.body),
-                ));
+                hits.push(
+                    SearchHit::new(
+                        format!("{mailbox}/{uid}"),
+                        mailbox.clone(),
+                        message.subject,
+                        message.sender,
+                        snippet(&message.body),
+                    )
+                    .with_date(message.date),
+                );
             }
         }
         Ok(hits)
@@ -323,7 +424,8 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
             fetched.sender,
             preview,
             fetched.body,
-        );
+        )
+        .with_date(fetched.date);
         message.seen = fetched.seen;
         message.flagged = fetched.flagged;
         Ok(message)
@@ -463,18 +565,221 @@ fn unquoted(value: &str) -> String {
     result
 }
 
-/// First value of a header field in a HEADER.FIELDS block, case-insensitive.
+/// First value of a header field in a HEADER.FIELDS block, case-insensitive,
+/// unfolded and decoded.
+///
+/// Long headers are split across lines with their continuations indented
+/// (RFC 5322 §2.2.3), so a subject read one line at a time silently loses
+/// its tail.
 fn header_field(headers: &str, name: &str) -> Option<String> {
-    headers.lines().find_map(|line| {
-        let (field, value) = line.split_once(':')?;
-        if field.trim().eq_ignore_ascii_case(name) {
-            Some(value.trim().to_owned())
-        } else {
-            None
+    let mut lines = headers.lines();
+    while let Some(line) = lines.next() {
+        // Only a line starting at the margin names a field; an indented one
+        // belongs to the field above.
+        if line.starts_with([' ', '\t']) {
+            continue;
         }
-    })
+        let Some((field, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !field.trim().eq_ignore_ascii_case(name) {
+            continue;
+        }
+
+        let mut value = value.trim().to_owned();
+        for continuation in lines.by_ref() {
+            if !continuation.starts_with([' ', '\t']) {
+                break;
+            }
+            value.push(' ');
+            value.push_str(continuation.trim());
+        }
+        return Some(decode_encoded_words(&value));
+    }
+    None
+}
+
+/// RFC 2047 encoded-words to text.
+///
+/// Headers are ASCII on the wire, so anything else travels as
+/// `=?charset?B?…?=` (base64) or `=?charset?Q?…?=` (quoted-printable). An
+/// assistant handed the raw form sees noise where the subject should be.
+/// Text that is not an encoded-word passes through untouched, and so does
+/// one whose charset we cannot honour — a visibly encoded subject beats a
+/// silently mangled one.
+fn decode_encoded_words(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut previous_was_encoded = false;
+
+    while let Some(start) = rest.find("=?") {
+        let (before, candidate) = rest.split_at(start);
+
+        let Some((decoded, remainder)) = decode_one_encoded_word(candidate) else {
+            // Not an encoded-word after all: it is literal text.
+            result.push_str(before);
+            result.push_str("=?");
+            rest = &candidate["=?".len()..];
+            previous_was_encoded = false;
+            continue;
+        };
+
+        // Whitespace between two encoded-words separates them, it is not
+        // content (RFC 2047 §6.2) — that is how one long subject folded
+        // into several words joins back up without gaps.
+        let is_separator = previous_was_encoded && !before.is_empty() && before.trim().is_empty();
+        if !is_separator {
+            result.push_str(before);
+        }
+        result.push_str(&decoded);
+        rest = remainder;
+        previous_was_encoded = true;
+    }
+
+    result.push_str(rest);
+    result
+}
+
+/// One `=?charset?encoding?payload?=` at the start of `text`, plus whatever
+/// follows it. `None` when this is not an encoded-word we can decode.
+fn decode_one_encoded_word(text: &str) -> Option<(String, &str)> {
+    let body = text.strip_prefix("=?")?;
+    let (charset, rest) = body.split_once('?')?;
+    let (encoding, rest) = rest.split_once('?')?;
+
+    // The payload runs to the first `?`, which it cannot contain itself.
+    // Scanning for the `?=` terminator directly would trip over a Q payload
+    // that opens with an escape — `?Q?=F0=9F…` — and cut the word in half.
+    let end = rest.find('?')?;
+    let (payload, remainder) = rest.split_at(end);
+    let remainder = remainder.strip_prefix("?=")?;
+
+    let bytes = match encoding {
+        "B" | "b" => decode_base64(payload)?,
+        "Q" | "q" => decode_q_encoding(payload)?,
+        _ => return None,
+    };
+    Some((decode_charset(charset, &bytes)?, remainder))
+}
+
+/// The charsets we can turn into text without a lookup table. UTF-8 covers
+/// almost all mail; Latin-1 maps one byte to one code point exactly. Others
+/// return `None` rather than a guess.
+fn decode_charset(charset: &str, bytes: &[u8]) -> Option<String> {
+    if charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("us-ascii") {
+        return Some(String::from_utf8_lossy(bytes).into_owned());
+    }
+    if charset.eq_ignore_ascii_case("iso-8859-1") {
+        return Some(bytes.iter().map(|&byte| char::from(byte)).collect());
+    }
+    None
+}
+
+/// Standard base64, padded. Hand-rolled for the same reason the decoder below
+/// is: torromail-core carries no dependencies, and this is twenty lines.
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let packed = (u32::from(buffer[0]) << 16) | (u32::from(buffer[1]) << 8) | u32::from(buffer[2]);
+
+        for index in 0..4 {
+            // Each input byte carries into two output characters, so a
+            // 1-byte tail fills 2 characters and a 2-byte tail fills 3; the
+            // rest is padding.
+            if index <= chunk.len() {
+                let shift = 18 - index * 6;
+                let value = ((packed >> shift) & 0x3F) as usize;
+                encoded.push(char::from(ALPHABET[value]));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+
+    for character in text.chars() {
+        if character == '=' {
+            break;
+        }
+        let value = base64_value(character)?;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+    }
+    Some(bytes)
+}
+
+fn base64_value(character: char) -> Option<u8> {
+    match character {
+        'A'..='Z' => Some(character as u8 - b'A'),
+        'a'..='z' => Some(character as u8 - b'a' + 26),
+        '0'..='9' => Some(character as u8 - b'0' + 52),
+        '+' => Some(62),
+        '/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Quoted-printable as encoded-words use it: `=XX` hex escapes, plus the one
+/// shorthand where `_` stands for a space.
+fn decode_q_encoding(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut characters = text.chars();
+
+    while let Some(character) = characters.next() {
+        match character {
+            '_' => bytes.push(b' '),
+            '=' => {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                bytes.push((high * 16 + low) as u8);
+            }
+            _ => {
+                let mut buffer = [0; 4];
+                bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            }
+        }
+    }
+    Some(bytes)
 }
 
 fn snippet(body: &str) -> String {
     body.trim().chars().take(120).collect()
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::encode_base64;
+
+    #[test]
+    fn encodes_the_rfc4648_vectors() {
+        // RFC 4648 §10 — the padding cases are what a hand-rolled encoder
+        // gets wrong, and XOAUTH2 blobs land on all three lengths.
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(encode_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn encodes_an_xoauth2_blob_with_its_control_bytes() {
+        let blob = encode_base64(b"user=a@b.com\x01auth=Bearer tok\x01\x01");
+        assert_eq!(blob, "dXNlcj1hQGIuY29tAWF1dGg9QmVhcmVyIHRvawEB");
+    }
 }
