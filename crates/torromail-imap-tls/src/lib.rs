@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use torromail_core::smtp::{SmtpAuth, SmtpClient};
 use torromail_core::{
     CoreError, CoreResult, ImapClient, ImapMailProvider, ImapProviderConfig, StreamImapTransport,
 };
@@ -19,6 +20,9 @@ pub type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 
 /// A provider connected over implicit TLS, as `connect_account` builds it.
 pub type TlsImapMailProvider = ImapMailProvider<StreamImapTransport<TlsStream>>;
+
+/// An SMTP submission session over implicit TLS.
+pub type TlsSmtpClient = SmtpClient<StreamImapTransport<TlsStream>>;
 
 /// Implicit-TLS IMAP (usually port 993) with the bundled Mozilla roots.
 pub fn connect_transport(host: &str, port: u16) -> CoreResult<StreamImapTransport<TlsStream>> {
@@ -49,4 +53,17 @@ pub fn connect_account(
     let transport = connect_transport(&config.host, config.port)?;
     let client = ImapClient::connect(transport, &config.username, secret)?;
     Ok(ImapMailProvider::new(config.account_id.clone(), client))
+}
+
+/// An authenticated SMTP submission session over implicit TLS (usually port
+/// 465). `ehlo_domain` is what the client announces itself as; the secret and
+/// auth arrive already resolved.
+pub fn connect_smtp(
+    host: &str,
+    port: u16,
+    ehlo_domain: &str,
+    auth: SmtpAuth,
+) -> CoreResult<TlsSmtpClient> {
+    let transport = connect_transport(host, port)?;
+    SmtpClient::connect(transport, ehlo_domain, auth)
 }

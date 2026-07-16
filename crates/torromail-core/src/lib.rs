@@ -2,6 +2,7 @@
 
 pub mod imap_provider;
 mod mime;
+pub mod smtp;
 
 pub use imap_provider::{
     FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport,
