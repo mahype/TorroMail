@@ -12,7 +12,6 @@ fn compose_message_builds_headers_and_encodes_a_non_ascii_subject() {
         "me@example.com",
         &["a@example.com".to_owned()],
         &["c@example.com".to_owned()],
-        &[],
         "Grüße",
         "Zeile eins\nZeile zwei",
     );

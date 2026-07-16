@@ -113,13 +113,17 @@ Prepared action tools:
 - `mail_prepare_move` — holds a move for confirmation; gated by the move right.
 - `mail_prepare_delete` — holds a soft delete (move to Trash) or, with
   `permanent`, an expunge; gated by the matching right.
+- `mail_prepare_send` — holds a send of a draft composed this session; gated
+  by the send right. Submission goes over SMTP (implicit TLS on 465, STARTTLS
+  otherwise); the account's SMTP facts travel in the policy document.
 - `mail_confirm_action` — runs a prepared action once, matched by its code
-  and inside its TTL, re-checking the policy per folder at execution.
-- `mail_prepare_send` — **not implemented**. Needs SMTP.
+  and inside its TTL, re-checking the policy at execution.
 
 Prepared actions live in the server between prepare and confirm. The
 confirmation code is the handshake tying a confirm to one preparation; the GUI
 is the intended place for a human to read the preview and approve.
+
+All fourteen catalog tools are implemented.
 
 Read-only admin tools. These answer from the policy document alone and are
 dispatched before any account lookup or connection — `mail_list_accounts` is

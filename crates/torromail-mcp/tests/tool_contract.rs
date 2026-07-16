@@ -325,14 +325,21 @@ fn mcp_server_rejects_unknown_tool_calls() {
 }
 
 #[test]
-fn known_but_unimplemented_tools_say_so_instead_of_vanishing() {
+fn every_catalog_tool_is_implemented() {
     let server = LineMcpServer::fixture();
-    let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_prepare_send","arguments":{}}}"#,
-    ).expect("a request gets a response");
-
-    assert!(response.contains(r#""code":-32000"#));
-    assert!(response.contains("not implemented"));
+    for name in ToolCatalog::default().names_as_str() {
+        let response = server
+            .handle_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+            ))
+            .expect("a request gets a response");
+        // Every catalog tool is dispatched now: a bad call fails on its own
+        // terms, never on the "not implemented yet" fallback.
+        assert!(
+            !response.contains("not implemented yet"),
+            "{name} still falls through to the unimplemented stub: {response}"
+        );
+    }
 }
 
 #[test]
@@ -930,6 +937,112 @@ fn confirming_an_unknown_action_is_refused() {
 
     assert!(response.contains(r#""code":-32000"#), "got: {response}");
     assert!(response.contains("pending action not found"), "got: {response}");
+}
+
+fn send_capable_document(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        r#"{"version":1,"accounts":[{"id":"work","email":"me@example.com","read":"full_message","write":{"drafts":true},"send":true,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+}
+
+const CREATE_DRAFT: &str = r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Hallo","body":"Text"}}}"#;
+
+#[test]
+fn a_draft_can_be_prepared_for_sending() {
+    let path = temp_policy_path("prepare-send");
+    send_capable_document(&path);
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([])) as Box<dyn MailProvider>)
+    });
+
+    let draft = server.handle_line(CREATE_DRAFT).expect("a response");
+    assert!(draft.contains("draft_id"), "got: {draft}");
+    let draft_id = payload_field(&draft, "draft_id");
+
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"work","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(prepare.contains("pending_action_id"), "got: {prepare}");
+    assert!(prepare.contains("Send to someone@example.com"), "got: {prepare}");
+}
+
+#[test]
+fn confirming_a_send_needs_smtp_to_be_configured() {
+    // Send is granted and a draft exists, but the document carries no smtp
+    // block, so the confirmed send has nowhere to go.
+    let path = temp_policy_path("send-no-smtp");
+    send_capable_document(&path);
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([])) as Box<dyn MailProvider>)
+    });
+
+    let draft = server.handle_line(CREATE_DRAFT).expect("a response");
+    let draft_id = payload_field(&draft, "draft_id");
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"work","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    let pending_id = payload_field(&prepare, "pending_action_id");
+    let code = payload_field(&prepare, "confirmation_code");
+
+    let confirm = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"{code}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(confirm.contains(r#""code":-32000"#), "got: {confirm}");
+    assert!(confirm.contains("no SMTP"), "got: {confirm}");
+}
+
+#[test]
+fn preparing_a_send_needs_the_send_right() {
+    let path = temp_policy_path("no-send");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([])) as Box<dyn MailProvider>)
+    });
+
+    let draft = server.handle_line(CREATE_DRAFT).expect("a response");
+    let draft_id = payload_field(&draft, "draft_id");
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":94,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"work","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(prepare.contains(r#""code":-32000"#), "got: {prepare}");
+    assert!(prepare.contains("Send"), "got: {prepare}");
+}
+
+#[test]
+fn preparing_a_send_from_an_unknown_draft_is_refused() {
+    let path = temp_policy_path("send-unknown-draft");
+    send_capable_document(&path);
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"mail_prepare_send","arguments":{"account_id":"work","draft_id":"draft-404"}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert!(response.contains("draft not found"), "got: {response}");
 }
 
 #[test]

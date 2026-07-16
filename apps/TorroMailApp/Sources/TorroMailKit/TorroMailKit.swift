@@ -620,6 +620,22 @@ public enum PolicyDocument {
             }
             object["imap"] = imap
         }
+        // Submission facts travel the same way, so mail_prepare_send can reach
+        // the outgoing server. Port 465 is implicit TLS; 587 gets STARTTLS.
+        if !account.smtpHost.isEmpty, !account.username.isEmpty {
+            var smtp: [String: Any] = [
+                "host": account.smtpHost,
+                "port": account.smtpPort,
+                "username": account.username,
+                "secret_ref": KeychainStore.secretReference(forAccount: account.id)
+            ]
+            if account.loginMethod == .oauth, let issuer = account.oauthIssuer {
+                smtp["auth"] = "xoauth2"
+                smtp["token_endpoint"] = issuer.tokenEndpoint.absoluteString
+                smtp["client_id"] = issuer.clientID
+            }
+            object["smtp"] = smtp
+        }
         return object
     }
 

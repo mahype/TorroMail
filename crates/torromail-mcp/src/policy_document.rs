@@ -50,8 +50,11 @@ pub(crate) struct DocumentAccount {
     pub(crate) email: String,
     pub(crate) cache: CacheFacts,
     pub(crate) imap: Option<ImapProviderConfig>,
+    /// How to submit mail for this account. Reuses the connection config type
+    /// — host, port, username, secret, auth are the same shape as IMAP.
+    pub(crate) smtp: Option<ImapProviderConfig>,
     /// Present only for `xoauth2` accounts: what it takes to renew the token
-    /// when the stored one has gone stale.
+    /// when the stored one has gone stale. Shared by IMAP and SMTP.
     pub(crate) oauth: Option<OAuthFacts>,
 }
 
@@ -96,9 +99,13 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
     let (imap, oauth) = match account.get("imap") {
         None | Some(Value::Null) => (None, None),
         Some(imap) => (
-            Some(parse_imap_config(account, imap)?),
+            Some(parse_connection_config(account, imap, 993)?),
             parse_oauth_facts(imap)?,
         ),
+    };
+    let smtp = match account.get("smtp") {
+        None | Some(Value::Null) => None,
+        Some(smtp) => Some(parse_connection_config(account, smtp, 465)?),
     };
 
     // Name and email are labels, not rights: a document from an older app
@@ -116,6 +123,7 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
         email,
         cache: parse_cache_facts(&account["cache"]),
         imap,
+        smtp,
         oauth,
     })
 }
@@ -148,32 +156,37 @@ fn parse_cache_facts(cache: &Value) -> CacheFacts {
 }
 
 /// A present-but-broken connection block is an error, never a silent
-/// fixture fallback — that would misreport whose data is being served.
-fn parse_imap_config(account: &Value, imap: &Value) -> Result<ImapProviderConfig, String> {
+/// fixture fallback — that would misreport whose data is being served. Shared
+/// by the IMAP and SMTP blocks, which have the same shape.
+fn parse_connection_config(
+    account: &Value,
+    block: &Value,
+    default_port: u16,
+) -> Result<ImapProviderConfig, String> {
     let id = account["id"]
         .as_str()
         .ok_or("policy document invalid: account id must be a string")?;
-    let host = imap["host"]
+    let host = block["host"]
         .as_str()
-        .ok_or("policy document invalid: imap host must be a string")?;
-    let username = imap["username"]
+        .ok_or("policy document invalid: connection host must be a string")?;
+    let username = block["username"]
         .as_str()
-        .ok_or("policy document invalid: imap username must be a string")?;
-    let secret_ref = imap["secret_ref"]
+        .ok_or("policy document invalid: connection username must be a string")?;
+    let secret_ref = block["secret_ref"]
         .as_str()
-        .ok_or("policy document invalid: imap secret_ref must be a string")?;
-    let port = u16::try_from(imap["port"].as_u64().unwrap_or(993))
-        .map_err(|_| "policy document invalid: imap port out of range".to_owned())?;
+        .ok_or("policy document invalid: connection secret_ref must be a string")?;
+    let port = u16::try_from(block["port"].as_u64().unwrap_or(u64::from(default_port)))
+        .map_err(|_| "policy document invalid: connection port out of range".to_owned())?;
 
     // Absent means password: every account written before OAuth existed used
     // one, and an unknown mechanism is refused rather than guessed at — a
     // wrong guess would send the secret over the wire the wrong way.
-    let auth = match imap["auth"].as_str().unwrap_or("password") {
+    let auth = match block["auth"].as_str().unwrap_or("password") {
         "password" => ImapAuth::Password,
         "xoauth2" => ImapAuth::XOAuth2,
         other => {
             return Err(format!(
-                "policy document invalid: unknown imap auth {other:?}"
+                "policy document invalid: unknown connection auth {other:?}"
             ));
         }
     };

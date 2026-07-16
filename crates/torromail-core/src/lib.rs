@@ -992,26 +992,16 @@ impl SearchWindow {
     }
 }
 
-/// A plain-text RFC 5322 message from its parts, ready to be appended as a
-/// draft. The subject is encoded when it leaves ASCII; the body is normalised
-/// to CRLF line endings. `Bcc` is kept because a draft has not been sent yet —
-/// the sending step is where it would be stripped from the headers.
-pub fn compose_message(
-    from: &str,
-    to: &[String],
-    cc: &[String],
-    bcc: &[String],
-    subject: &str,
-    body: &str,
-) -> String {
+/// A plain-text RFC 5322 message from its parts. The subject is encoded when
+/// it leaves ASCII; the body is normalised to CRLF line endings. `Bcc` is
+/// deliberately absent from the headers — a blind copy must not be visible to
+/// the other recipients; the bcc addresses travel only in the SMTP envelope.
+pub fn compose_message(from: &str, to: &[String], cc: &[String], subject: &str, body: &str) -> String {
     let mut message = String::new();
     message.push_str(&format!("From: {from}\r\n"));
     message.push_str(&format!("To: {}\r\n", to.join(", ")));
     if !cc.is_empty() {
         message.push_str(&format!("Cc: {}\r\n", cc.join(", ")));
-    }
-    if !bcc.is_empty() {
-        message.push_str(&format!("Bcc: {}\r\n", bcc.join(", ")));
     }
     message.push_str(&format!("Subject: {}\r\n", mime::encode_rfc2047(subject)));
     message.push_str("MIME-Version: 1.0\r\n");

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use torromail_core::smtp::SmtpAuth;
 use torromail_core::{
     AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
     ImapProviderConfig, MailAccessService, MailProvider, MarkChange, PermissionSet, Policy,
@@ -213,7 +214,37 @@ enum ConnIdentity {
 /// resolves the rest from the reloaded document itself.
 type ConnectOverride = Box<dyn Fn(&AccountId) -> CoreResult<Box<dyn MailProvider>>>;
 
-/// The mailbox mutation a prepared action will carry out once confirmed.
+/// A composed draft the server remembers so a later `prepare_send` can find
+/// it by id. The recipients are the full envelope — to, cc and bcc — while
+/// the raw message carries only the visible headers.
+#[derive(Clone)]
+struct DraftRecord {
+    from: String,
+    recipients: Vec<String>,
+    raw: String,
+}
+
+/// Drafts composed this session, by id.
+#[derive(Default)]
+struct DraftCache {
+    next_id: u64,
+    records: HashMap<String, DraftRecord>,
+}
+
+impl DraftCache {
+    fn insert(&mut self, record: DraftRecord) -> String {
+        self.next_id += 1;
+        let id = format!("draft-{}", self.next_id);
+        self.records.insert(id.clone(), record);
+        id
+    }
+
+    fn get(&self, id: &str) -> Option<DraftRecord> {
+        self.records.get(id).cloned()
+    }
+}
+
+/// The mutation a prepared action will carry out once confirmed.
 enum Operation {
     Move {
         message_ids: Vec<String>,
@@ -224,6 +255,9 @@ enum Operation {
     },
     Expunge {
         message_ids: Vec<String>,
+    },
+    Send {
+        record: DraftRecord,
     },
 }
 
@@ -301,6 +335,8 @@ pub struct LineMcpServer {
     sessions: RefCell<SearchSessionStore>,
     /// Risky actions awaiting confirmation, between their prepare and confirm.
     pending: RefCell<PendingActions>,
+    /// Drafts composed this session, so `prepare_send` can name one by id.
+    drafts: RefCell<DraftCache>,
     /// Test seam: when set, this makes the mailbox instead of a TLS session.
     connect_override: Option<ConnectOverride>,
 }
@@ -316,6 +352,7 @@ impl LineMcpServer {
             connections: RefCell::default(),
             sessions: RefCell::default(),
             pending: RefCell::default(),
+            drafts: RefCell::default(),
             connect_override: None,
         }
     }
@@ -445,8 +482,14 @@ impl LineMcpServer {
         if name == ToolName::MailCreateDraft.as_str() {
             let from = self.account_email(&account_id).unwrap_or_default();
             return self.run_with_connection(&account_id, id, &|provider, engine| {
-                handle_mail_create_draft(arguments, &account_id, provider, engine, &from)
+                let (mailbox, record) =
+                    compose_and_append(arguments, &account_id, provider, engine, &from)?;
+                let draft_id = self.drafts.borrow_mut().insert(record);
+                Ok(json!({ "status": "draft_created", "draft_id": draft_id, "mailbox": mailbox }))
             });
+        }
+        if name == ToolName::MailPrepareSend.as_str() {
+            return self.handle_mail_prepare_send(arguments, &account_id, id);
         }
         if name == ToolName::MailMark.as_str() {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
@@ -598,6 +641,27 @@ impl LineMcpServer {
         self.store_prepared(account_id, preview, operation, id)
     }
 
+    /// Prepare a send for confirmation. The draft must have been composed this
+    /// session, and the account must hold the send right — the one capability
+    /// that acts on the outside world.
+    fn handle_mail_prepare_send(&self, arguments: &Value, account_id: &AccountId, id: &Value) -> String {
+        let draft_id = arguments["draft_id"].as_str().unwrap_or_default();
+        let Some(record) = self.drafts.borrow().get(draft_id) else {
+            return json_rpc_error(id, -32000, &format!("draft not found: {draft_id}"));
+        };
+
+        let engine = match self.runtime_for(account_id) {
+            Ok((engine, _facts)) => engine,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        if let Err(error) = engine.authorize(account_id, Capability::Send) {
+            return json_rpc_error(id, -32000, &error.to_string());
+        }
+
+        let preview = format!("Send to {}", record.recipients.join(", "));
+        self.store_prepared(account_id, preview, Operation::Send { record }, id)
+    }
+
     /// Store a prepared action and answer with its id, code and preview.
     fn store_prepared(
         &self,
@@ -636,11 +700,45 @@ impl LineMcpServer {
             Err(failure) => return failure.into_response(id),
         };
         let account_id = action.account_id.clone();
-        let operation = action.operation;
 
-        self.run_with_connection(&account_id, id, &|provider, engine| {
-            execute_operation(&operation, &account_id, provider, engine)
-        })
+        // Sending leaves the house over SMTP, not the pooled IMAP connection;
+        // every other action mutates the mailbox and runs on that connection.
+        match &action.operation {
+            Operation::Send { record } => self.execute_send(&account_id, record, id),
+            operation => self.run_with_connection(&account_id, id, &|provider, engine| {
+                execute_operation(operation, &account_id, provider, engine)
+            }),
+        }
+    }
+
+    /// Submit a confirmed draft over SMTP. A fresh session each time — sends
+    /// are rare enough that pooling a second connection is not worth it.
+    fn execute_send(&self, account_id: &AccountId, record: &DraftRecord, id: &Value) -> String {
+        let Some((config, oauth)) = self.smtp_facts(account_id) else {
+            return json_rpc_error(
+                id,
+                -32000,
+                "no SMTP is configured for this account — finish setting it up in TorroMail",
+            );
+        };
+
+        match send_over_smtp(&config, oauth.as_ref(), record) {
+            Ok(()) => json_rpc_text_result(
+                id,
+                &json!({ "status": "sent", "recipients": record.recipients.len() }),
+            ),
+            Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+        }
+    }
+
+    /// The SMTP connection facts for an account, and the OAuth facts that go
+    /// with them — read from the document, reloaded per call.
+    fn smtp_facts(&self, account_id: &AccountId) -> Option<(ImapProviderConfig, Option<OAuthFacts>)> {
+        let accounts = self.document_accounts().ok().flatten()?;
+        let account = accounts
+            .into_iter()
+            .find(|account| account.policy.account_id() == account_id)?;
+        account.smtp.map(|config| (config, account.oauth))
     }
 
     /// The account's own address, for the `From` of a draft. Read from the
@@ -1166,13 +1264,15 @@ fn handle_mail_get_thread(
     Ok(json!({ "thread_id": thread_id, "messages": messages }))
 }
 
-fn handle_mail_create_draft(
+/// Compose a draft, append it to the drafts folder, and hand back the folder
+/// it landed in and a record of it for a later send.
+fn compose_and_append(
     arguments: &Value,
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
     from: &str,
-) -> ToolResult {
+) -> Result<(String, DraftRecord), ToolFailure> {
     let to = string_array(&arguments["to"]);
     let cc = string_array(&arguments["cc"]);
     let bcc = string_array(&arguments["bcc"]);
@@ -1185,7 +1285,7 @@ fn handle_mail_create_draft(
         ));
     }
 
-    let message = torromail_core::compose_message(from, &to, &cc, &bcc, subject, body);
+    let message = torromail_core::compose_message(from, &to, &cc, subject, body);
 
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
@@ -1198,7 +1298,16 @@ fn handle_mail_create_draft(
         .create_draft(account_id, &mailbox, &message)
         .map_err(ToolFailure::Core)?;
 
-    Ok(json!({ "status": "draft_created", "mailbox": mailbox }))
+    // The envelope is every recipient; the raw message shows only to and cc.
+    let mut recipients = to;
+    recipients.extend(cc);
+    recipients.extend(bcc);
+    let record = DraftRecord {
+        from: from.to_owned(),
+        recipients,
+        raw: message,
+    };
+    Ok((mailbox, record))
 }
 
 /// A JSON array of strings, or an empty list — used for recipient fields.
@@ -1279,7 +1388,52 @@ fn execute_operation(
                 .map_err(ToolFailure::Core)?;
             Ok(json!({ "status": "deleted", "deleted": message_ids.len() }))
         }
+        // Sending is handled off the IMAP connection; confirm never routes it
+        // here.
+        Operation::Send { .. } => Err(ToolFailure::Core(CoreError::ProviderFailure(
+            "send is not a mailbox operation".to_owned(),
+        ))),
     }
+}
+
+/// Submit a draft over an SMTP TLS session. The secret is resolved the same
+/// way as for IMAP — a password, or a bearer token renewed if it went stale.
+fn send_over_smtp(
+    config: &ImapProviderConfig,
+    oauth: Option<&OAuthFacts>,
+    record: &DraftRecord,
+) -> CoreResult<()> {
+    let secret = resolve_credential(config, oauth)?;
+    let auth = match config.auth {
+        ImapAuth::Password => SmtpAuth::Login {
+            username: config.username.clone(),
+            secret,
+        },
+        ImapAuth::XOAuth2 => SmtpAuth::XOAuth2 {
+            username: config.username.clone(),
+            access_token: secret,
+        },
+    };
+
+    let mut client = torromail_imap_tls::connect_smtp(
+        &config.host,
+        config.port,
+        &ehlo_domain(&record.from),
+        auth,
+    )?;
+    let outcome = client.send_message(&record.from, &record.recipients, &record.raw);
+    client.quit();
+    outcome
+}
+
+/// What the client announces itself as: the sender's domain, or `localhost`
+/// when the address has none.
+fn ehlo_domain(from: &str) -> String {
+    from.split_once('@')
+        .map(|(_local, domain)| domain)
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or("localhost")
+        .to_owned()
 }
 
 /// Seconds since the Unix epoch. A clock is fine here — this is the MCP
