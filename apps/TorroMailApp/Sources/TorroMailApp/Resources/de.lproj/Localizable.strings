@@ -153,6 +153,50 @@
 "The assistant's setup tool could not be started." = "Das Einrichtungsprogramm des Assistenten konnte nicht gestartet werden.";
 "The assistant's setup tool reported an error." = "Das Einrichtungsprogramm des Assistenten hat einen Fehler gemeldet.";
 
+/* MCP Clients section */
+"MCP Clients" = "MCP-Clients";
+"The assistants connected to TorroMail live in the MCP Clients section." = "Die mit TorroMail verbundenen Assistenten liegen im Bereich MCP-Clients.";
+"Connect one in the MCP Clients section to start using your mail." = "Verbinde einen im Bereich MCP-Clients, um loszulegen.";
+"Assistants" = "Assistenten";
+"Pick an assistant to connect it — TorroMail writes itself into the ones it knows, and hands you a snippet for the rest. Nothing is sent until you restart the assistant." = "Wähle einen Assistenten, um ihn zu verbinden — bei den bekannten trägt sich TorroMail selbst ein, für die übrigen bekommst du einen Ausschnitt. Gesendet wird erst, wenn du den Assistenten neu startest.";
+"Manual setup" = "Manuelle Einrichtung";
+"Set up by hand" = "Von Hand einrichten";
+"TorroMail does not configure this client automatically. Add the snippet below to its MCP configuration yourself." = "TorroMail richtet diesen Client nicht automatisch ein. Füge den Ausschnitt unten selbst in dessen MCP-Konfiguration ein.";
+"How to set it up" = "So richtest du es ein";
+"Other client" = "Anderer Client";
+"Clawbot" = "Clawbot";
+"Hermes" = "Hermes";
+"Add the snippet below under “mcp.servers” in Clawbot’s config (or run “openclaw mcp add”), then restart it and ask it to list your mail accounts." = "Füge den Ausschnitt unten unter „mcp.servers“ in Clawbots Konfiguration ein (oder führe „openclaw mcp add“ aus), starte es dann neu und bitte es, deine Mail-Konten aufzulisten.";
+"Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts." = "Füge den Ausschnitt unten unter „mcp_servers“ in Hermes’ Konfiguration ein, starte es dann neu und bitte es, deine Mail-Konten aufzulisten.";
+"Paste the snippet below into your client’s MCP configuration — any client that speaks MCP over stdio can run TorroMail. Restart it afterwards." = "Füge den Ausschnitt unten in die MCP-Konfiguration deines Clients ein — jeder Client, der MCP über stdio spricht, kann TorroMail nutzen. Starte ihn danach neu.";
+"TorroMail server" = "TorroMail-Server";
+"Running in the background" = "Läuft im Hintergrund";
+"Start TorroMail in the Mail Accounts section so assistants can reach your mail." = "Starte TorroMail im Bereich Mail-Konten, damit Assistenten deine E-Mails erreichen.";
+"Set up assistants…" = "Assistenten einrichten …";
+"Not found on this Mac" = "Auf diesem Mac nicht gefunden";
+"Not connected" = "Nicht verbunden";
+"Disconnect" = "Trennen";
+"Reconnect" = "Neu verbinden";
+"%@ is not installed on this Mac. Install it, or set it up by hand with the snippet below." = "%@ ist auf diesem Mac nicht installiert. Installiere es oder richte es von Hand mit dem Ausschnitt unten ein.";
+"Test setup" = "Einrichtung testen";
+"Written into %@’s configuration" = "In die Konfiguration von %@ eingetragen";
+"Not connected yet" = "Noch nicht verbunden";
+"Setup test" = "Einrichtungstest";
+"TorroMail can prove its own server answers and that this client points at it. Whether the client has loaded it only shows after a restart — see below." = "TorroMail kann prüfen, ob der eigene Server antwortet und ob dieser Client auf ihn zeigt. Ob der Client ihn geladen hat, zeigt sich erst nach einem Neustart — siehe unten.";
+"Confirm inside %@" = "In %@ prüfen";
+"Config file" = "Konfigurationsdatei";
+"Copy config snippet" = "Konfiguration kopieren";
+"For a client TorroMail does not configure automatically, paste this into its MCP configuration." = "Für einen Client, den TorroMail nicht automatisch einrichtet, füge dies in dessen MCP-Konfiguration ein.";
+"TorroMail server answers — %d tools" = "TorroMail-Server antwortet — %d Werkzeuge";
+"TorroMail server did not answer" = "TorroMail-Server hat nicht geantwortet";
+"Connected. Restart %@ to load it." = "Verbunden. Starte %@ neu, um es zu laden.";
+"Removed from %@." = "Aus %@ entfernt.";
+"Restart Claude Desktop. A tools icon appears below the message box; TorroMail’s tools sit under “torromail”. Ask it: “List my mail accounts.”" = "Starte Claude Desktop neu. Unter dem Eingabefeld erscheint ein Werkzeug-Symbol; TorroMails Werkzeuge stehen unter „torromail“. Bitte es: „Liste meine Mail-Konten.“";
+"In a new Claude Code session run “/mcp” — “torromail” must show as connected. Or ask it: “List my mail accounts.”" = "Führe in einer neuen Claude-Code-Sitzung „/mcp“ aus — „torromail“ muss als verbunden erscheinen. Oder bitte: „Liste meine Mail-Konten.“";
+"Restart the Codex CLI; “torromail” appears in its MCP list. Then ask: “List my mail accounts.”" = "Starte die Codex-CLI neu; „torromail“ erscheint in ihrer MCP-Liste. Bitte dann: „Liste meine Mail-Konten.“";
+"Restart the Gemini CLI and run “/mcp”; “torromail” must be listed." = "Starte die Gemini-CLI neu und führe „/mcp“ aus; „torromail“ muss gelistet sein.";
+"Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”" = "Öffne Cursor → Einstellungen → MCP; „torromail“ muss als aktiv erscheinen. Dann im Chat: „Liste meine Mail-Konten.“";
+
 /* Log */
 "Time" = "Zeit";
 "Client" = "Client";

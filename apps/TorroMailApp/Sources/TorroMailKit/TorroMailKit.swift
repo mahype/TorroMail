@@ -5,6 +5,7 @@ import SwiftUI
 public enum TorroMailSidebarSelection: Hashable {
     case dashboard
     case accounts
+    case mcp
     case settings
     case log
 }
@@ -186,6 +187,15 @@ public struct MCPClient: Identifiable, Hashable {
         self.id = id
         self.displayName = displayName
         self.setup = setup
+    }
+
+    /// Where this client keeps its MCP servers — shown in the detail view so a
+    /// manual edit has somewhere to go.
+    public var configURL: URL {
+        switch setup {
+        case let .mcpServersJSON(url), let .codexCLI(_, url), let .claudeCodeCLI(_, url):
+            return url
+        }
     }
 }
 
@@ -369,16 +379,44 @@ public enum MCPClientSetup {
         return servers[MCPClientRegistry.serverName] != nil
     }
 
-    public static func configSnippet(commandPath: String) -> String {
-        """
-        {
-          "mcpServers": {
-            "torromail": {
-              "command": "\(commandPath)"
+    /// The snippet to paste, in the shape the target client expects. Clients
+    /// differ: most read a top-level `mcpServers` JSON object, Hermes reads
+    /// YAML under `mcp_servers`, OpenClaw nests it under `mcp.servers`.
+    public static func configSnippet(
+        commandPath: String,
+        format: MCPClientDescriptor.SnippetFormat = .mcpServersJSON
+    ) -> String {
+        let name = MCPClientRegistry.serverName
+        switch format {
+        case .mcpServersJSON:
+            return """
+            {
+              "mcpServers": {
+                "\(name)": {
+                  "command": "\(commandPath)"
+                }
+              }
             }
-          }
+            """
+        case .hermesYAML:
+            return """
+            mcp_servers:
+              \(name):
+                command: "\(commandPath)"
+            """
+        case .openClawJSON:
+            return """
+            {
+              "mcp": {
+                "servers": {
+                  "\(name)": {
+                    "command": "\(commandPath)"
+                  }
+                }
+              }
+            }
+            """
         }
-        """
     }
 
     /// Registers the server with a client. Servers the user configured
@@ -443,6 +481,280 @@ public enum MCPClientSetup {
         process.standardOutput = Pipe()
         process.standardError = errorPipe
 
+        do {
+            try process.run()
+        } catch {
+            throw Failure("The assistant's setup tool could not be started.")
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw Failure("The assistant's setup tool reported an error.")
+        }
+    }
+}
+
+/// A client TorroMail knows how to wire itself into, described independently
+/// of whether it is installed on this Mac. The catalog drives the MCP Server
+/// list: every known assistant shows up — installed or not — so the user can
+/// see the full field and pick from it, the way the account list shows the
+/// accounts they added.
+public struct MCPClientDescriptor: Identifiable, Hashable, Sendable {
+    /// How TorroMail can set the client up.
+    public enum Kind: Hashable, Sendable {
+        /// TorroMail knows where the client keeps its config and can write
+        /// itself in with one click, then read the file back to confirm.
+        case automatic
+        /// TorroMail cannot (or does not yet) edit this client's config, so it
+        /// only offers the snippet to paste. Covers clients whose config path
+        /// TorroMail has not learned, and the catch-all "any other client".
+        case manual
+    }
+
+    /// The shape the snippet has to take for this client — they do not all read
+    /// the same file format.
+    public enum SnippetFormat: Hashable, Sendable {
+        /// Top-level `mcpServers` JSON object (Claude Desktop, Cursor, and the
+        /// generic default).
+        case mcpServersJSON
+        /// Hermes' `~/.hermes/config.yaml`: YAML under `mcp_servers`.
+        case hermesYAML
+        /// OpenClaw's `~/.openclaw/openclaw.json`: JSON nested under
+        /// `mcp.servers`.
+        case openClawJSON
+    }
+
+    public let id: String
+    public let displayName: String
+    /// SF Symbol for the client's card badge.
+    public let symbol: String
+    public let kind: Kind
+    public let snippetFormat: SnippetFormat
+    /// For a manual client whose config file TorroMail knows: where the snippet
+    /// goes, shown next to it. Nil for the fully generic "other client".
+    public let manualConfigPath: String?
+    /// For an automatic client: how to confirm, inside the client itself, that
+    /// it actually loaded TorroMail — the one step TorroMail cannot observe
+    /// from the outside. For a manual client: where to paste the snippet.
+    /// English key; the app localizes it.
+    public let verificationHintKey: String
+
+    public init(
+        id: String,
+        displayName: String,
+        symbol: String,
+        kind: Kind = .automatic,
+        snippetFormat: SnippetFormat = .mcpServersJSON,
+        manualConfigPath: String? = nil,
+        verificationHintKey: String
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.symbol = symbol
+        self.kind = kind
+        self.snippetFormat = snippetFormat
+        self.manualConfigPath = manualConfigPath
+        self.verificationHintKey = verificationHintKey
+    }
+}
+
+extension MCPClientRegistry {
+    /// Every client TorroMail can set up, whether or not it is on this Mac.
+    /// Ids match the ones `installed()` produces, so a descriptor and its
+    /// resolved client line up.
+    public static let catalog: [MCPClientDescriptor] = [
+        MCPClientDescriptor(
+            id: "claude-desktop",
+            displayName: "Claude Desktop",
+            symbol: "sparkles",
+            verificationHintKey: "Restart Claude Desktop. A tools icon appears below the message box; TorroMail’s tools sit under “torromail”. Ask it: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "claude-code",
+            displayName: "Claude Code",
+            symbol: "terminal",
+            verificationHintKey: "In a new Claude Code session run “/mcp” — “torromail” must show as connected. Or ask it: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "chatgpt",
+            displayName: "ChatGPT",
+            symbol: "bubble.left.and.text.bubble.right",
+            verificationHintKey: "Restart the Codex CLI; “torromail” appears in its MCP list. Then ask: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "gemini-cli",
+            displayName: "Gemini CLI",
+            symbol: "diamond",
+            verificationHintKey: "Restart the Gemini CLI and run “/mcp”; “torromail” must be listed."
+        ),
+        MCPClientDescriptor(
+            id: "cursor",
+            displayName: "Cursor",
+            symbol: "cursorarrow.rays",
+            verificationHintKey: "Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "clawbot",
+            displayName: "Clawbot",
+            symbol: "pawprint",
+            kind: .manual,
+            snippetFormat: .openClawJSON,
+            manualConfigPath: "~/.openclaw/openclaw.json",
+            verificationHintKey: "Add the snippet below under “mcp.servers” in Clawbot’s config (or run “openclaw mcp add”), then restart it and ask it to list your mail accounts."
+        ),
+        MCPClientDescriptor(
+            id: "hermes",
+            displayName: "Hermes",
+            symbol: "paperplane.circle",
+            kind: .manual,
+            snippetFormat: .hermesYAML,
+            manualConfigPath: "~/.hermes/config.yaml",
+            verificationHintKey: "Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts."
+        ),
+        MCPClientDescriptor(
+            id: "other",
+            displayName: "Other client",
+            symbol: "puzzlepiece.extension",
+            kind: .manual,
+            verificationHintKey: "Paste the snippet below into your client’s MCP configuration — any client that speaks MCP over stdio can run TorroMail. Restart it afterwards."
+        )
+    ]
+
+    public static func descriptor(id: String) -> MCPClientDescriptor? {
+        catalog.first { $0.id == id }
+    }
+
+    /// The installed, path-resolved client for a catalog id, or nil when the
+    /// assistant is not on this Mac.
+    public static func installedClient(id: String, fileManager: FileManager = .default) -> MCPClient? {
+        installed(fileManager: fileManager).first { $0.id == id }
+    }
+}
+
+/// Where a client stands relative to TorroMail: whether it is here at all,
+/// whether its config points at the server, and — when it does — whether the
+/// server binary actually answers. The first two are cheap file facts; the
+/// third is a real launch of the bundled server.
+public struct MCPClientSetupStatus: Hashable, Sendable {
+    public enum Server: Hashable, Sendable {
+        case unknown
+        case responds(toolCount: Int)
+        case failed(String)
+    }
+
+    public var isInstalled: Bool
+    public var isConfigured: Bool
+    public var server: Server
+
+    public init(isInstalled: Bool, isConfigured: Bool, server: Server = .unknown) {
+        self.isInstalled = isInstalled
+        self.isConfigured = isConfigured
+        self.server = server
+    }
+}
+
+/// Launches the bundled server with `--list-tools` and reads back the tool
+/// catalog. A green result means the exact binary a client would spawn starts
+/// and speaks — the half of "is it set up?" TorroMail can prove by itself.
+public enum MCPServerSelfTest {
+    public static func run(executableName: String) -> MCPClientSetupStatus.Server {
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve() else {
+            return .failed("MCP executable not found")
+        }
+
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments + ["--list-tools"]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let detail = String(
+                data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            )?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .failed(detail?.isEmpty == false ? detail ?? "" : "self-test failed")
+        }
+        // `--list-tools` prints the MCP tools document: `{"tools":[…]}`.
+        guard
+            let root = try? JSONSerialization.jsonObject(with: data),
+            let tools = (root as? [String: Any])?["tools"] as? [Any]
+        else {
+            return .failed("unexpected server output")
+        }
+        return .responds(toolCount: tools.count)
+    }
+}
+
+extension MCPClientSetup {
+    /// The full standing of one catalog client, ready for the detail view. The
+    /// server self-test only runs when the client is actually configured —
+    /// there is nothing to confirm on the wire before then.
+    public static func status(
+        for descriptor: MCPClientDescriptor,
+        executableName: String,
+        runServerTest: Bool = true,
+        fileManager: FileManager = .default
+    ) -> MCPClientSetupStatus {
+        guard let client = MCPClientRegistry.installedClient(id: descriptor.id, fileManager: fileManager) else {
+            return MCPClientSetupStatus(isInstalled: false, isConfigured: false)
+        }
+        let configured = isConfigured(client)
+        guard configured, runServerTest else {
+            return MCPClientSetupStatus(isInstalled: true, isConfigured: configured)
+        }
+        let server = MCPServerSelfTest.run(executableName: executableName)
+        return MCPClientSetupStatus(isInstalled: true, isConfigured: configured, server: server)
+    }
+
+    /// Removes TorroMail from a client's configuration — the counterpart to
+    /// `add`. JSON configs are edited in place; the CLI-owned configs hand the
+    /// removal back to the tool that owns them.
+    public static func remove(
+        from client: MCPClient,
+        fileManager: FileManager = .default
+    ) throws {
+        switch client.setup {
+        case let .mcpServersJSON(configURL):
+            try removeFromJSONConfig(at: configURL, fileManager: fileManager)
+        case let .codexCLI(executableURL, _):
+            try removeViaCLI(executableURL: executableURL, extraArguments: [])
+        case let .claudeCodeCLI(executableURL, _):
+            try removeViaCLI(executableURL: executableURL, extraArguments: ["-s", "user"])
+        }
+    }
+
+    private static func removeFromJSONConfig(at target: URL, fileManager: FileManager) throws {
+        guard let data = try? Data(contentsOf: target), !data.isEmpty else { return }
+        guard var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            throw Failure("The existing configuration could not be read.")
+        }
+        guard var servers = root["mcpServers"] as? [String: Any] else { return }
+        servers[MCPClientRegistry.serverName] = nil
+        root["mcpServers"] = servers
+        let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: target, options: .atomic)
+    }
+
+    private static func removeViaCLI(executableURL: URL, extraArguments: [String]) throws {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["mcp", "remove", MCPClientRegistry.serverName] + extraArguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
         do {
             try process.run()
         } catch {
@@ -1281,6 +1593,9 @@ public final class TorroMailModel: ObservableObject {
     /// Drill-down inside the accounts destination. Empty shows the account
     /// list; one entry shows that account's settings.
     @Published public var accountPath: [String]
+    /// Drill-down inside the MCP destination. Empty shows the client list; one
+    /// entry (a client id) shows that client's setup.
+    @Published public var mcpPath: [String]
     @Published public var showAccountWizard: Bool
     @Published public var generalSettings: GeneralSettings
     @Published public var audit: [AuditEntry]
@@ -1292,6 +1607,7 @@ public final class TorroMailModel: ObservableObject {
         accounts: [MailAccount],
         selectedSidebarItem: TorroMailSidebarSelection,
         accountPath: [String] = [],
+        mcpPath: [String] = [],
         showAccountWizard: Bool = false,
         generalSettings: GeneralSettings,
         audit: [AuditEntry],
@@ -1301,6 +1617,7 @@ public final class TorroMailModel: ObservableObject {
         self.accounts = accounts
         self.selectedSidebarItem = selectedSidebarItem
         self.accountPath = accountPath
+        self.mcpPath = mcpPath
         self.showAccountWizard = showAccountWizard
         self.generalSettings = generalSettings
         self.audit = audit
@@ -1335,6 +1652,11 @@ public final class TorroMailModel: ObservableObject {
     public func openAccount(id: String) {
         selectedSidebarItem = .accounts
         accountPath = [id]
+    }
+
+    public func openClient(id: String) {
+        selectedSidebarItem = .mcp
+        mcpPath = [id]
     }
 
     public func beginAccountWizard() {

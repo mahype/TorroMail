@@ -454,6 +454,8 @@ private struct TorroMailRootView: View {
                 Label(L("Mail Accounts"), systemImage: "envelope")
                     .badge(model.pendingActionCount)
                     .tag(TorroMailSidebarSelection.accounts)
+                Label(L("MCP Clients"), systemImage: "link")
+                    .tag(TorroMailSidebarSelection.mcp)
                 Label(L("Settings"), systemImage: "gearshape")
                     .tag(TorroMailSidebarSelection.settings)
                 Label(L("Log"), systemImage: "list.bullet.rectangle")
@@ -491,6 +493,13 @@ private struct TorroMailRootView: View {
                         accountDetail(for: accountID)
                     }
             }
+        case .mcp:
+            NavigationStack(path: $model.mcpPath) {
+                MCPServerListView()
+                    .navigationDestination(for: String.self) { clientID in
+                        mcpClientDetail(for: clientID)
+                    }
+            }
         case .settings:
             SettingsView()
         case .log:
@@ -503,6 +512,17 @@ private struct TorroMailRootView: View {
         if let index = model.accounts.firstIndex(where: { $0.id == accountID }) {
             AccountDetailView(account: $model.accounts[index])
                 .id(accountID)
+        } else {
+            Text(L("No account selected"))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func mcpClientDetail(for clientID: String) -> some View {
+        if let descriptor = MCPClientRegistry.descriptor(id: clientID) {
+            MCPClientDetailView(descriptor: descriptor)
+                .id(clientID)
         } else {
             Text(L("No account selected"))
                 .foregroundStyle(.secondary)
@@ -615,7 +635,7 @@ private struct ServiceStatusCard: View {
                         : L("Not reachable for assistants"),
                     detail: mcpSupervisor.status.isRunning
                         ? L("TorroMail is running in the background.")
-                        : L("Start TorroMail in Settings so assistants can reach your mail.")
+                        : L("Start TorroMail in the Mail Accounts section so assistants can reach your mail.")
                 )
                 StatusTile(
                     color: model.connectedClients.isEmpty ? .orange : .green,
@@ -623,7 +643,7 @@ private struct ServiceStatusCard: View {
                         ? L("No assistant connected")
                         : clientTitle,
                     detail: model.connectedClients.isEmpty
-                        ? L("Connect one in Settings to start using your mail.")
+                        ? L("Connect one in the MCP Clients section to start using your mail.")
                         : L("Every access is logged.")
                 )
             }
@@ -928,6 +948,8 @@ private struct AccountListView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 10) {
+                MCPServerStatusCard()
+                    .padding(.bottom, 6)
                 ForEach(model.accounts) { account in
                     NavigationLink(value: account.id) {
                         AccountCard(account: account)
@@ -1590,11 +1612,6 @@ private struct ConnectionStatusBadge: View {
 
 private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
-    @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
-    @State private var installedClients: [MCPClient] = []
-    @State private var configuredClientIDs: Set<String> = []
-    @State private var clientSetupNotes: [String: String] = [:]
-    @State private var snippetNote: String?
 
     var body: some View {
         Form {
@@ -1613,152 +1630,19 @@ private struct SettingsView: View {
                 Text(L("TorroMail serves assistants either way. With both off it only shows up while this window is open — open TorroMail again to bring it back."))
             }
 
-            Section(L("MCP Server")) {
-                HStack {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 10, height: 10)
-                    Text(statusText)
-                    Spacer()
-                    if mcpSupervisor.status.isRunning {
-                        Button(L("Stop")) {
-                            mcpSupervisor.stop()
-                        }
-                        .torroButton()
-                    } else {
-                        Button(L("Start")) {
-                            mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
-                        }
-                        .torroButton()
-                    }
-                }
-                if let errorDetail {
-                    Text(errorDetail)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-
             Section {
-                if installedClients.isEmpty {
-                    Text(L("No supported assistant found on this Mac."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Button(L("Set up assistants…")) {
+                    model.selectedSidebarItem = .mcp
                 }
-                ForEach(installedClients) { client in
-                    HStack {
-                        Text(client.displayName)
-                        Spacer()
-                        if configuredClientIDs.contains(client.id) {
-                            Label(L("Connected"), systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                                .labelStyle(.titleAndIcon)
-                        } else {
-                            Button(L("Connect")) {
-                                connect(client)
-                            }
-                            .torroButton()
-                        }
-                    }
-                    if let note = clientSetupNotes[client.id] {
-                        Text(note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                HStack {
-                    Button(L("Copy Config Snippet")) {
-                        copyConfigSnippet()
-                    }
-                    .torroButton()
-                    Spacer()
-                }
-                if let snippetNote {
-                    Text(snippetNote)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                .torroButton()
             } header: {
-                Text(L("AI Clients"))
+                Text(L("MCP Clients"))
             } footer: {
-                Text(L("Connect an assistant so it can use your mail through TorroMail. Restart the assistant afterwards."))
+                Text(L("The assistants connected to TorroMail live in the MCP Clients section."))
             }
         }
         .formStyle(.grouped)
         .navigationTitle(L("Settings"))
-        .onAppear { refreshClients() }
-    }
-
-    private func refreshClients() {
-        installedClients = MCPClientRegistry.installed()
-        configuredClientIDs = Set(
-            installedClients.filter { MCPClientSetup.isConfigured($0) }.map(\.id)
-        )
-        model.connectedClients = installedClients
-            .filter { configuredClientIDs.contains($0.id) }
-            .map(\.displayName)
-    }
-
-    /// Writes the server into one client's configuration — the one-click
-    /// path. The note below the row reports what actually happened.
-    private func connect(_ client: MCPClient) {
-        guard let commandPath = MCPClientSetup.serverCommandPath(
-            executableName: model.generalSettings.mcpExecutable
-        ) else {
-            clientSetupNotes[client.id] = L("The MCP server binary was not found.")
-            return
-        }
-        do {
-            try MCPClientSetup.add(to: client, commandPath: commandPath)
-            clientSetupNotes[client.id] = L("Added. Restart the assistant to connect.")
-        } catch let failure as MCPClientSetup.Failure {
-            clientSetupNotes[client.id] = L(failure.reason)
-        } catch {
-            clientSetupNotes[client.id] = L("Could not update the configuration.")
-        }
-        refreshClients()
-    }
-
-    private func copyConfigSnippet() {
-        guard let commandPath = MCPClientSetup.serverCommandPath(
-            executableName: model.generalSettings.mcpExecutable
-        ) else {
-            snippetNote = L("The MCP server binary was not found.")
-            return
-        }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(MCPClientSetup.configSnippet(commandPath: commandPath), forType: .string)
-        snippetNote = L("Copied to the clipboard.")
-    }
-
-    private var statusColor: Color {
-        switch mcpSupervisor.status {
-        case .running: .green
-        case .starting: .orange
-        case .stopped: .gray
-        case .notFound, .failed: .red
-        }
-    }
-
-    private var statusText: String {
-        switch mcpSupervisor.status {
-        case .running: L("Running")
-        case .starting: L("Starting")
-        case .stopped: L("Stopped")
-        case .notFound, .failed: L("Error")
-        }
-    }
-
-    private var errorDetail: String? {
-        switch mcpSupervisor.status {
-        case let .notFound(name):
-            String(format: L("MCP executable “%@” not found."), name)
-        case let .failed(message):
-            message
-        default:
-            nil
-        }
     }
 }
 
