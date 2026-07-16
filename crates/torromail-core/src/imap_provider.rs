@@ -393,6 +393,42 @@ impl<T: ImapTransport> ImapClient<T> {
         Ok(collect_search_uids(&lines))
     }
 
+    /// Append a ready-made message to `mailbox` with the given flags. Unlike
+    /// every other command here, this sends a literal *to* the server: the
+    /// command line ends with `{N}`, the server answers with a `+`
+    /// continuation, and only then does the message travel.
+    pub fn append(&mut self, mailbox: &str, flags: &str, message: &str) -> CoreResult<()> {
+        self.next_tag += 1;
+        let tag = format!("t{}", self.next_tag);
+        self.transport.send_line(&format!(
+            "{tag} APPEND {} ({flags}) {{{}}}",
+            imap_quoted(mailbox),
+            message.len()
+        ))?;
+
+        let continuation = self.transport.read_line()?;
+        if !continuation.starts_with('+') {
+            return Err(CoreError::ProviderFailure(format!(
+                "APPEND was refused: {continuation}"
+            )));
+        }
+
+        // `send_line` appends the CRLF that both completes the literal's bytes
+        // and terminates the command, so the announced length must be the
+        // message alone.
+        self.transport.send_line(message)?;
+
+        loop {
+            let line = self.transport.read_line()?;
+            if let Some(rest) = line.strip_prefix(&format!("{tag} ")) {
+                if rest.starts_with("OK") {
+                    return Ok(());
+                }
+                return Err(CoreError::ProviderFailure(format!("APPEND failed: {rest}")));
+            }
+        }
+    }
+
     pub fn uid_store(&mut self, mailbox: &str, uid: u32, change: MarkChange) -> CoreResult<()> {
         self.select(mailbox)?;
         let (sign, flag) = match change {
@@ -617,6 +653,16 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
         self.guard(account_id)?;
         self.client.borrow_mut().list_mailboxes()
+    }
+
+    fn append_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().append(mailbox, "\\Draft", message)
     }
 }
 

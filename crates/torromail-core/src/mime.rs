@@ -393,6 +393,40 @@ fn collapse_blank_lines(text: &str) -> String {
     out.join("\n")
 }
 
+/// A header value fit for the wire. ASCII passes through untouched; anything
+/// else becomes one RFC 2047 base64 encoded-word, so a subject with an umlaut
+/// or an emoji survives a header that only carries ASCII.
+pub(crate) fn encode_rfc2047(value: &str) -> String {
+    if value.is_ascii() {
+        return value.to_owned();
+    }
+    format!("=?UTF-8?B?{}?=", encode_base64(value.as_bytes()))
+}
+
+/// Standard padded base64. Small enough to hand-roll rather than take a
+/// dependency; the mirror of `decode_base64`.
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let packed =
+            (u32::from(buffer[0]) << 16) | (u32::from(buffer[1]) << 8) | u32::from(buffer[2]);
+
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let value = ((packed >> (18 - index * 6)) & 0x3F) as usize;
+                encoded.push(char::from(ALPHABET[value]));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
 /// The charsets we can turn into text without a lookup table. UTF-8 covers
 /// almost all mail; Latin-1 maps one byte to one code point exactly. Others
 /// return `None` rather than a guess, and the caller falls back to a lossy

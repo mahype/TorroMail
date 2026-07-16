@@ -3,8 +3,28 @@ use torromail_core::{
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
     PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
     PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
-    WriteAccess,
+    WriteAccess, compose_message,
 };
+
+#[test]
+fn compose_message_builds_headers_and_encodes_a_non_ascii_subject() {
+    let message = compose_message(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &["c@example.com".to_owned()],
+        &[],
+        "Grüße",
+        "Zeile eins\nZeile zwei",
+    );
+
+    assert!(message.contains("From: me@example.com\r\n"));
+    assert!(message.contains("To: a@example.com\r\n"));
+    assert!(message.contains("Cc: c@example.com\r\n"));
+    // A non-ASCII subject travels as an RFC 2047 encoded-word.
+    assert!(message.contains("Subject: =?UTF-8?B?"), "{message}");
+    // The body's bare newline became CRLF.
+    assert!(message.contains("\r\nZeile eins\r\nZeile zwei\r\n"), "{message}");
+}
 
 #[test]
 fn account_mutations_are_gui_only() {

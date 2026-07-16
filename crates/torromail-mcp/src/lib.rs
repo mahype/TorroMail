@@ -359,6 +359,12 @@ impl LineMcpServer {
                 handle_mail_get_thread(arguments, &account_id, provider, engine)
             });
         }
+        if name == ToolName::MailCreateDraft.as_str() {
+            let from = self.account_email(&account_id).unwrap_or_default();
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_create_draft(arguments, &account_id, provider, engine, &from)
+            });
+        }
         if name == ToolName::MailMark.as_str() {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 handle_mail_mark(arguments, &account_id, provider, engine)
@@ -433,6 +439,16 @@ impl LineMcpServer {
             Some(connect) => connect(account_id),
             None => open_provider(account_id, facts),
         }
+    }
+
+    /// The account's own address, for the `From` of a draft. Read from the
+    /// document, which is the only place it lives.
+    fn account_email(&self, account_id: &AccountId) -> Option<String> {
+        let accounts = self.document_accounts().ok().flatten()?;
+        accounts
+            .iter()
+            .find(|account| account.policy.account_id() == account_id)
+            .map(|account| account.email.clone())
     }
 
     /// Narrow a prior search by its id. The stored hits already passed the
@@ -946,6 +962,71 @@ fn handle_mail_get_thread(
         .map_err(ToolFailure::Core)?;
     let messages = messages.iter().map(message_json).collect::<Vec<_>>();
     Ok(json!({ "thread_id": thread_id, "messages": messages }))
+}
+
+fn handle_mail_create_draft(
+    arguments: &Value,
+    account_id: &AccountId,
+    provider: &mut dyn MailProvider,
+    engine: PolicyEngine,
+    from: &str,
+) -> ToolResult {
+    let to = string_array(&arguments["to"]);
+    let cc = string_array(&arguments["cc"]);
+    let bcc = string_array(&arguments["bcc"]);
+    let subject = arguments["subject"].as_str().unwrap_or_default();
+    let body = arguments["body"].as_str().unwrap_or_default();
+
+    if to.is_empty() {
+        return Err(ToolFailure::InvalidParams(
+            "to needs at least one recipient".to_owned(),
+        ));
+    }
+
+    let message = torromail_core::compose_message(from, &to, &cc, &bcc, subject, body);
+
+    let mut sessions = SearchSessionStore::default();
+    let mut service = MailAccessService::new(provider, engine, &mut sessions);
+
+    // The drafts folder is wherever the account keeps it — its name is the
+    // last path segment, so `INBOX.Drafts` and a plain `Drafts` both match.
+    let mailboxes = service.list_mailboxes(account_id).map_err(ToolFailure::Core)?;
+    let mailbox = drafts_mailbox(&mailboxes);
+    service
+        .create_draft(account_id, &mailbox, &message)
+        .map_err(ToolFailure::Core)?;
+
+    Ok(json!({ "status": "draft_created", "mailbox": mailbox }))
+}
+
+/// A JSON array of strings, or an empty list — used for recipient fields.
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The mailbox a draft belongs in: one whose final path segment is "Drafts",
+/// else the bare name for a server that will create it.
+fn drafts_mailbox(mailboxes: &[String]) -> String {
+    mailboxes
+        .iter()
+        .find(|mailbox| {
+            mailbox
+                .rsplit(['.', '/'])
+                .next()
+                .unwrap_or(mailbox)
+                .eq_ignore_ascii_case("Drafts")
+        })
+        .cloned()
+        .unwrap_or_else(|| "Drafts".to_owned())
 }
 
 fn handle_mail_mark(

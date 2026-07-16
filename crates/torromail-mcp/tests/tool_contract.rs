@@ -64,6 +64,15 @@ impl MailProvider for FailingOnce {
         }
         self.inner.list_mailboxes(account_id)
     }
+
+    fn append_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        self.inner.append_draft(account_id, mailbox, message)
+    }
 }
 
 /// One INBOX message for `work`, so `list_mailboxes` has an accessible folder
@@ -719,6 +728,54 @@ fn a_thread_returns_every_message_that_shares_its_id() {
     assert!(!response.contains("Something unrelated"), "got: {response}");
     // Bodies were requested, so they travel too.
     assert!(response.contains("body one") && response.contains("body two"));
+}
+
+#[test]
+fn a_draft_is_composed_and_appended() {
+    // The fixture account runs the read + drafts default, so drafting is
+    // allowed. No Drafts folder exists, so the append falls back to "Drafts".
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Hallo","body":"Kurzer Text."}}}"#,
+        )
+        .expect("a response");
+
+    assert!(response.contains("draft_created"), "got: {response}");
+    assert!(response.contains("Drafts"), "got: {response}");
+}
+
+#[test]
+fn a_draft_needs_at_least_one_recipient() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":[],"subject":"Hallo","body":"Text"}}}"#,
+        )
+        .expect("a response");
+
+    assert!(response.contains(r#""code":-32602"#), "got: {response}");
+}
+
+#[test]
+fn drafting_is_refused_without_the_draft_right() {
+    let path = temp_policy_path("no-draft");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":false},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Hallo","body":"Text"}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert!(response.contains("Draft"), "got: {response}");
 }
 
 #[test]

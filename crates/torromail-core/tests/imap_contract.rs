@@ -337,6 +337,37 @@ fn a_thread_is_reconstructed_from_the_reference_headers() {
 }
 
 #[test]
+fn append_sends_the_message_as_a_literal_after_the_continuation() {
+    let mut script = login_script();
+    // The server invites the literal with a `+`, then accepts it.
+    script.extend([
+        line("+ OK go ahead"),
+        line("t2 OK [APPENDUID 1 5] APPEND completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+
+    let message = "From: me@example.com\r\nSubject: Hi\r\n\r\nBody";
+    client
+        .append("Drafts", "\\Draft", message)
+        .expect("append succeeds");
+
+    let sent = log.lines();
+    // The command announces the message's exact byte length...
+    assert_eq!(
+        sent[1],
+        format!("t2 APPEND \"Drafts\" (\\Draft) {{{}}}", message.len())
+    );
+    // ...and the message follows only after the continuation.
+    assert_eq!(sent[2], message);
+}
+
+#[test]
 fn marking_sends_a_uid_store_and_reuses_the_selection() {
     let mut script = login_script();
     script.extend([

@@ -991,6 +991,39 @@ impl SearchWindow {
     }
 }
 
+/// A plain-text RFC 5322 message from its parts, ready to be appended as a
+/// draft. The subject is encoded when it leaves ASCII; the body is normalised
+/// to CRLF line endings. `Bcc` is kept because a draft has not been sent yet —
+/// the sending step is where it would be stripped from the headers.
+pub fn compose_message(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    bcc: &[String],
+    subject: &str,
+    body: &str,
+) -> String {
+    let mut message = String::new();
+    message.push_str(&format!("From: {from}\r\n"));
+    message.push_str(&format!("To: {}\r\n", to.join(", ")));
+    if !cc.is_empty() {
+        message.push_str(&format!("Cc: {}\r\n", cc.join(", ")));
+    }
+    if !bcc.is_empty() {
+        message.push_str(&format!("Bcc: {}\r\n", bcc.join(", ")));
+    }
+    message.push_str(&format!("Subject: {}\r\n", mime::encode_rfc2047(subject)));
+    message.push_str("MIME-Version: 1.0\r\n");
+    message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    message.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    message.push_str("\r\n");
+    for line in body.split('\n') {
+        message.push_str(line.strip_suffix('\r').unwrap_or(line));
+        message.push_str("\r\n");
+    }
+    message
+}
+
 /// The boundary fixture-backed tests and real IMAP retrieval share: search
 /// and single-message fetch, nothing that smells like an inbox.
 pub trait MailProvider {
@@ -1027,6 +1060,15 @@ pub trait MailProvider {
     ) -> CoreResult<()>;
 
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>>;
+
+    /// Store a ready-made message in `mailbox` as a draft — an IMAP APPEND
+    /// with the `\Draft` flag, no sending involved.
+    fn append_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()>;
 }
 
 /// A `&mut` to a provider is itself a provider. This is what lets a caller
@@ -1068,6 +1110,15 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
         (**self).list_mailboxes(account_id)
+    }
+
+    fn append_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        (**self).append_draft(account_id, mailbox, message)
     }
 }
 
@@ -1166,6 +1217,28 @@ impl MailProvider for FixtureMailProvider {
             }
         }
         Ok(mailboxes)
+    }
+
+    /// The fixture keeps the appended draft so a later search or list can see
+    /// it — the raw message becomes the body, enough to prove it landed.
+    fn append_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        let id = format!("draft-{}", self.messages.len() + 1);
+        self.messages.push(StoredMessage::new(
+            account_id.clone(),
+            mailbox,
+            id.clone(),
+            id,
+            "Draft",
+            "",
+            "",
+            message,
+        ));
+        Ok(())
     }
 }
 
@@ -1287,6 +1360,20 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
             visible.push(message);
         }
         Ok(visible)
+    }
+
+    /// Store a composed message as a draft, if the account may draft at all.
+    /// Drafting is an account-wide right, not folder-scoped: it always lands
+    /// in the drafts mailbox, which the caller names.
+    pub fn create_draft(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        self.policy_engine
+            .authorize(account_id, Capability::Draft)?;
+        self.provider.append_draft(account_id, mailbox, message)
     }
 
     /// Only folders the policy grants anything on exist for assistants —

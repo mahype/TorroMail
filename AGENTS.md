@@ -106,14 +106,14 @@ Direct write tools (no approval, gated by the mark permission):
 
 - `mail_mark`
 
-Prepared action tools — **none implemented**. They need a `PendingActionStore`
-that survives a tool call, the GUI confirmation loop, and SMTP:
+Prepared action tools:
 
-- `mail_create_draft`
-- `mail_prepare_send`
-- `mail_prepare_move`
-- `mail_prepare_delete`
-- `mail_confirm_action`
+- `mail_create_draft` — composes the message and appends it to the drafts
+  folder with `\Draft`; gated by the drafts right.
+- `mail_prepare_send` — **not implemented**. Needs SMTP and a `PendingActionStore`.
+- `mail_prepare_move` — **not implemented**. Needs a `PendingActionStore`.
+- `mail_prepare_delete` — **not implemented**. Needs a `PendingActionStore`.
+- `mail_confirm_action` — **not implemented**. Executes a prepared action.
 
 Read-only admin tools. These answer from the policy document alone and are
 dispatched before any account lookup or connection — `mail_list_accounts` is
