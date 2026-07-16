@@ -366,12 +366,25 @@ struct TorroMailApp: App {
                 .tint(.torroRed)
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
+                    let executable = model.generalSettings.mcpExecutable
+                    // Unsigned builds pin keychain trust to binary hashes, so
+                    // a rebuilt server loses its read grants; re-blessing on
+                    // every launch keeps lookups from wanting a consent
+                    // dialog the headless server can never show.
+                    let accountIDs = model.accounts.map(\.id)
+                    await Task.detached(priority: .utility) {
+                        KeychainStore.refreshAccessControl(
+                            forAccounts: accountIDs,
+                            alsoTrusting: MCPClientSetup.trustedExecutablePaths(
+                                executableName: executable
+                            )
+                        )
+                    }.value
                     // Configs written before access keys existed get theirs
                     // now. Off the main actor — the CLI-owned ones are
                     // rewritten by their own tools, and that is a process
                     // launch. Republishing puts the healed pairings on the
                     // allowlist.
-                    let executable = model.generalSettings.mcpExecutable
                     let healed = await Task.detached(priority: .utility) {
                         MCPClientSetup.refreshManagedKeys(executableName: executable)
                     }.value

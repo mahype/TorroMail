@@ -67,7 +67,10 @@ public enum TorroMailAppearance {
 /// Passwords live in the macOS keychain and nowhere else. The app writes
 /// them under one service name; the policy document only ever carries the
 /// reference (`keychain://TorroMail/{account}`), which the MCP server
-/// resolves itself — macOS asks the user once to allow it.
+/// resolves itself. Each item's access list names the server binary,
+/// because the consent dialog macOS would otherwise show cannot appear
+/// for a headless process — it answers "no UI possible" and the lookup
+/// fails instead.
 public enum KeychainStore {
     public static let service = "TorroMail"
 
@@ -79,23 +82,95 @@ public enum KeychainStore {
         "keychain://\(service)/\(accountID)"
     }
 
-    public static func savePassword(_ password: String, forAccount accountID: String) throws {
+    public static func savePassword(
+        _ password: String,
+        forAccount accountID: String,
+        alsoTrusting executablePaths: [String] = []
+    ) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: accountID
         ]
-        let payload: [String: Any] = [
-            kSecValueData as String: Data(password.utf8)
-        ]
+        // Delete and re-add instead of updating in place: the access list
+        // is fixed at creation, and every save must bless the binaries as
+        // they exist right now — an update would keep the item trusting
+        // builds that are already gone.
+        SecItemDelete(query as CFDictionary)
 
-        let updateStatus = SecItemUpdate(query as CFDictionary, payload as CFDictionary)
-        if updateStatus == errSecItemNotFound {
-            let addStatus = SecItemAdd(query.merging(payload) { _, new in new } as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw Failure(status: addStatus) }
-            return
+        var attributes = query
+        attributes[kSecValueData as String] = Data(password.utf8)
+        attributes[kSecAttrAccess as String] = try access(alsoTrusting: executablePaths)
+        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
+        guard addStatus == errSecSuccess else { throw Failure(status: addStatus) }
+    }
+
+    /// The stored secret, or nil when it is missing or this process may not
+    /// read it. Callers treat both the same way: write a fresh one.
+    public static func readPassword(forAccount accountID: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: accountID,
+            kSecReturnData as String: true
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
         }
-        guard updateStatus == errSecSuccess else { throw Failure(status: updateStatus) }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Re-writes stored secrets so their access lists bless the binaries as
+    /// they are right now. Trust pins to a binary's hash while nothing is
+    /// code-signed, so every rebuild orphans the existing grants; running
+    /// this on launch heals them. An item this process may not read is
+    /// skipped — its next regular save carries the fresh list.
+    public static func refreshAccessControl(
+        forAccounts accountIDs: [String],
+        alsoTrusting executablePaths: [String]
+    ) {
+        for accountID in accountIDs {
+            guard let password = readPassword(forAccount: accountID) else {
+                NSLog("TorroMail: keychain item for %@ is unreadable, leaving it as is", accountID)
+                continue
+            }
+            do {
+                try savePassword(password, forAccount: accountID, alsoTrusting: executablePaths)
+            } catch {
+                NSLog("TorroMail: keychain access refresh for %@ failed", accountID)
+            }
+        }
+    }
+
+    /// An access list naming the app and the given executables. The MCP
+    /// server is a separate binary, so without it on the list every lookup
+    /// wants a consent dialog — and the server runs headless under an
+    /// assistant, where macOS cannot show one and fails the lookup outright.
+    /// These APIs are deprecated without a file-keychain replacement;
+    /// keychain access groups can take over once both binaries share a
+    /// code signature.
+    private static func access(alsoTrusting executablePaths: [String]) throws -> SecAccess {
+        var trusted: [SecTrustedApplication] = []
+        var appItself: SecTrustedApplication?
+        if SecTrustedApplicationCreateFromPath(nil, &appItself) == errSecSuccess,
+           let appItself {
+            trusted.append(appItself)
+        }
+        for path in executablePaths {
+            var executable: SecTrustedApplication?
+            if SecTrustedApplicationCreateFromPath(path, &executable) == errSecSuccess,
+               let executable {
+                trusted.append(executable)
+            }
+        }
+        var created: SecAccess?
+        let status = SecAccessCreate(service as CFString, trusted as CFArray, &created)
+        guard status == errSecSuccess, let created else {
+            throw Failure(status: status)
+        }
+        return created
     }
 
     /// Drops a secret. An abandoned setup writes a password to the keychain
@@ -504,6 +579,16 @@ public enum MCPClientSetup {
             return nil
         }
         return command.displayPath
+    }
+
+    /// What a fresh keychain item trusts besides the app: the server binary,
+    /// resolved the same way client configs are — the grant has to land on
+    /// the binary the assistants actually launch.
+    public static func trustedExecutablePaths(executableName: String) -> [String] {
+        guard let path = serverCommandPath(executableName: executableName) else {
+            return []
+        }
+        return [path]
     }
 
     /// Which assistants are set up to reach TorroMail — configured *and*
