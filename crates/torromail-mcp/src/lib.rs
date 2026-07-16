@@ -228,6 +228,9 @@ pub struct LineMcpServer {
     /// of calls is one login rather than one login each. `RefCell` because
     /// the stdio server hands out `&self`; single-threaded, so no lock.
     connections: RefCell<HashMap<AccountId, PooledConnection>>,
+    /// Search result sets, kept so `mail_refine_search` can narrow a prior
+    /// search by its id without rescanning every mailbox.
+    sessions: RefCell<SearchSessionStore>,
     /// Test seam: when set, this makes the mailbox instead of a TLS session.
     connect_override: Option<ConnectOverride>,
 }
@@ -241,6 +244,7 @@ impl LineMcpServer {
             policy_path: None,
             fixtures_for_unconfigured_accounts: false,
             connections: RefCell::default(),
+            sessions: RefCell::default(),
             connect_override: None,
         }
     }
@@ -328,6 +332,12 @@ impl LineMcpServer {
             return self.handle_mail_get_cache_status(arguments, id);
         }
 
+        // Refining works on a stored result set, not a live mailbox: the id
+        // is the key, and the set already passed the policy at search time.
+        if name == ToolName::MailRefineSearch.as_str() {
+            return self.handle_mail_refine_search(arguments, id);
+        }
+
         let account_id = AccountId::new(arguments["account_id"].as_str().unwrap_or_default());
         if name == ToolName::MailGetPolicy.as_str() {
             return self.handle_mail_get_policy(&account_id, id);
@@ -335,7 +345,8 @@ impl LineMcpServer {
 
         if name == ToolName::MailSearch.as_str() {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
-                handle_mail_search(arguments, &account_id, provider, engine)
+                let mut sessions = self.sessions.borrow_mut();
+                handle_mail_search(arguments, &account_id, provider, engine, &mut sessions)
             });
         }
         if name == ToolName::MailGetMessage.as_str() {
@@ -416,6 +427,20 @@ impl LineMcpServer {
         match &self.connect_override {
             Some(connect) => connect(account_id),
             None => open_provider(account_id, facts),
+        }
+    }
+
+    /// Narrow a prior search by its id. The stored hits already passed the
+    /// policy when the search ran, and refining only removes hits, so this
+    /// needs neither a connection nor a fresh authorization.
+    fn handle_mail_refine_search(&self, arguments: &Value, id: &Value) -> String {
+        let result_set_id = arguments["result_set_id"].as_str().unwrap_or_default();
+        let refinement = arguments["refinement"].as_str().unwrap_or_default();
+
+        let mut sessions = self.sessions.borrow_mut();
+        match sessions.refine(result_set_id, refinement, 100) {
+            Ok(result_set) => json_rpc_text_result(id, &result_set_payload(&result_set)),
+            Err(error) => json_rpc_error(id, -32000, &error.to_string()),
         }
     }
 
@@ -786,6 +811,7 @@ fn handle_mail_search(
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
+    sessions: &mut SearchSessionStore,
 ) -> ToolResult {
     let query = arguments["query"].as_str().unwrap_or_default();
     let mailbox = arguments["mailbox"].as_str();
@@ -793,13 +819,17 @@ fn handle_mail_search(
 
     let window = search_window(arguments).map_err(ToolFailure::InvalidParams)?;
 
-    let mut sessions = SearchSessionStore::default();
-    let mut service = MailAccessService::new(provider, engine, &mut sessions);
-
+    let mut service = MailAccessService::new(provider, engine, sessions);
     let result_set = service
         .search(account_id, query, mailbox, limit, &window, 100)
         .map_err(ToolFailure::Core)?;
 
+    Ok(result_set_payload(&result_set))
+}
+
+/// The wire shape of a result set — the same for a fresh search and a
+/// refinement, so a client sees one kind of answer.
+fn result_set_payload(result_set: &torromail_core::SearchResultSet) -> Value {
     let hits = result_set
         .hits()
         .iter()
@@ -812,10 +842,10 @@ fn handle_mail_search(
             })
         })
         .collect::<Vec<_>>();
-    Ok(json!({
+    json!({
         "result_set_id": result_set.id(),
         "hits": hits
-    }))
+    })
 }
 
 /// The `since` / `before` arguments as an IMAP-ready date window. Clients

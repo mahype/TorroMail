@@ -621,6 +621,44 @@ fn a_well_formed_search_date_is_accepted() {
 }
 
 #[test]
+fn a_search_can_be_refined_by_its_id() {
+    let server = LineMcpServer::fixture();
+
+    // The fixture holds two messages; an empty query returns both.
+    let search = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":""}}}"#,
+        )
+        .expect("a response");
+    assert!(search.contains("result-set-1"));
+    assert!(search.contains("Quarterly invoice"));
+    assert!(search.contains("Team notes"));
+
+    // Refining the stored set by id keeps only the matching hit — no rescan,
+    // and no account or connection needed.
+    let refined = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"mail_refine_search","arguments":{"result_set_id":"result-set-1","refinement":"team"}}}"#,
+        )
+        .expect("a response");
+    assert!(refined.contains("Team notes"), "got: {refined}");
+    assert!(!refined.contains("Quarterly invoice"), "got: {refined}");
+}
+
+#[test]
+fn refining_an_unknown_result_set_is_refused() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"mail_refine_search","arguments":{"result_set_id":"result-set-999","refinement":"x"}}}"#,
+        )
+        .expect("a response");
+
+    assert!(response.contains(r#""code":-32000"#));
+    assert!(response.contains("result set not found"));
+}
+
+#[test]
 fn tool_list_serializes_without_secrets_or_local_paths() {
     let manifest = ToolCatalog::default().to_mcp_tools_json();
 

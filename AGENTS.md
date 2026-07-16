@@ -98,8 +98,7 @@ Read/search tools:
 - `mail_search`
 - `mail_get_message`
 - `mail_list_mailboxes`
-- `mail_refine_search` — **not implemented**. Needs result sets that outlive a
-  tool call; `SearchSessionStore` is built per call today.
+- `mail_refine_search`
 - `mail_get_thread` — **not implemented**. Plain IMAP has no thread identity,
   so the provider reports each message as its own thread.
 
