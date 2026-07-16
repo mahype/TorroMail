@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use torromail_core::{
     AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
     ImapProviderConfig, MailAccessService, MailProvider, MarkChange, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, StoredMessage,
+    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
 };
 use torromail_imap_tls::TlsImapMailProvider;
 use torromail_oauth::TokenSet;
@@ -105,13 +105,13 @@ impl ToolDescriptor {
     fn input_schema_json(&self) -> &'static str {
         match self.name {
             ToolName::MailSearch => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"query":{"type":"string","description":"Full-text query. Leave empty for the newest messages, no filter."},"mailbox":{"type":"string","description":"Defaults to every readable mailbox; an empty query defaults to INBOX."},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["account_id"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"query":{"type":"string","description":"Full-text query. Leave empty for the newest messages, no filter."},"mailbox":{"type":"string","description":"Defaults to every readable mailbox; an empty query with no date defaults to INBOX."},"since":{"type":"string","description":"Only messages on or after this ISO date (YYYY-MM-DD)."},"before":{"type":"string","description":"Only messages before this ISO date (YYYY-MM-DD)."},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["account_id"]}"#
             }
             ToolName::MailRefineSearch => {
                 r#"{"type":"object","properties":{"result_set_id":{"type":"string"},"refinement":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["result_set_id","refinement"]}"#
             }
             ToolName::MailGetMessage => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"include_body":{"type":"boolean"},"include_attachments":{"type":"boolean"}},"required":["account_id","message_id"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"include_body":{"type":"boolean"}},"required":["account_id","message_id"]}"#
             }
             ToolName::MailGetThread => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"thread_id":{"type":"string"},"include_bodies":{"type":"boolean"}},"required":["account_id","thread_id"]}"#
@@ -120,7 +120,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"}},"required":["account_id"]}"#
             }
             ToolName::MailMark => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"mailbox":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"}},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","mailbox","message_ids","mark"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"}},"required":["account_id","to","subject","body"]}"#
@@ -596,10 +596,11 @@ impl MailProvider for RuntimeProvider {
         query: &str,
         mailbox: Option<&str>,
         limit: usize,
+        window: &SearchWindow,
     ) -> CoreResult<Vec<SearchHit>> {
         match self {
-            Self::Fixture(provider) => provider.search(account_id, query, mailbox, limit),
-            Self::Imap(provider) => provider.search(account_id, query, mailbox, limit),
+            Self::Fixture(provider) => provider.search(account_id, query, mailbox, limit, window),
+            Self::Imap(provider) => provider.search(account_id, query, mailbox, limit, window),
         }
     }
 
@@ -682,10 +683,15 @@ fn handle_mail_search(
     let mailbox = arguments["mailbox"].as_str();
     let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
 
+    let window = match search_window(arguments) {
+        Ok(window) => window,
+        Err(message) => return json_rpc_error(id, -32602, &message),
+    };
+
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
-    match service.search(account_id, query, mailbox, limit, 100) {
+    match service.search(account_id, query, mailbox, limit, &window, 100) {
         Ok(result_set) => {
             let hits = result_set
                 .hits()
@@ -709,6 +715,47 @@ fn handle_mail_search(
         }
         Err(error) => json_rpc_error(id, -32000, &error.to_string()),
     }
+}
+
+/// The `since` / `before` arguments as an IMAP-ready date window. Clients
+/// speak ISO `YYYY-MM-DD`; IMAP wants `DD-Mon-YYYY`, so the conversion — and
+/// the validation that rejects a nonsense date up front — lives here.
+fn search_window(arguments: &Value) -> Result<SearchWindow, String> {
+    Ok(SearchWindow {
+        since: imap_date(arguments, "since")?,
+        before: imap_date(arguments, "before")?,
+    })
+}
+
+fn imap_date(arguments: &Value, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = arguments[field].as_str() else {
+        return Ok(None);
+    };
+    to_imap_date(value)
+        .map(Some)
+        .ok_or_else(|| format!("{field} must be an ISO date like 2026-07-08"))
+}
+
+/// `2026-07-08` → `08-Jul-2026`, the only date form IMAP SEARCH accepts.
+/// `None` for anything that is not a real calendar date.
+fn to_imap_date(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let mut parts = iso.split('-');
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let name = MONTHS.get(month.checked_sub(1)?)?;
+    if !(1..=31).contains(&day) || !(1000..=9999).contains(&year) {
+        return None;
+    }
+    Some(format!("{day:02}-{name}-{year}"))
 }
 
 fn handle_mail_get_message(
@@ -853,7 +900,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
     vec![
         read(
             ToolName::MailSearch,
-            "Search one mail account and return a reusable result set, newest first. An empty query returns the latest messages instead of filtering.",
+            "Search one mail account and return a reusable result set, newest first. An empty query returns the latest messages instead of filtering; since/before narrow any search to a date range.",
         ),
         read(
             ToolName::MailRefineSearch,

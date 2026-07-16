@@ -9,7 +9,10 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
-use crate::{AccountId, CoreError, CoreResult, MailProvider, MarkChange, SearchHit, StoredMessage};
+use crate::{
+    AccountId, CoreError, CoreResult, MailProvider, MarkChange, SearchHit, SearchWindow,
+    StoredMessage,
+};
 
 /// A pointer to a credential in the platform keychain — never the
 /// credential itself.
@@ -215,18 +218,34 @@ impl<T: ImapTransport> ImapClient<T> {
             .collect())
     }
 
-    /// UIDs matching `query`, ascending — oldest first, as IMAP hands them
-    /// over. A blank query asks for the whole mailbox: `TEXT ""` would tell
-    /// the server to match every message against nothing, which servers
-    /// answer inconsistently, so the criterion becomes `ALL`.
-    pub fn uid_search(&mut self, mailbox: &str, query: &str) -> CoreResult<Vec<u32>> {
+    /// UIDs matching `query` within `window`, ascending — oldest first, as
+    /// IMAP hands them over. Criteria are space-separated and ANDed: a text
+    /// match, a `SINCE`, a `BEFORE`. With none of them the criterion is
+    /// `ALL`, because `TEXT ""` tells the server to match every message
+    /// against nothing, which servers answer inconsistently.
+    pub fn uid_search(
+        &mut self,
+        mailbox: &str,
+        query: &str,
+        window: &SearchWindow,
+    ) -> CoreResult<Vec<u32>> {
         self.select(mailbox)?;
-        let criteria = if query.trim().is_empty() {
-            "ALL".to_owned()
-        } else {
-            format!("TEXT {}", imap_quoted(query))
-        };
-        let lines = self.command(&format!("UID SEARCH {criteria}"))?;
+
+        let mut criteria = Vec::new();
+        if !query.trim().is_empty() {
+            criteria.push(format!("TEXT {}", imap_quoted(query)));
+        }
+        if let Some(since) = &window.since {
+            criteria.push(format!("SINCE {since}"));
+        }
+        if let Some(before) = &window.before {
+            criteria.push(format!("BEFORE {before}"));
+        }
+        if criteria.is_empty() {
+            criteria.push("ALL".to_owned());
+        }
+
+        let lines = self.command(&format!("UID SEARCH {}", criteria.join(" ")))?;
         let mut uids = Vec::new();
         for line in &lines {
             if let Some(rest) = line.text.strip_prefix("* SEARCH") {
@@ -243,7 +262,7 @@ impl<T: ImapTransport> ImapClient<T> {
     pub fn uid_fetch(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedMessage> {
         self.select(mailbox)?;
         let lines = self.command(&format!(
-            "UID FETCH {uid} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)] BODY.PEEK[TEXT])"
+            "UID FETCH {uid} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT])"
         ))?;
         let fetch = lines
             .iter()
@@ -253,17 +272,25 @@ impl<T: ImapTransport> ImapClient<T> {
             })?;
 
         // Literals arrive in the order the command asked: the header block
-        // first, then the text.
+        // first, then the raw body text.
         let headers = fetch
             .literals
             .first()
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .unwrap_or_default();
-        let body = fetch
+        let raw_body = fetch
             .literals
             .get(1)
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .unwrap_or_default();
+
+        // The body arrives MIME-encoded — multipart, transfer-encoded, often
+        // HTML. Unwrap it to readable text once, here, so nothing downstream
+        // has to know MIME.
+        let content_type = header_field(&headers, "content-type").unwrap_or_default();
+        let transfer_encoding =
+            header_field(&headers, "content-transfer-encoding").unwrap_or_default();
+        let body = crate::mime::body_to_text(&raw_body, &content_type, &transfer_encoding);
 
         Ok(FetchedMessage {
             uid,
@@ -366,15 +393,17 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         query: &str,
         mailbox: Option<&str>,
         limit: usize,
+        window: &SearchWindow,
     ) -> CoreResult<Vec<SearchHit>> {
         self.guard(account_id)?;
         let mut client = self.client.borrow_mut();
-        // An unfiltered search means "the latest mail", and the latest mail
-        // means the inbox: UIDs only rank messages within one mailbox, so
-        // folding several together would order them by nothing at all.
+        // A search with neither text nor date means "the latest mail", and
+        // the latest mail means the inbox: UIDs only rank messages within one
+        // mailbox, so folding several together would order them by nothing at
+        // all. A date-only search still has a criterion, so it fans out.
         let mailboxes = match mailbox {
             Some(name) => vec![name.to_owned()],
-            None if query.trim().is_empty() => vec!["INBOX".to_owned()],
+            None if query.trim().is_empty() && window.is_unbounded() => vec!["INBOX".to_owned()],
             None => client.list_mailboxes()?,
         };
 
@@ -385,7 +414,7 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
             }
             // Newest first: UIDs ascend with arrival, and a limit has to cut
             // off the oldest messages, not the ones the caller asked about.
-            let mut uids = client.uid_search(&mailbox, query)?;
+            let mut uids = client.uid_search(&mailbox, query, window)?;
             uids.reverse();
             for uid in uids {
                 if hits.len() >= limit {
@@ -655,28 +684,15 @@ fn decode_one_encoded_word(text: &str) -> Option<(String, &str)> {
     let remainder = remainder.strip_prefix("?=")?;
 
     let bytes = match encoding {
-        "B" | "b" => decode_base64(payload)?,
+        "B" | "b" => crate::mime::decode_base64(payload)?,
         "Q" | "q" => decode_q_encoding(payload)?,
         _ => return None,
     };
-    Some((decode_charset(charset, &bytes)?, remainder))
+    Some((crate::mime::decode_charset(charset, &bytes)?, remainder))
 }
 
-/// The charsets we can turn into text without a lookup table. UTF-8 covers
-/// almost all mail; Latin-1 maps one byte to one code point exactly. Others
-/// return `None` rather than a guess.
-fn decode_charset(charset: &str, bytes: &[u8]) -> Option<String> {
-    if charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("us-ascii") {
-        return Some(String::from_utf8_lossy(bytes).into_owned());
-    }
-    if charset.eq_ignore_ascii_case("iso-8859-1") {
-        return Some(bytes.iter().map(|&byte| char::from(byte)).collect());
-    }
-    None
-}
-
-/// Standard base64, padded. Hand-rolled for the same reason the decoder below
-/// is: torromail-core carries no dependencies, and this is twenty lines.
+/// Standard base64, padded. Hand-rolled for the same reason the MIME decoders
+/// are: torromail-core carries no dependencies, and this is twenty lines.
 fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -700,37 +716,6 @@ fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     encoded
-}
-
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-
-    for character in text.chars() {
-        if character == '=' {
-            break;
-        }
-        let value = base64_value(character)?;
-        buffer = (buffer << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push((buffer >> bits) as u8);
-        }
-    }
-    Some(bytes)
-}
-
-fn base64_value(character: char) -> Option<u8> {
-    match character {
-        'A'..='Z' => Some(character as u8 - b'A'),
-        'a'..='z' => Some(character as u8 - b'a' + 26),
-        '0'..='9' => Some(character as u8 - b'0' + 52),
-        '+' => Some(62),
-        '/' => Some(63),
-        _ => None,
-    }
 }
 
 /// Quoted-printable as encoded-words use it: `=XX` hex escapes, plus the one

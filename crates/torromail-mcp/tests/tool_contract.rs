@@ -162,7 +162,7 @@ fn mcp_server_reads_single_messages_through_the_policy() {
 fn mcp_server_enforces_the_mark_permission() {
     let server = LineMcpServer::fixture();
     let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"seen"}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","message_ids":["m1"],"mark":"seen"}}}"#,
     ).expect("a request gets a response");
 
     // The fixture account runs on the read + drafts default, so marking is
@@ -175,7 +175,7 @@ fn mcp_server_enforces_the_mark_permission() {
 fn mail_mark_rejects_unknown_flag_names() {
     let server = LineMcpServer::fixture();
     let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"starred"}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","message_ids":["m1"],"mark":"starred"}}}"#,
     ).expect("a request gets a response");
 
     assert!(response.contains(r#""code":-32602"#));
@@ -199,7 +199,7 @@ fn policy_document_permissions_reach_the_tools() {
 
     let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
     let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","mailbox":"INBOX","message_ids":["m1"],"mark":"seen"}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","message_ids":["m1"],"mark":"seen"}}}"#,
     ).expect("a request gets a response");
     std::fs::remove_file(&path).ok();
 
@@ -437,6 +437,35 @@ fn an_empty_query_asks_for_the_latest_mail_instead_of_failing() {
 }
 
 #[test]
+fn a_malformed_search_date_is_refused_before_touching_the_mailbox() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","since":"last tuesday"}}}"#,
+        )
+        .expect("a request gets a response");
+
+    // A bad date is the client's mistake, not a server failure: invalid
+    // params, and no search runs.
+    assert!(response.contains(r#""code":-32602"#));
+    assert!(response.contains("ISO date"));
+}
+
+#[test]
+fn a_well_formed_search_date_is_accepted() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","since":"2026-07-01"}}}"#,
+        )
+        .expect("a request gets a response");
+
+    // The fixture ignores the window, but the date parsed and the search ran.
+    assert!(response.contains("result-set-1"));
+    assert!(!response.contains("error"));
+}
+
+#[test]
 fn tool_list_serializes_without_secrets_or_local_paths() {
     let manifest = ToolCatalog::default().to_mcp_tools_json();
 
@@ -445,6 +474,20 @@ fn tool_list_serializes_without_secrets_or_local_paths() {
     assert!(!manifest.contains("password"));
     assert!(!manifest.contains("token"));
     assert!(!manifest.contains("/Users/"));
+}
+
+/// The schema must promise only what the tools actually do. Both of these
+/// were advertised and then ignored — a client that trusts them is misled.
+#[test]
+fn the_schema_does_not_advertise_arguments_the_tools_ignore() {
+    let manifest = ToolCatalog::default().to_mcp_tools_json();
+
+    // Attachments are never fetched, so mail_get_message must not offer to
+    // include them.
+    assert!(!manifest.contains("include_attachments"));
+    // A message id already carries its mailbox; mail_mark reads the mailbox
+    // from there, never from a separate argument.
+    assert!(!manifest.contains(r#"required":["account_id","mailbox""#));
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use torromail_core::{
     AccountId, CoreResult, ImapAuth, ImapClient, ImapMailProvider, ImapTransport, MailProvider,
-    MarkChange, SearchHit, StreamImapTransport,
+    MarkChange, SearchHit, SearchWindow, StreamImapTransport,
 };
 
 #[derive(Debug)]
@@ -159,7 +159,7 @@ fn searching_selects_searches_and_fetches_hits() {
     let provider = ImapMailProvider::new(account_id.clone(), client);
 
     let hits = provider
-        .search(&account_id, "invoice", Some("INBOX"), 10)
+        .search(&account_id, "invoice", Some("INBOX"), 10, &SearchWindow::default())
         .expect("search succeeds");
 
     assert_eq!(hits.len(), 1);
@@ -196,6 +196,56 @@ fn fetched_messages_carry_flags_and_body() {
     assert_eq!(message.body(), "Invoice body");
     assert!(message.seen());
     assert!(!message.flagged());
+}
+
+/// The real shape of promotional mail, in miniature: a multipart/alternative
+/// with a quoted-printable text part and an HTML part that should lose. The
+/// whole fetch→decode path has to hand back readable words, not MIME.
+const MULTIPART_HEADERS: &str = concat!(
+    "Subject: Angebot\r\n",
+    "From: info@mail.clark.de\r\n",
+    "Content-Type: multipart/alternative; boundary=\"Xes\"\r\n",
+    "\r\n",
+);
+const MULTIPART_BODY: &str = concat!(
+    "--Xes\r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n",
+    "Content-Transfer-Encoding: quoted-printable\r\n",
+    "\r\n",
+    "Altersvorsorge f=C3=BCr dich =E2=80=93 jetzt=\r\n",
+    " clever vorsorgen\r\n",
+    "--Xes\r\n",
+    "Content-Type: text/html; charset=utf-8\r\n",
+    "\r\n",
+    "<html><body><p>Diese HTML-Fassung soll verlieren</p></body></html>\r\n",
+    "--Xes--\r\n",
+);
+
+#[test]
+fn a_multipart_message_is_delivered_as_readable_text() {
+    let mut script = login_script();
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    script.extend(fetch_script("t3", 101, "", MULTIPART_HEADERS, MULTIPART_BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let message = provider
+        .get_message(&account_id, "INBOX/101")
+        .expect("fetch succeeds");
+
+    // The plain part wins, its quoted-printable and soft line break undone;
+    // the HTML fallback never surfaces.
+    assert_eq!(
+        message.body(),
+        "Altersvorsorge für dich – jetzt clever vorsorgen"
+    );
+    assert!(!message.body().contains("HTML-Fassung"));
 }
 
 #[test]
@@ -287,7 +337,7 @@ fn the_provider_answers_only_for_its_own_account() {
 
     assert!(
         provider
-            .search(&AccountId::new("other"), "invoice", None, 10)
+            .search(&AccountId::new("other"), "invoice", None, 10, &SearchWindow::default())
             .is_err()
     );
 }
@@ -377,7 +427,7 @@ fn an_empty_query_asks_the_server_for_everything_newest_first() {
     let provider = ImapMailProvider::new(account_id.clone(), client);
 
     let hits = provider
-        .search(&account_id, "", None, 10)
+        .search(&account_id, "", None, 10, &SearchWindow::default())
         .expect("search succeeds");
 
     // No mailbox and no query: the inbox, unfiltered — never a LIST that
@@ -411,7 +461,7 @@ fn a_limit_cuts_off_the_oldest_mail_not_the_newest() {
     let provider = ImapMailProvider::new(account_id.clone(), client);
 
     let hits = provider
-        .search(&account_id, "", Some("INBOX"), 1)
+        .search(&account_id, "", Some("INBOX"), 1, &SearchWindow::default())
         .expect("search succeeds");
 
     // One hit asked for, out of three: it must be the newest, and the other
@@ -470,4 +520,72 @@ fn a_rejected_token_gets_the_empty_reply_the_server_waits_for() {
     assert!(error.contains("Invalid credentials"), "got: {error}");
     assert_eq!(log.lines().len(), 2, "the empty continuation reply is owed");
     assert_eq!(log.lines()[1], "", "and it must be an empty line");
+}
+
+#[test]
+fn a_date_window_narrows_the_search_to_since_and_before() {
+    let mut script = login_script();
+    script.extend([
+        line("* 1 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("* SEARCH 42"),
+        line("t3 OK SEARCH completed"),
+    ]);
+    script.extend(fetch_script("t4", 42, "", HEADERS, BODY));
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let window = SearchWindow {
+        since: Some("01-Jul-2026".to_owned()),
+        before: Some("08-Jul-2026".to_owned()),
+    };
+    provider
+        .search(&account_id, "invoice", Some("INBOX"), 10, &window)
+        .expect("search succeeds");
+
+    // The text match and both date bounds arrive as one ANDed criterion.
+    let sent = log.lines();
+    assert_eq!(
+        sent[2],
+        "t3 UID SEARCH TEXT \"invoice\" SINCE 01-Jul-2026 BEFORE 08-Jul-2026"
+    );
+}
+
+#[test]
+fn a_date_only_search_needs_no_text_criterion() {
+    let mut script = login_script();
+    script.extend([
+        line("* 1 EXISTS"),
+        line("t2 OK SELECT completed"),
+        line("* SEARCH"),
+        line("t3 OK SEARCH completed"),
+    ]);
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let window = SearchWindow {
+        since: Some("01-Jul-2026".to_owned()),
+        before: None,
+    };
+    // No query and no mailbox, but a date bound: this is a real filter, so it
+    // must stay a SINCE search — never collapse to `ALL`.
+    provider
+        .search(&account_id, "", Some("INBOX"), 10, &window)
+        .expect("search succeeds");
+
+    assert_eq!(log.lines()[2], "t3 UID SEARCH SINCE 01-Jul-2026");
 }

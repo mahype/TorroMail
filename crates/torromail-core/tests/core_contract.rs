@@ -2,7 +2,8 @@ use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
     PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, StoredMessage, WriteAccess,
+    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
+    WriteAccess,
 };
 
 #[test]
@@ -269,7 +270,7 @@ fn fixture_provider_searches_and_reads_messages_without_ui_state() {
     ]);
 
     let hits = provider
-        .search(&account_id, "invoice", Some("INBOX"), 10)
+        .search(&account_id, "invoice", Some("INBOX"), 10, &SearchWindow::default())
         .expect("fixture search succeeds");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message_id(), "m1");
@@ -304,7 +305,7 @@ fn mail_access_service_enforces_search_and_body_policy() {
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
     let result_set = service
-        .search(&account_id, "invoice", Some("INBOX"), 10, 100)
+        .search(&account_id, "invoice", Some("INBOX"), 10, &SearchWindow::default(), 100)
         .expect("search is allowed at header level");
     assert_eq!(result_set.hits().len(), 1);
 
@@ -356,7 +357,7 @@ fn mail_access_service_keeps_blocked_folders_invisible() {
 
     // A search across every folder must not leak the blocked one.
     let result_set = service
-        .search(&account_id, "invoice", None, 10, 100)
+        .search(&account_id, "invoice", None, 10, &SearchWindow::default(), 100)
         .expect("account-wide search is allowed");
     assert_eq!(result_set.hits().len(), 1);
     assert_eq!(result_set.hits()[0].message_id(), "m1");

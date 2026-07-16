@@ -1,6 +1,7 @@
 //! Portable TorroMail core.
 
 pub mod imap_provider;
+mod mime;
 
 pub use imap_provider::{
     FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport,
@@ -971,18 +972,39 @@ impl StoredMessage {
     }
 }
 
+/// An optional date window on a search, carried in IMAP's own `DD-Mon-YYYY`
+/// form (`08-Jul-2026`). Empty means unbounded. The dates are validated and
+/// converted at the MCP boundary, so anything reaching a provider is already
+/// well-formed. IMAP compares against each message's internal date, not the
+/// `Date` header a sender can fake.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchWindow {
+    /// `SINCE` — on or after this date.
+    pub since: Option<String>,
+    /// `BEFORE` — strictly before this date.
+    pub before: Option<String>,
+}
+
+impl SearchWindow {
+    pub fn is_unbounded(&self) -> bool {
+        self.since.is_none() && self.before.is_none()
+    }
+}
+
 /// The boundary fixture-backed tests and real IMAP retrieval share: search
 /// and single-message fetch, nothing that smells like an inbox.
 pub trait MailProvider {
     /// A blank query means "no filter": the newest messages the mailbox has.
     /// That is how "what came in lately?" is answered without a browsing
-    /// tool — the caller's `limit` cuts off the oldest, never the newest.
+    /// tool — the caller's `limit` cuts off the oldest, never the newest. A
+    /// `window` narrows the same search to a date range.
     fn search(
         &self,
         account_id: &AccountId,
         query: &str,
         mailbox: Option<&str>,
         limit: usize,
+        window: &SearchWindow,
     ) -> CoreResult<Vec<SearchHit>>;
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
@@ -1011,12 +1033,17 @@ impl FixtureMailProvider {
 }
 
 impl MailProvider for FixtureMailProvider {
+    /// The date window is a real IMAP server concern; the fixture models
+    /// message content, not internal dates, so it searches the whole set and
+    /// leaves date filtering to the live provider the tests below exercise
+    /// separately.
     fn search(
         &self,
         account_id: &AccountId,
         query: &str,
         mailbox: Option<&str>,
         limit: usize,
+        _window: &SearchWindow,
     ) -> CoreResult<Vec<SearchHit>> {
         Ok(self
             .messages
@@ -1100,6 +1127,7 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         query: &str,
         mailbox: Option<&str>,
         limit: usize,
+        window: &SearchWindow,
         now: u64,
     ) -> CoreResult<SearchResultSet> {
         match mailbox {
@@ -1116,7 +1144,7 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         let policy = self.policy_engine.policy(account_id)?;
         let hits = self
             .provider
-            .search(account_id, query, mailbox, limit)?
+            .search(account_id, query, mailbox, limit, window)?
             .into_iter()
             .filter(|hit| policy.allows_in(hit.mailbox(), Capability::Search))
             .collect();
