@@ -354,6 +354,11 @@ impl LineMcpServer {
                 handle_mail_get_message(arguments, &account_id, provider, engine)
             });
         }
+        if name == ToolName::MailGetThread.as_str() {
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_get_thread(arguments, &account_id, provider, engine)
+            });
+        }
         if name == ToolName::MailMark.as_str() {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 handle_mail_mark(arguments, &account_id, provider, engine)
@@ -904,7 +909,13 @@ fn handle_mail_get_message(
     let message = service
         .get_message(account_id, message_id, include_body)
         .map_err(ToolFailure::Core)?;
-    Ok(json!({
+    Ok(message_json(&message))
+}
+
+/// One message on the wire — the shape `mail_get_message` returns and
+/// `mail_get_thread` repeats for each message in the conversation.
+fn message_json(message: &StoredMessage) -> Value {
+    json!({
         "message_id": message.message_id(),
         "mailbox": message.mailbox(),
         "thread_id": message.thread_id(),
@@ -915,7 +926,26 @@ fn handle_mail_get_message(
         "body": message.body(),
         "seen": message.seen(),
         "flagged": message.flagged()
-    }))
+    })
+}
+
+fn handle_mail_get_thread(
+    arguments: &Value,
+    account_id: &AccountId,
+    provider: &mut dyn MailProvider,
+    engine: PolicyEngine,
+) -> ToolResult {
+    let thread_id = arguments["thread_id"].as_str().unwrap_or_default();
+    let include_bodies = arguments["include_bodies"].as_bool().unwrap_or(false);
+
+    let mut sessions = SearchSessionStore::default();
+    let service = MailAccessService::new(provider, engine, &mut sessions);
+
+    let messages = service
+        .get_thread(account_id, thread_id, include_bodies)
+        .map_err(ToolFailure::Core)?;
+    let messages = messages.iter().map(message_json).collect::<Vec<_>>();
+    Ok(json!({ "thread_id": thread_id, "messages": messages }))
 }
 
 fn handle_mail_mark(

@@ -285,6 +285,58 @@ fn a_multipart_message_is_delivered_as_readable_text() {
 }
 
 #[test]
+fn a_thread_is_reconstructed_from_the_reference_headers() {
+    let mut script = login_script();
+    // get_thread(INBOX/10): select, fetch the reference headers of 10.
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    let refs = "Message-ID: <root@example.com>\r\n\r\n";
+    script.extend([
+        line(&format!(
+            "* 1 FETCH (BODY[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)] {{{}}}",
+            refs.len()
+        )),
+        Incoming::Bytes(refs.as_bytes().to_vec()),
+        line(")"),
+        line("t3 OK FETCH completed"),
+    ]);
+    // The one id — <root@example.com> — searched two ways: the root itself,
+    // then whatever references it.
+    script.extend([
+        line("* SEARCH 10"),
+        line("t4 OK SEARCH completed"),
+        line("* SEARCH 11"),
+        line("t5 OK SEARCH completed"),
+    ]);
+    // Then each message is fetched in full, oldest uid first.
+    let root_headers = "Subject: Root\r\nFrom: a@example.com\r\n\r\n";
+    let reply_headers = "Subject: Re: Root\r\nFrom: b@example.com\r\n\r\n";
+    script.extend(fetch_script("t6", 10, "", root_headers, "root body"));
+    script.extend(fetch_script("t7", 11, "", reply_headers, "reply body"));
+
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let thread = provider
+        .get_thread(&account_id, "INBOX/10")
+        .expect("thread assembles");
+
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[0].subject(), "Root");
+    assert_eq!(thread[1].subject(), "Re: Root");
+
+    let sent = log.lines();
+    assert_eq!(sent[3], "t4 UID SEARCH HEADER \"Message-ID\" \"root@example.com\"");
+    assert_eq!(sent[4], "t5 UID SEARCH HEADER \"References\" \"root@example.com\"");
+}
+
+#[test]
 fn marking_sends_a_uid_store_and_reuses_the_selection() {
     let mut script = login_script();
     script.extend([

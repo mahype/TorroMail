@@ -1009,6 +1009,16 @@ pub trait MailProvider {
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
 
+    /// Every message in the conversation `thread_id` names, oldest first.
+    /// Plain IMAP has no thread identity, so a provider assembles this from
+    /// the `References`/`In-Reply-To` headers; a mailbox that cannot relate
+    /// two messages answers with the one it was asked about.
+    fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+    ) -> CoreResult<Vec<StoredMessage>>;
+
     fn mark(
         &mut self,
         account_id: &AccountId,
@@ -1037,6 +1047,14 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
         (**self).get_message(account_id, message_id)
+    }
+
+    fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+    ) -> CoreResult<Vec<StoredMessage>> {
+        (**self).get_thread(account_id, thread_id)
     }
 
     fn mark(
@@ -1105,6 +1123,24 @@ impl MailProvider for FixtureMailProvider {
             .find(|message| &message.account_id == account_id && message.message_id == message_id)
             .cloned()
             .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))
+    }
+
+    fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+    ) -> CoreResult<Vec<StoredMessage>> {
+        let messages: Vec<StoredMessage> = self
+            .messages
+            .iter()
+            .filter(|message| &message.account_id == account_id && message.thread_id == thread_id)
+            .cloned()
+            .collect();
+
+        if messages.is_empty() {
+            return Err(CoreError::MessageNotFound(thread_id.to_owned()));
+        }
+        Ok(messages)
     }
 
     fn mark(
@@ -1213,6 +1249,44 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         let mut header_only = message;
         header_only.body = String::new();
         Ok(header_only)
+    }
+
+    /// A thread, folder-checked message by message. A conversation can span
+    /// folders — a reply filed away, the original in the inbox — so any
+    /// message in a blocked folder simply drops out rather than sinking the
+    /// whole thread, and bodies follow the same `include_bodies` rule as a
+    /// single fetch.
+    pub fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+        include_bodies: bool,
+    ) -> CoreResult<Vec<StoredMessage>> {
+        self.policy_engine
+            .authorize(account_id, Capability::ReadHeaders)?;
+        let messages = self.provider.get_thread(account_id, thread_id)?;
+
+        let mut visible = Vec::new();
+        for mut message in messages {
+            if self
+                .policy_engine
+                .authorize_in(account_id, message.mailbox(), Capability::ReadHeaders)
+                .is_err()
+            {
+                continue;
+            }
+
+            let keep_body = include_bodies
+                && self
+                    .policy_engine
+                    .authorize_in(account_id, message.mailbox(), Capability::ReadBody)
+                    .is_ok();
+            if !keep_body {
+                message.body = String::new();
+            }
+            visible.push(message);
+        }
+        Ok(visible)
     }
 
     /// Only folders the policy grants anything on exist for assistants —

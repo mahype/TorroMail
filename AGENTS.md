@@ -99,8 +99,8 @@ Read/search tools:
 - `mail_get_message`
 - `mail_list_mailboxes`
 - `mail_refine_search`
-- `mail_get_thread` — **not implemented**. Plain IMAP has no thread identity,
-  so the provider reports each message as its own thread.
+- `mail_get_thread` — plain IMAP has no thread identity, so a thread is
+  reconstructed from the `References`/`In-Reply-To` headers within one mailbox.
 
 Direct write tools (no approval, gated by the mark permission):
 

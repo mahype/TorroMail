@@ -5,6 +5,7 @@
 //! Debug output, so configs can travel through logs and diagnostics safely.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -124,6 +125,15 @@ pub struct FetchedSummary {
     pub subject: String,
     pub sender: String,
     pub date: String,
+}
+
+/// The header fields that relate one message to the rest of its conversation.
+/// Plain IMAP has no thread id, so this is how a thread is reconstructed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThreadHeaders {
+    pub message_id: Option<String>,
+    pub references: Vec<String>,
+    pub in_reply_to: Vec<String>,
 }
 
 /// One untagged response line, with any literals it carried in order.
@@ -257,17 +267,7 @@ impl<T: ImapTransport> ImapClient<T> {
         }
 
         let lines = self.command(&format!("UID SEARCH {}", criteria.join(" ")))?;
-        let mut uids = Vec::new();
-        for line in &lines {
-            if let Some(rest) = line.text.strip_prefix("* SEARCH") {
-                for token in rest.split_whitespace() {
-                    if let Ok(uid) = token.parse() {
-                        uids.push(uid);
-                    }
-                }
-            }
-        }
-        Ok(uids)
+        Ok(collect_search_uids(&lines))
     }
 
     pub fn uid_fetch(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedMessage> {
@@ -340,6 +340,57 @@ impl<T: ImapTransport> ImapClient<T> {
             sender: header_field(&headers, "from").unwrap_or_default(),
             date: header_field(&headers, "date").unwrap_or_default(),
         })
+    }
+
+    /// The headers that tie a message to its conversation — its own id, and
+    /// the ids it answers or descends from.
+    pub fn uid_fetch_reference_headers(
+        &mut self,
+        mailbox: &str,
+        uid: u32,
+    ) -> CoreResult<ThreadHeaders> {
+        self.select(mailbox)?;
+        let lines = self.command(&format!(
+            "UID FETCH {uid} (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])"
+        ))?;
+        let fetch = lines
+            .iter()
+            .find(|line| line.text.contains("FETCH"))
+            .ok_or_else(|| {
+                CoreError::ProviderFailure(format!("no FETCH response for uid {uid}"))
+            })?;
+        let headers = fetch
+            .literals
+            .first()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
+
+        Ok(ThreadHeaders {
+            message_id: parse_message_ids(&header_field(&headers, "message-id").unwrap_or_default())
+                .into_iter()
+                .next(),
+            references: parse_message_ids(&header_field(&headers, "references").unwrap_or_default()),
+            in_reply_to: parse_message_ids(
+                &header_field(&headers, "in-reply-to").unwrap_or_default(),
+            ),
+        })
+    }
+
+    /// UIDs whose `field` header contains `value` — a substring match, which
+    /// is how a message-id is found inside a `References` list.
+    pub fn uid_search_header(
+        &mut self,
+        mailbox: &str,
+        field: &str,
+        value: &str,
+    ) -> CoreResult<Vec<u32>> {
+        self.select(mailbox)?;
+        let lines = self.command(&format!(
+            "UID SEARCH HEADER {} {}",
+            imap_quoted(field),
+            imap_quoted(value)
+        ))?;
+        Ok(collect_search_uids(&lines))
     }
 
     pub fn uid_store(&mut self, mailbox: &str, uid: u32, change: MarkChange) -> CoreResult<()> {
@@ -501,6 +552,57 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         Ok(message)
     }
 
+    /// The conversation `thread_id` (a `mailbox/uid`) belongs to, reconstructed
+    /// from headers: the message-ids that identify it, and every message in the
+    /// same mailbox that carries one of them in `Message-ID` or `References`.
+    /// Threads that cross mailboxes are not chased — a UID names a mailbox, so
+    /// staying in one keeps the ordering honest.
+    fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+    ) -> CoreResult<Vec<StoredMessage>> {
+        self.guard(account_id)?;
+        let (mailbox, uid) = self.split_message_id(thread_id)?;
+
+        // The ids that identify this conversation: the message's own, and the
+        // ancestors it names.
+        let mut ids;
+        {
+            let mut client = self.client.borrow_mut();
+            let headers = client.uid_fetch_reference_headers(mailbox, uid)?;
+            ids = headers.references;
+            ids.extend(headers.in_reply_to);
+            if let Some(message_id) = headers.message_id {
+                ids.push(message_id);
+            }
+        }
+
+        // Every uid that is one of those ids, or lists one among its
+        // references. The message asked about is always in.
+        let mut uids = BTreeSet::new();
+        uids.insert(uid);
+        {
+            let mut client = self.client.borrow_mut();
+            for id in &ids {
+                for found in client.uid_search_header(mailbox, "Message-ID", id)? {
+                    uids.insert(found);
+                }
+                for found in client.uid_search_header(mailbox, "References", id)? {
+                    uids.insert(found);
+                }
+            }
+        }
+
+        // Oldest first: uids ascend with arrival. Fetch outside any client
+        // borrow — `get_message` takes its own.
+        let mut messages = Vec::with_capacity(uids.len());
+        for found in uids {
+            messages.push(self.get_message(account_id, &format!("{mailbox}/{found}"))?);
+        }
+        Ok(messages)
+    }
+
     fn mark(
         &mut self,
         account_id: &AccountId,
@@ -591,6 +693,38 @@ fn imap_quoted(value: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+/// The UIDs an untagged `* SEARCH` line carries. Shared by the plain search
+/// and the header search — the reply format is the same.
+fn collect_search_uids(lines: &[ResponseLine]) -> Vec<u32> {
+    let mut uids = Vec::new();
+    for line in lines {
+        if let Some(rest) = line.text.strip_prefix("* SEARCH") {
+            uids.extend(rest.split_whitespace().filter_map(|token| token.parse::<u32>().ok()));
+        }
+    }
+    uids
+}
+
+/// The `<...>` message-ids in a header value. `Message-ID` holds one;
+/// `References` holds a whitespace-separated list. Anything not in angle
+/// brackets is ignored.
+fn parse_message_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('>') else {
+            break;
+        };
+        let id = after[..close].trim();
+        if !id.is_empty() {
+            ids.push(id.to_owned());
+        }
+        rest = &after[close + 1..];
+    }
+    ids
 }
 
 /// `{N}` at the end of a line announces N literal bytes.

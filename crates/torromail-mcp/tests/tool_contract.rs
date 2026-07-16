@@ -40,6 +40,14 @@ impl MailProvider for FailingOnce {
         self.inner.get_message(account_id, message_id)
     }
 
+    fn get_thread(
+        &self,
+        account_id: &AccountId,
+        thread_id: &str,
+    ) -> CoreResult<Vec<StoredMessage>> {
+        self.inner.get_thread(account_id, thread_id)
+    }
+
     fn mark(
         &mut self,
         account_id: &AccountId,
@@ -294,7 +302,7 @@ fn mcp_server_rejects_unknown_tool_calls() {
 fn known_but_unimplemented_tools_say_so_instead_of_vanishing() {
     let server = LineMcpServer::fixture();
     let response = server.handle_line(
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_get_thread","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_prepare_send","arguments":{}}}"#,
     ).expect("a request gets a response");
 
     assert!(response.contains(r#""code":-32000"#));
@@ -656,6 +664,61 @@ fn refining_an_unknown_result_set_is_refused() {
 
     assert!(response.contains(r#""code":-32000"#));
     assert!(response.contains("result set not found"));
+}
+
+#[test]
+fn a_thread_returns_every_message_that_shares_its_id() {
+    let path = temp_policy_path("thread");
+    fixture_account_document(&path);
+
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([
+            StoredMessage::new(
+                AccountId::new("work"),
+                "INBOX",
+                "m1",
+                "thread-1",
+                "Original question",
+                "a@example.com",
+                "s",
+                "body one",
+            ),
+            StoredMessage::new(
+                AccountId::new("work"),
+                "INBOX",
+                "m2",
+                "thread-1",
+                "Re: Original question",
+                "b@example.com",
+                "s",
+                "body two",
+            ),
+            StoredMessage::new(
+                AccountId::new("work"),
+                "INBOX",
+                "m3",
+                "thread-2",
+                "Something unrelated",
+                "c@example.com",
+                "s",
+                "body three",
+            ),
+        ])) as Box<dyn MailProvider>)
+    });
+
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"mail_get_thread","arguments":{"account_id":"work","thread_id":"thread-1","include_bodies":true}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    // Both messages of thread-1, and not the one from thread-2.
+    assert!(response.contains("Original question"), "got: {response}");
+    assert!(response.contains("Re: Original question"), "got: {response}");
+    assert!(!response.contains("Something unrelated"), "got: {response}");
+    // Bodies were requested, so they travel too.
+    assert!(response.contains("body one") && response.contains("body two"));
 }
 
 #[test]
