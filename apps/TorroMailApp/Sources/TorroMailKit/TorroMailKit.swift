@@ -181,13 +181,19 @@ public enum MCPClientKeyStore {
 
     /// Every paired client, hashes freshly computed from the stored keys —
     /// what the policy document's `clients` allowlist is built from.
+    ///
+    /// Enumeration fetches attributes only; each key's value is read in its
+    /// own query. The service also holds the mail account passwords, and a
+    /// bulk data fetch fails whole on the first item whose keychain ACL says
+    /// no (one written by a previous dev build is enough) — which would
+    /// publish an empty allowlist and lock every paired client out at once.
+    /// An unreadable key skips only its own client instead.
     public static func pairings() -> [Pairing] {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainStore.service,
             kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-            kSecReturnData as String: true
+            kSecReturnAttributes as String: true
         ]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
@@ -195,14 +201,19 @@ public enum MCPClientKeyStore {
             return []
         }
 
-        return items.compactMap { item in
+        return items.compactMap { item -> Pairing? in
             guard let account = item[kSecAttrAccount as String] as? String,
-                  account.hasPrefix(accountPrefix),
-                  let data = item[kSecValueData as String] as? Data,
-                  let token = String(data: data, encoding: .utf8) else {
+                  account.hasPrefix(accountPrefix) else {
                 return nil
             }
             let clientID = String(account.dropFirst(accountPrefix.count))
+            guard let token = token(forClient: clientID) else {
+                NSLog(
+                    "TorroMail: access key for %@ is unreadable, leaving it off the allowlist",
+                    clientID
+                )
+                return nil
+            }
             return Pairing(
                 clientID: clientID,
                 name: displayName(forClient: clientID),
