@@ -1083,7 +1083,7 @@ fn an_xoauth2_account_is_accepted_and_reaches_the_keychain() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("gmail", Some(path.clone()))
+    let error = torromail_mcp::check_account("gmail", Some(path.clone()), None)
         .expect_err("no token is stored for this account");
     std::fs::remove_file(&path).ok();
 
@@ -1104,7 +1104,7 @@ fn an_xoauth2_account_without_renewal_facts_is_refused() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("gmail", Some(path.clone()))
+    let error = torromail_mcp::check_account("gmail", Some(path.clone()), None)
         .expect_err("an xoauth2 block without a token endpoint must not parse");
     std::fs::remove_file(&path).ok();
 
@@ -1122,9 +1122,208 @@ fn an_unknown_auth_mechanism_is_refused_rather_than_guessed_at() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("work", Some(path.clone()))
+    let error = torromail_mcp::check_account("work", Some(path.clone()), None)
         .expect_err("an unknown mechanism must not fall back to a password");
     std::fs::remove_file(&path).ok();
 
     assert!(error.contains("ntlm"), "got: {error}");
+}
+
+// --- Client pairing -------------------------------------------------------
+//
+// The app hands every connected assistant an access key and publishes the
+// key's SHA-256 in the document's `clients` allowlist. These tests pin the
+// gate's contract: who gets in, what a refusal says, and when the list is
+// not enforced at all.
+
+/// The access key the paired-client tests present, and its SHA-256 exactly
+/// as the app would publish it.
+const TEST_KEY: &str = "torro_test-client_4fa1c2d8e6b7a9503f0e1d2c3b4a5968";
+const TEST_KEY_SHA256: &str = "81727766d13995a1eca96addd0da70cb703ee6f73161f8fb6689def24b9ee4cc";
+
+/// A document naming `work` in fixture mode — like `fixture_account_document`
+/// — whose allowlist admits exactly `TEST_KEY`.
+fn paired_fixture_document(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"full_message","write":{{"drafts":true}},"send":false,"per_folder":false,"folder_rules":{{}}}}],"clients":[{{"id":"test-client","name":"Test Client","token_sha256":"{TEST_KEY_SHA256}"}}]}}"#
+        ),
+    )
+    .expect("policy document written");
+}
+
+const LIST_ACCOUNTS: &str = r#"{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"mail_list_accounts","arguments":{}}}"#;
+
+#[test]
+fn an_unpaired_client_is_refused_every_tool_call() {
+    let path = temp_policy_path("gate-unpaired");
+    paired_fixture_document(&path);
+
+    // No token presented at all — a process that just spawned the binary.
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let admin = server.handle_line(LIST_ACCOUNTS).expect("a response");
+    let mailboxes = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    // The admin tools too: account names and permissions are none of an
+    // unpaired process's business.
+    for refusal in [&admin, &mailboxes] {
+        assert!(refusal.contains("-32001"), "got: {refusal}");
+        assert!(refusal.contains("not paired with TorroMail"), "got: {refusal}");
+        assert!(refusal.contains("MCP Clients"), "the refusal must say where to fix it");
+    }
+}
+
+#[test]
+fn initialize_and_tools_list_stay_open_to_an_unpaired_client() {
+    // The client has to be able to connect and see the catalog — the first
+    // tool call is where the refusal explains itself. Failing the handshake
+    // instead would bury the message in a client log.
+    let path = temp_policy_path("gate-handshake");
+    paired_fixture_document(&path);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let initialize = server
+        .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .expect("a response");
+    let tools = server
+        .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#)
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(initialize.contains("TorroMail"), "got: {initialize}");
+    assert!(tools.contains("mail_search"), "got: {tools}");
+    assert!(!initialize.contains("-32001"));
+    assert!(!tools.contains("-32001"));
+}
+
+#[test]
+fn a_wrong_key_reads_as_revoked_not_as_unpaired() {
+    let path = temp_policy_path("gate-wrong-key");
+    paired_fixture_document(&path);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some("torro_intruder_ffffffffffffffffffffffffffffffff"));
+
+    let refusal = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(refusal.contains("-32001"), "got: {refusal}");
+    assert!(
+        refusal.contains("revoked or is not valid"),
+        "a stale key should read as revoked, so the human reconnects rather than re-installs — got: {refusal}"
+    );
+}
+
+#[test]
+fn a_paired_client_passes_the_gate() {
+    let path = temp_policy_path("gate-paired");
+    paired_fixture_document(&path);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some(TEST_KEY));
+
+    let accounts = server.handle_line(LIST_ACCOUNTS).expect("a response");
+    let mailboxes = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(accounts.contains("work"), "got: {accounts}");
+    assert!(mailboxes.contains("INBOX"), "got: {mailboxes}");
+}
+
+#[test]
+fn revoking_a_key_locks_the_client_out_mid_session() {
+    let path = temp_policy_path("gate-revoked-live");
+    paired_fixture_document(&path);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some(TEST_KEY));
+
+    let before = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    // The user disconnects the client in the app: the allowlist is
+    // republished without it. The server process is still running.
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}],"clients":[]}"#,
+    )
+    .expect("policy document written");
+
+    let after = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(before.contains("INBOX"), "got: {before}");
+    assert!(
+        after.contains("-32001") && after.contains("revoked"),
+        "revocation must bite the running session, not the next one — got: {after}"
+    );
+}
+
+#[test]
+fn a_document_without_a_clients_key_enforces_nothing() {
+    // Pre-pairing documents (and hand-managed ones) keep working; the app
+    // closes the gap the moment it republishes with an allowlist.
+    let path = temp_policy_path("gate-legacy");
+    fixture_account_document(&path);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let mailboxes = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(mailboxes.contains("INBOX"), "got: {mailboxes}");
+}
+
+#[test]
+fn a_malformed_clients_entry_fails_closed() {
+    // A present-but-broken allowlist must not be read as "no allowlist" —
+    // that would turn a truncated write into an open door.
+    let path = temp_policy_path("gate-malformed");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}],"clients":[{"id":"test-client"}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some(TEST_KEY));
+
+    let refusal = server.handle_line(LIST_MAILBOXES).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(refusal.contains("-32000"), "got: {refusal}");
+    assert!(refusal.contains("token_sha256"), "got: {refusal}");
+}
+
+#[test]
+fn check_account_sits_behind_the_pairing_gate() {
+    let path = temp_policy_path("gate-check-account");
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"headers","write":{{}},"send":false,"per_folder":false,"folder_rules":{{}},"imap":{{"host":"imap.example.com","port":993,"username":"w","secret_ref":"keychain://TorroMail/torromail-absent-test-account"}}}}],"clients":[{{"id":"test-client","name":"Test Client","token_sha256":"{TEST_KEY_SHA256}"}}]}}"#
+        ),
+    )
+    .expect("policy document written");
+
+    let unpaired = torromail_mcp::check_account("work", Some(path.clone()), None)
+        .expect_err("no key, no login check");
+    let wrong = torromail_mcp::check_account(
+        "work",
+        Some(path.clone()),
+        Some("torro_intruder_ffffffffffffffffffffffffffffffff"),
+    )
+    .expect_err("a wrong key must not reach the mailbox");
+    // The right key passes the gate and fails at the (absent) keychain
+    // secret — proof the gate, not the account, was what refused above.
+    let through = torromail_mcp::check_account("work", Some(path.clone()), Some(TEST_KEY))
+        .expect_err("no secret is stored for this account");
+    std::fs::remove_file(&path).ok();
+
+    assert!(unpaired.contains("not paired"), "got: {unpaired}");
+    assert!(wrong.contains("revoked or is not valid"), "got: {wrong}");
+    assert!(through.contains("keychain"), "got: {through}");
 }

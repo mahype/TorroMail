@@ -19,7 +19,9 @@ use torromail_core::{
 };
 use torromail_oauth::TokenSet;
 
-use crate::policy_document::{DocumentAccount, OAuthFacts, parse_policy_document};
+use crate::policy_document::{
+    DocumentAccount, DocumentClient, OAuthFacts, ParsedDocument, parse_policy_document,
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
@@ -337,6 +339,11 @@ pub struct LineMcpServer {
     pending: RefCell<PendingActions>,
     /// Drafts composed this session, so `prepare_send` can name one by id.
     drafts: RefCell<DraftCache>,
+    /// SHA-256 of the access key the spawning client presented via
+    /// `TORROMAIL_TOKEN` — hashed once at startup, the plaintext is not kept.
+    /// Checked per tool call against the document's `clients` allowlist, so
+    /// a key revoked in the app locks its client out mid-session.
+    presented_token_hash: Option<String>,
     /// Test seam: when set, this makes the mailbox instead of a TLS session.
     connect_override: Option<ConnectOverride>,
 }
@@ -353,8 +360,18 @@ impl LineMcpServer {
             sessions: RefCell::default(),
             pending: RefCell::default(),
             drafts: RefCell::default(),
+            presented_token_hash: None,
             connect_override: None,
         }
+    }
+
+    /// The access key the client that spawned this process presented, or
+    /// `None` when it presented nothing. Enforcement is decided by the
+    /// policy document, not here — see `client_gate`.
+    #[must_use]
+    pub fn with_presented_token(mut self, token: Option<&str>) -> Self {
+        self.presented_token_hash = token.map(sha256_hex);
+        self
     }
 
     /// A server that enforces the policy document at `path`, reloading it on
@@ -422,6 +439,15 @@ impl LineMcpServer {
     }
 
     fn handle_tool_call(&self, request: &Value, id: &Value) -> String {
+        // The pairing check guards every tool, the read-only admin ones
+        // included — they name accounts and their permissions, which is
+        // exactly what an unpaired process has no business seeing.
+        match self.client_gate() {
+            Ok(ClientGate::Allowed) => {}
+            Ok(ClientGate::Refused(message)) => return json_rpc_error(id, -32001, message),
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        }
+
         let name = request["params"]["name"].as_str().unwrap_or_default();
         if !self.catalog.names_as_str().contains(&name) {
             return json_rpc_error(id, -32601, "tool not found");
@@ -765,11 +791,9 @@ impl LineMcpServer {
         }
     }
 
-    /// The accounts the document describes, reloaded per call. `None` means
-    /// there is no document at all — fixture mode, or an app that has not
-    /// published yet. An empty list is a different answer entirely: a
-    /// document that names no accounts grants nothing.
-    fn document_accounts(&self) -> Result<Option<Vec<DocumentAccount>>, String> {
+    /// The policy document, reloaded per call. `None` means there is no
+    /// document at all — fixture mode, or an app that has not published yet.
+    fn document(&self) -> Result<Option<ParsedDocument>, String> {
         let Some(path) = &self.policy_path else {
             return Ok(None);
         };
@@ -779,6 +803,40 @@ impl LineMcpServer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("policy document unreadable: {error}")),
         }
+    }
+
+    /// The accounts the document describes. An empty list is a different
+    /// answer than `None`: a document that names no accounts grants nothing.
+    fn document_accounts(&self) -> Result<Option<Vec<DocumentAccount>>, String> {
+        Ok(self.document()?.map(|document| document.accounts))
+    }
+
+    /// Whether the client that spawned this process may call tools. Three
+    /// verdicts: allowed, refused with a message the assistant can relay to
+    /// its human, or `Err` when the document itself is unreadable.
+    ///
+    /// No document, or a document without a `clients` key, enforces nothing —
+    /// the first serves fixture data only, the second predates pairing and
+    /// heals the moment the app republishes. A published allowlist admits
+    /// exactly the keys it names.
+    fn client_gate(&self) -> Result<ClientGate, String> {
+        let Some(document) = self.document()? else {
+            return Ok(ClientGate::Allowed);
+        };
+        let Some(clients) = document.clients else {
+            return Ok(ClientGate::Allowed);
+        };
+
+        Ok(match &self.presented_token_hash {
+            None => ClientGate::Refused(NOT_PAIRED),
+            Some(presented) => {
+                if is_paired(&clients, presented) {
+                    ClientGate::Allowed
+                } else {
+                    ClientGate::Refused(KEY_REJECTED)
+                }
+            }
+        })
     }
 
     /// The policy engine and connection facts for this call. With a policy
@@ -1061,11 +1119,31 @@ fn resolve_credential(
 /// The connection check behind the app's "Test Connection" button and the
 /// `--check-account` flag: resolve the secret, log in over TLS, count the
 /// mailboxes. No mail content is touched.
-pub fn check_account(account_id: &str, policy_path: Option<PathBuf>) -> Result<String, String> {
+pub fn check_account(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+) -> Result<String, String> {
     let path = policy_path.ok_or("no policy document path available")?;
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("policy document unreadable: {error}"))?;
-    let accounts = parse_policy_document(&text)?;
+    let document = parse_policy_document(&text)?;
+
+    // The check logs into the real mailbox, so it sits behind the same
+    // pairing gate as the tools. The app passes its own key; a foreign
+    // process invoking the flag gets the same refusal a tool call would.
+    if let Some(clients) = &document.clients {
+        match presented_token.map(sha256_hex) {
+            None => return Err(NOT_PAIRED.to_owned()),
+            Some(presented) => {
+                if !is_paired(clients, &presented) {
+                    return Err(KEY_REJECTED.to_owned());
+                }
+            }
+        }
+    }
+
+    let accounts = document.accounts;
     let account = accounts
         .iter()
         .find(|account| {
@@ -1097,6 +1175,41 @@ pub fn check_account(account_id: &str, policy_path: Option<PathBuf>) -> Result<S
 /// drafts, nothing else.
 fn default_engine(account_id: &AccountId) -> PolicyEngine {
     PolicyEngine::new([Policy::new(account_id.clone(), PermissionSet::default())])
+}
+
+/// What the pairing check decided about the client on the other end of stdio.
+enum ClientGate {
+    Allowed,
+    /// The message an assistant relays to its human, so refusal comes with
+    /// the way to fix it. `initialize` and `tools/list` stay open on purpose:
+    /// the client connects, lists tools, and the first call explains itself —
+    /// a connection that fails outright would bury this text in a log.
+    Refused(&'static str),
+}
+
+const NOT_PAIRED: &str = "This client is not paired with TorroMail. Open TorroMail → MCP Clients, \
+     connect this client, then restart it.";
+const KEY_REJECTED: &str = "This client's TorroMail access key was revoked or is not valid. Open \
+     TorroMail → MCP Clients and reconnect this client, then restart it.";
+
+/// Whether a presented key hash is on the allowlist. Hashes are compared,
+/// never tokens: equality on digests of a high-entropy secret leaks nothing
+/// a timing probe could grow into a key, so a plain `==` is sound here.
+fn is_paired(clients: &[DocumentClient], presented_hash: &str) -> bool {
+    clients
+        .iter()
+        .any(|client| client.token_sha256 == presented_hash)
+}
+
+/// Lowercase hex SHA-256 — the shape `token_sha256` carries in the document.
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+    }
+    hex
 }
 
 /// A tool's result payload, or why it could not be produced. Kept apart from

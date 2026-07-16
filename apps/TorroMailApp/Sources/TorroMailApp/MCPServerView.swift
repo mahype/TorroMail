@@ -58,7 +58,7 @@ struct MCPServerListView: View {
         }
         statuses = next
         model.connectedClients = MCPClientRegistry.catalog
-            .filter { next[$0.id]?.isConfigured == true }
+            .filter { next[$0.id]?.hasCurrentKey == true }
             .map(\.displayName)
     }
 }
@@ -182,6 +182,7 @@ private struct MCPClientRow: View {
     private var summary: String {
         if isManual { return L("Manual setup") }
         if !status.isInstalled { return L("Not found on this Mac") }
+        if status.isConfigured && !status.hasCurrentKey { return L("Access key missing") }
         return status.isConfigured ? L("Connected") : L("Not connected")
     }
 
@@ -189,7 +190,7 @@ private struct MCPClientRow: View {
     private var dotColor: Color? {
         if isManual { return nil }
         if !status.isInstalled { return .gray }
-        return status.isConfigured ? .green : .orange
+        return status.hasCurrentKey ? .green : .orange
     }
 }
 
@@ -224,10 +225,15 @@ struct MCPClientDetailView: View {
     @State private var isBusy = false
     @State private var note: String?
     @State private var snippetCopied = false
-    /// The exact text the copy button puts on the clipboard, so the code block
-    /// and the button can never drift apart. Nil when the server binary is not
-    /// found and there is no real path to show.
-    @State private var configSnippet: String?
+    /// The exact text the copy button puts on the clipboard — access key in
+    /// the clear, because a masked config is not a config. Nil when the
+    /// server binary is not found and there is no real path to show.
+    @State private var realSnippet: String?
+    /// The same snippet with the key masked: what the screen shows until the
+    /// user opts to reveal. Identical text otherwise, so what you read is
+    /// what you paste.
+    @State private var maskedSnippet: String?
+    @State private var revealKey = false
 
     var body: some View {
         Form {
@@ -332,6 +338,13 @@ struct MCPClientDetailView: View {
                     title: L("Written into %@’s configuration"),
                     pending: L("Not connected yet")
                 )
+                if status.isConfigured {
+                    checkRow(
+                        ok: status.hasCurrentKey,
+                        title: L("%@ holds its access key"),
+                        pending: L("Access key missing — reconnect to fix it")
+                    )
+                }
                 serverCheckRow
             } header: {
                 Text(L("Setup test"))
@@ -366,11 +379,25 @@ struct MCPClientDetailView: View {
                         .truncationMode(.middle)
                 }
             }
-            if let configSnippet {
-                codeBlock(configSnippet)
+            if let realSnippet, let maskedSnippet {
+                codeBlock(revealKey ? realSnippet : maskedSnippet)
                 HStack {
                     Button(L("Copy config snippet")) { copySnippet() }
                         .torroButton()
+                    Button {
+                        revealKey.toggle()
+                    } label: {
+                        Label(
+                            revealKey ? L("Hide key") : L("Reveal key"),
+                            systemImage: revealKey ? "eye.slash" : "eye"
+                        )
+                    }
+                    // Automatic clients rotate their key by disconnecting
+                    // and connecting; a manual client has no such buttons,
+                    // so renewal lives here.
+                    if descriptor.kind == .manual {
+                        Button(L("Renew key")) { renewKey() }
+                    }
                     Spacer()
                     if snippetCopied {
                         Label(L("Copied to the clipboard."), systemImage: "checkmark")
@@ -378,6 +405,11 @@ struct MCPClientDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                }
+                if descriptor.kind == .manual, let note {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 Text(L("The MCP server binary was not found."))
@@ -387,7 +419,7 @@ struct MCPClientDetailView: View {
         } header: {
             Text(L("Manual setup"))
         } footer: {
-            Text(L("For a client TorroMail does not configure automatically, paste this into its MCP configuration."))
+            Text(L("For a client TorroMail does not configure automatically, paste this into its MCP configuration. The snippet carries this client’s personal access key — treat it like a password."))
         }
     }
 
@@ -451,12 +483,13 @@ struct MCPClientDetailView: View {
 
     private var stateText: String {
         if !status.isInstalled { return L("Not found on this Mac") }
+        if status.isConfigured && !status.hasCurrentKey { return L("Access key missing") }
         return status.isConfigured ? L("Connected") : L("Not connected")
     }
 
     private var dotColor: Color {
         if !status.isInstalled { return .gray }
-        return status.isConfigured ? .green : .orange
+        return status.hasCurrentKey ? .green : .orange
     }
 
     private func prettyPath(_ url: URL) -> String {
@@ -485,7 +518,7 @@ struct MCPClientDetailView: View {
         if !runServerTest {
             status = MCPClientSetup.status(for: descriptor, executableName: executable, runServerTest: false)
             model.connectedClients = MCPClientRegistry.catalog
-                .filter { MCPClientSetup.status(for: $0, executableName: executable, runServerTest: false).isConfigured }
+                .filter { MCPClientSetup.status(for: $0, executableName: executable, runServerTest: false).hasCurrentKey }
                 .map(\.displayName)
             return
         }
@@ -509,7 +542,12 @@ struct MCPClientDetailView: View {
             return
         }
         do {
-            try MCPClientSetup.add(to: client, commandPath: commandPath)
+            // Key first, config second, allowlist last: the moment the
+            // client restarts and presents the key, the document already
+            // admits it.
+            let token = try MCPClientKeyStore.tokenCreatingIfNeeded(forClient: descriptor.id)
+            try MCPClientSetup.add(to: client, commandPath: commandPath, token: token)
+            publishPolicyDocument(for: model.accounts)
             note = String(format: L("Connected. Restart %@ to load it."), descriptor.displayName)
         } catch let failure as MCPClientSetup.Failure {
             note = L(failure.reason)
@@ -517,6 +555,7 @@ struct MCPClientDetailView: View {
             note = L("Could not update the configuration.")
         }
         refresh(runServerTest: false)
+        loadSnippet()
     }
 
     private func disconnect() {
@@ -524,35 +563,77 @@ struct MCPClientDetailView: View {
         guard let client = MCPClientRegistry.installedClient(id: descriptor.id) else { return }
         do {
             try MCPClientSetup.remove(from: client)
-            note = String(format: L("Removed from %@."), descriptor.displayName)
+            // Revoking, not just unlisting: any copy of the old config dies
+            // with the key — the server re-reads the allowlist per call, so
+            // this bites even mid-session.
+            MCPClientKeyStore.revokeToken(forClient: descriptor.id)
+            publishPolicyDocument(for: model.accounts)
+            note = String(format: L("Removed from %@. Its access key no longer works."), descriptor.displayName)
         } catch let failure as MCPClientSetup.Failure {
             note = L(failure.reason)
         } catch {
             note = L("Could not update the configuration.")
         }
         refresh(runServerTest: false)
+        loadSnippet()
+    }
+
+    /// A new key for a client whose config TorroMail cannot rewrite: the old
+    /// one stops working the moment the allowlist is republished, and the
+    /// snippet on screen switches to the replacement.
+    private func renewKey() {
+        note = nil
+        do {
+            _ = try MCPClientKeyStore.renewToken(forClient: descriptor.id)
+            publishPolicyDocument(for: model.accounts)
+            revealKey = false
+            snippetCopied = false
+            loadSnippet()
+            note = L("Key renewed. The old key no longer works — paste the new snippet into the client.")
+        } catch {
+            note = L("Could not renew the key.")
+        }
     }
 
     /// Resolves the snippet once, so the code block shows exactly what the
-    /// button copies.
+    /// button copies — in two renderings: the key masked for the screen, in
+    /// the clear for the clipboard. Opening this view mints the client's key
+    /// if it never had one and publishes the pairing, so the snippet on
+    /// screen is honored the moment it is pasted.
     private func loadSnippet() {
         guard let commandPath = MCPClientSetup.serverCommandPath(
             executableName: model.generalSettings.mcpExecutable
         ) else {
-            configSnippet = nil
+            realSnippet = nil
+            maskedSnippet = nil
             return
         }
-        configSnippet = MCPClientSetup.configSnippet(
+        let hadKey = MCPClientKeyStore.token(forClient: descriptor.id) != nil
+        guard let token = try? MCPClientKeyStore.tokenCreatingIfNeeded(forClient: descriptor.id) else {
+            realSnippet = nil
+            maskedSnippet = nil
+            return
+        }
+        if !hadKey {
+            publishPolicyDocument(for: model.accounts)
+        }
+        realSnippet = MCPClientSetup.configSnippet(
             commandPath: commandPath,
-            format: descriptor.snippetFormat
+            format: descriptor.snippetFormat,
+            token: token
+        )
+        maskedSnippet = MCPClientSetup.configSnippet(
+            commandPath: commandPath,
+            format: descriptor.snippetFormat,
+            token: MCPClientKeyStore.maskedToken(forClient: descriptor.id)
         )
     }
 
     private func copySnippet() {
-        guard let configSnippet else { return }
+        guard let realSnippet else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(configSnippet, forType: .string)
+        pasteboard.setString(realSnippet, forType: .string)
         snippetCopied = true
     }
 }

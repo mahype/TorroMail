@@ -238,10 +238,37 @@ require(
 )
 
 // The policy document is the bridge to the MCP server: what the switches
-// say is what the server enforces.
-let policyData = (try? PolicyDocument.data(for: model.accounts)) ?? Data()
+// say is what the server enforces. The pairing allowlist travels with it —
+// hashes only, never a usable key.
+let contractKey = "torro_claude-desktop_deadbeef"
+let contractPairing = MCPClientKeyStore.Pairing(
+    clientID: "claude-desktop",
+    name: "Claude Desktop",
+    tokenSHA256: MCPClientKeyStore.sha256Hex(contractKey)
+)
+let policyData = (try? PolicyDocument.data(for: model.accounts, clients: [contractPairing])) ?? Data()
 let policyObject = (try? JSONSerialization.jsonObject(with: policyData)) as? [String: Any] ?? [:]
 let policyAccounts = policyObject["accounts"] as? [[String: Any]] ?? []
+let policyClients = policyObject["clients"] as? [[String: Any]] ?? []
+require(
+    policyClients.first?["id"] as? String == "claude-desktop"
+        && policyClients.first?["token_sha256"] as? String == MCPClientKeyStore.sha256Hex(contractKey),
+    "paired clients travel as an allowlist of key hashes"
+)
+require(
+    !(String(data: policyData, encoding: .utf8) ?? "").contains(contractKey),
+    "the document carries the key's hash, never the key"
+)
+require(
+    MCPClientKeyStore.sha256Hex("abc")
+        == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "the published hash is plain SHA-256, hex-encoded — what the server computes"
+)
+require(
+    MCPClientKeyStore.maskedToken(forClient: "hermes").hasPrefix("torro_hermes_")
+        && MCPClientKeyStore.maskedToken(forClient: "hermes").hasSuffix("••••••••••••"),
+    "the masked key keeps the recognizable prefix and none of the secret"
+)
 let workPolicy = policyAccounts.first { ($0["id"] as? String) == "work" } ?? [:]
 require(
     workPolicy["read"] as? String == "with_attachments",
@@ -273,7 +300,7 @@ let imapAccount = MailAccount(
     imapHost: "imap.example.org",
     username: "club@example.org"
 )
-let imapData = (try? PolicyDocument.data(for: [imapAccount])) ?? Data()
+let imapData = (try? PolicyDocument.data(for: [imapAccount], clients: [])) ?? Data()
 let imapObject = (try? JSONSerialization.jsonObject(with: imapData)) as? [String: Any] ?? [:]
 let imapEntry = ((imapObject["accounts"] as? [[String: Any]])?.first?["imap"]) as? [String: Any] ?? [:]
 require(
@@ -299,7 +326,7 @@ let oauthAccount = MailAccount(
     imapHost: "imap.gmail.com",
     username: "sven@gmail.com"
 )
-let oauthData = (try? PolicyDocument.data(for: [oauthAccount])) ?? Data()
+let oauthData = (try? PolicyDocument.data(for: [oauthAccount], clients: [])) ?? Data()
 let oauthObject = (try? JSONSerialization.jsonObject(with: oauthData)) as? [String: Any] ?? [:]
 let oauthEntry = ((oauthObject["accounts"] as? [[String: Any]])?.first?["imap"]) as? [String: Any] ?? [:]
 require(
@@ -333,7 +360,7 @@ let unfinished = MailAccount(
     provider: .imapSmtp,
     loginMethod: .password
 )
-let unfinishedData = (try? PolicyDocument.data(for: [unfinished])) ?? Data()
+let unfinishedData = (try? PolicyDocument.data(for: [unfinished], clients: [])) ?? Data()
 let unfinishedObject = (try? JSONSerialization.jsonObject(with: unfinishedData)) as? [String: Any] ?? [:]
 require(
     ((unfinishedObject["accounts"] as? [[String: Any]])?.first?["imap"]) == nil,
@@ -410,11 +437,16 @@ require(
 // Connecting a client merges into its configuration instead of replacing
 // it — other servers survive.
 let snippet = MCPClientSetup.configSnippet(
-    commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp"
+    commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+    token: contractKey
 )
 require(
     snippet.contains("\"mcpServers\"") && snippet.contains("torromail-mcp"),
     "the config snippet names the server and its command"
+)
+require(
+    snippet.contains("\"TORROMAIL_TOKEN\": \"\(contractKey)\""),
+    "the snippet carries the access key as environment, not as an argument"
 )
 
 let temporaryConfig = FileManager.default.temporaryDirectory
@@ -430,12 +462,16 @@ require(
     !MCPClientSetup.isConfigured(temporaryClient),
     "a client without the server is not reported as configured"
 )
-try? MCPClientSetup.add(to: temporaryClient, commandPath: "/tmp/torromail-mcp")
+try? MCPClientSetup.add(to: temporaryClient, commandPath: "/tmp/torromail-mcp", token: contractKey)
 let mergedData = (try? Data(contentsOf: temporaryConfig)) ?? Data()
 let mergedServers = ((try? JSONSerialization.jsonObject(with: mergedData)) as? [String: Any])?["mcpServers"] as? [String: Any] ?? [:]
 require(
     mergedServers["other"] != nil && mergedServers["torromail"] != nil,
     "adding the server preserves other configured servers"
+)
+require(
+    ((mergedServers["torromail"] as? [String: Any])?["env"] as? [String: String])?["TORROMAIL_TOKEN"] == contractKey,
+    "connecting writes the access key into the client's environment"
 )
 require(
     MCPClientSetup.isConfigured(temporaryClient),
@@ -454,7 +490,7 @@ let brokenClient = MCPClient(
 try? Data("{ this is not json".utf8).write(to: brokenConfig)
 var refusedToClobber = false
 do {
-    try MCPClientSetup.add(to: brokenClient, commandPath: "/tmp/torromail-mcp")
+    try MCPClientSetup.add(to: brokenClient, commandPath: "/tmp/torromail-mcp", token: contractKey)
 } catch {
     refusedToClobber = true
 }
@@ -475,7 +511,7 @@ let emptyClient = MCPClient(
     setup: .mcpServersJSON(configURL: emptyConfig)
 )
 try? Data().write(to: emptyConfig)
-try? MCPClientSetup.add(to: emptyClient, commandPath: "/tmp/torromail-mcp")
+try? MCPClientSetup.add(to: emptyClient, commandPath: "/tmp/torromail-mcp", token: contractKey)
 require(
     MCPClientSetup.isConfigured(emptyClient),
     "connecting a client with an empty placeholder config succeeds"

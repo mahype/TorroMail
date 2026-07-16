@@ -322,9 +322,15 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
 }
 
 /// Failures are diagnostics, not decisions — they belong in the log.
-private func publishPolicyDocument(for accounts: [MailAccount]) {
+/// Internal, not private: connect/disconnect in the MCP views changes the
+/// pairing list and republishes from there.
+func publishPolicyDocument(for accounts: [MailAccount]) {
     do {
-        try PolicyDocument.publish(accounts: accounts)
+        // The app is a paired client of its own server (connection checks,
+        // the supervised instance) — minting here keeps it on every
+        // allowlist this document will ever carry.
+        _ = try MCPClientKeyStore.appToken()
+        try PolicyDocument.publish(accounts: accounts, clients: MCPClientKeyStore.pairings())
     } catch {
         NSLog("TorroMail: policy document write failed: %@", error.localizedDescription)
     }
@@ -360,6 +366,18 @@ struct TorroMailApp: App {
                 .tint(.torroRed)
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
+                    // Configs written before access keys existed get theirs
+                    // now. Off the main actor — the CLI-owned ones are
+                    // rewritten by their own tools, and that is a process
+                    // launch. Republishing puts the healed pairings on the
+                    // allowlist.
+                    let executable = model.generalSettings.mcpExecutable
+                    let healed = await Task.detached(priority: .utility) {
+                        MCPClientSetup.refreshManagedKeys(executableName: executable)
+                    }.value
+                    if healed {
+                        publishPolicyDocument(for: model.accounts)
+                    }
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show

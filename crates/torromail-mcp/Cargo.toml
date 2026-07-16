@@ -14,6 +14,7 @@ torromail-core = { path = "../torromail-core" }
 torromail-imap-tls = { path = "../torromail-imap-tls" }
 torromail-oauth = { path = "../torromail-oauth" }
 serde_json = "1"
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

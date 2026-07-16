@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 import SwiftUI
@@ -110,6 +111,141 @@ public enum KeychainStore {
     }
 }
 
+/// The access keys that pair MCP clients with the server. Connecting a client
+/// mints one; it travels as `TORROMAIL_TOKEN` in that client's own MCP config,
+/// its plaintext is kept only here in the keychain (so a snippet can be shown
+/// again), and the policy document publishes nothing but its SHA-256 — the
+/// server checks against that allowlist on every tool call, so revoking a key
+/// here locks the client out immediately.
+public enum MCPClientKeyStore {
+    /// Keychain account names for client keys, kept clear of mail account ids
+    /// under the same service.
+    private static let accountPrefix = "client-key-"
+
+    /// The identity the app itself presents when it spawns the server —
+    /// connection checks take the same gate the assistants do.
+    public static let appClientID = "torromail-app"
+
+    /// One paired client as the policy document publishes it: labels for
+    /// attribution and the key's hash, never the key.
+    public struct Pairing: Hashable, Sendable {
+        public let clientID: String
+        public let name: String
+        public let tokenSHA256: String
+
+        public init(clientID: String, name: String, tokenSHA256: String) {
+            self.clientID = clientID
+            self.name = name
+            self.tokenSHA256 = tokenSHA256
+        }
+    }
+
+    /// The stored key for a client, or nil when it was never connected.
+    public static func token(forClient clientID: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainStore.service,
+            kSecAttrAccount as String: accountPrefix + clientID,
+            kSecReturnData as String: true
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// The client's key, minting one on first use. Reconnecting keeps the
+    /// key stable — rotation is an explicit renewal, never a side effect.
+    public static func tokenCreatingIfNeeded(forClient clientID: String) throws -> String {
+        if let existing = token(forClient: clientID) {
+            return existing
+        }
+        let minted = mintToken(forClient: clientID)
+        try KeychainStore.savePassword(minted, forAccount: accountPrefix + clientID)
+        return minted
+    }
+
+    /// Renewal: the old key dies with the keychain entry, the new one only
+    /// starts working once the caller republishes the policy document.
+    public static func renewToken(forClient clientID: String) throws -> String {
+        let minted = mintToken(forClient: clientID)
+        try KeychainStore.savePassword(minted, forAccount: accountPrefix + clientID)
+        return minted
+    }
+
+    public static func revokeToken(forClient clientID: String) {
+        KeychainStore.deletePassword(forAccount: accountPrefix + clientID)
+    }
+
+    /// Every paired client, hashes freshly computed from the stored keys —
+    /// what the policy document's `clients` allowlist is built from.
+    public static func pairings() -> [Pairing] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainStore.service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecReturnData as String: true
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]] else {
+            return []
+        }
+
+        return items.compactMap { item in
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(accountPrefix),
+                  let data = item[kSecValueData as String] as? Data,
+                  let token = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let clientID = String(account.dropFirst(accountPrefix.count))
+            return Pairing(
+                clientID: clientID,
+                name: displayName(forClient: clientID),
+                tokenSHA256: sha256Hex(token)
+            )
+        }
+        .sorted { $0.clientID < $1.clientID }
+    }
+
+    /// The app's own key, minted on first use — every spawn of the server by
+    /// the app (connection checks, the supervised instance) presents it.
+    public static func appToken() throws -> String {
+        try tokenCreatingIfNeeded(forClient: appClientID)
+    }
+
+    public static func sha256Hex(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    /// The visible half of a key: enough to recognize it, none of the secret.
+    /// Shown in snippets until the user reveals the real one.
+    public static func maskedToken(forClient clientID: String) -> String {
+        "torro_\(clientID)_••••••••••••"
+    }
+
+    /// `torro_<client>_<32 bytes of system randomness>` — the prefix names
+    /// the client for humans reading a config; the entropy does the work.
+    private static func mintToken(forClient clientID: String) -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "system randomness unavailable")
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        return "torro_\(clientID)_\(hex)"
+    }
+
+    private static func displayName(forClient clientID: String) -> String {
+        if clientID == appClientID { return "TorroMail" }
+        return MCPClientRegistry.descriptor(id: clientID)?.displayName ?? clientID
+    }
+}
+
 /// Runs the MCP binary's `--check-account`: the same secret resolution,
 /// TLS and LOGIN the tools use — so a green dot means the real path works.
 public enum AccountCheck {
@@ -135,6 +271,11 @@ public enum AccountCheck {
         var environment = ProcessInfo.processInfo.environment
         if let url = policyURL ?? (try? PolicyDocument.defaultURL()) {
             environment["TORROMAIL_POLICY_PATH"] = url.path
+        }
+        // The check logs into the real mailbox, so it sits behind the same
+        // pairing gate as the tools — the app presents its own key.
+        if let appToken = try? MCPClientKeyStore.appToken() {
+            environment["TORROMAIL_TOKEN"] = appToken
         }
         process.environment = environment
         let errorPipe = Pipe()
@@ -308,7 +449,16 @@ public enum AccountTrial {
         defer { try? FileManager.default.removeItem(at: url) }
 
         do {
-            try PolicyDocument.data(for: [account]).write(to: url, options: .atomic)
+            // The throwaway document admits exactly one client: the app
+            // itself, whose key the check presents.
+            let appToken = try MCPClientKeyStore.appToken()
+            let appPairing = MCPClientKeyStore.Pairing(
+                clientID: MCPClientKeyStore.appClientID,
+                name: "TorroMail",
+                tokenSHA256: MCPClientKeyStore.sha256Hex(appToken)
+            )
+            try PolicyDocument.data(for: [account], clients: [appPairing])
+                .write(to: url, options: .atomic)
         } catch {
             return .failed(error.localizedDescription)
         }
@@ -321,8 +471,8 @@ public enum AccountTrial {
 }
 
 /// Wiring TorroMail into MCP clients. The snippet points at the bundled
-/// server binary; the policy document lives at its default path, so no
-/// arguments or environment are needed.
+/// server binary and carries the client's access key as `TORROMAIL_TOKEN`;
+/// the policy document lives at its default path, so nothing else travels.
 public enum MCPClientSetup {
     public struct Failure: Error {
         public let reason: String
@@ -345,11 +495,13 @@ public enum MCPClientSetup {
         return command.displayPath
     }
 
-    /// Which assistants are set up to reach TorroMail. Read from their own
-    /// configuration — the app does not guess, and does not pretend.
+    /// Which assistants are set up to reach TorroMail — configured *and*
+    /// carrying a working key. Read from their own configuration — the app
+    /// does not guess, and does not pretend: an entry whose key would be
+    /// refused is not "connected".
     public static func configuredClientNames(fileManager: FileManager = .default) -> [String] {
         MCPClientRegistry.installed(fileManager: fileManager)
-            .filter { isConfigured($0) }
+            .filter { isConfigured($0) && hasCurrentKey($0) }
             .map(\.displayName)
     }
 
@@ -379,12 +531,77 @@ public enum MCPClientSetup {
         return servers[MCPClientRegistry.serverName] != nil
     }
 
+    /// Whether the client's config carries the key the keychain holds for it
+    /// — the difference between "points at TorroMail" and "will get in".
+    /// False for a config written before keys existed, and after a renewal
+    /// the config missed.
+    public static func hasCurrentKey(_ client: MCPClient) -> Bool {
+        guard let token = MCPClientKeyStore.token(forClient: client.id) else {
+            return false
+        }
+        switch client.setup {
+        case let .mcpServersJSON(configURL), let .claudeCodeCLI(_, configURL):
+            return jsonConfigToken(at: configURL) == token
+        case let .codexCLI(_, configURL):
+            // The key is high-entropy, so plain containment on the TOML is
+            // unambiguous — better than parsing a format we never write.
+            guard let text = try? String(contentsOf: configURL, encoding: .utf8) else {
+                return false
+            }
+            return text.contains(token)
+        }
+    }
+
+    private static func jsonConfigToken(at configURL: URL) -> String? {
+        guard let data = try? Data(contentsOf: configURL),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let servers = root["mcpServers"] as? [String: Any],
+              let server = servers[MCPClientRegistry.serverName] as? [String: Any],
+              let env = server["env"] as? [String: Any] else {
+            return nil
+        }
+        return env["TORROMAIL_TOKEN"] as? String
+    }
+
+    /// Launch-time self-healing: every automatic client that already points
+    /// at TorroMail but carries no key — a config from before keys existed —
+    /// gets its entry rewritten with one. Returns whether anything changed,
+    /// so the caller knows the policy document needs republishing.
+    @discardableResult
+    public static func refreshManagedKeys(
+        executableName: String,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard let commandPath = serverCommandPath(executableName: executableName) else {
+            return false
+        }
+        var changed = false
+        for descriptor in MCPClientRegistry.catalog where descriptor.kind == .automatic {
+            guard
+                let client = MCPClientRegistry.installedClient(
+                    id: descriptor.id,
+                    fileManager: fileManager
+                ),
+                isConfigured(client),
+                !hasCurrentKey(client),
+                let token = try? MCPClientKeyStore.tokenCreatingIfNeeded(forClient: descriptor.id),
+                (try? add(to: client, commandPath: commandPath, token: token, fileManager: fileManager)) != nil
+            else { continue }
+            changed = true
+        }
+        return changed
+    }
+
     /// The snippet to paste, in the shape the target client expects. Clients
     /// differ: most read a top-level `mcpServers` JSON object, Hermes reads
     /// YAML under `mcp_servers`, OpenClaw nests it under `mcp.servers`.
+    /// `token` is the access key to embed — pass the masked stand-in for
+    /// display and the real key for the clipboard, so the code on screen and
+    /// the code that leaves it are the same text with one word swapped.
     public static func configSnippet(
         commandPath: String,
-        format: MCPClientDescriptor.SnippetFormat = .mcpServersJSON
+        format: MCPClientDescriptor.SnippetFormat = .mcpServersJSON,
+        token: String
     ) -> String {
         let name = MCPClientRegistry.serverName
         switch format {
@@ -393,7 +610,10 @@ public enum MCPClientSetup {
             {
               "mcpServers": {
                 "\(name)": {
-                  "command": "\(commandPath)"
+                  "command": "\(commandPath)",
+                  "env": {
+                    "TORROMAIL_TOKEN": "\(token)"
+                  }
                 }
               }
             }
@@ -403,6 +623,8 @@ public enum MCPClientSetup {
             mcp_servers:
               \(name):
                 command: "\(commandPath)"
+                env:
+                  TORROMAIL_TOKEN: "\(token)"
             """
         case .openClawJSON:
             return """
@@ -410,7 +632,10 @@ public enum MCPClientSetup {
               "mcp": {
                 "servers": {
                   "\(name)": {
-                    "command": "\(commandPath)"
+                    "command": "\(commandPath)",
+                    "env": {
+                      "TORROMAIL_TOKEN": "\(token)"
+                    }
                   }
                 }
               }
@@ -419,30 +644,47 @@ public enum MCPClientSetup {
         }
     }
 
-    /// Registers the server with a client. Servers the user configured
-    /// elsewhere survive: the JSON path merges, and the CLI paths hand the
-    /// file to the tool that owns it. An unreadable configuration is an error
-    /// and is never overwritten.
+    /// Registers the server with a client, access key included. Servers the
+    /// user configured elsewhere survive: the JSON path merges, and the CLI
+    /// paths hand the file to the tool that owns it. An unreadable
+    /// configuration is an error and is never overwritten.
     public static func add(
         to client: MCPClient,
         commandPath: String,
+        token: String,
         fileManager: FileManager = .default
     ) throws {
         switch client.setup {
         case let .mcpServersJSON(configURL):
-            try addToJSONConfig(at: configURL, commandPath: commandPath, fileManager: fileManager)
+            try addToJSONConfig(
+                at: configURL,
+                commandPath: commandPath,
+                token: token,
+                fileManager: fileManager
+            )
         case let .codexCLI(executableURL, _):
-            try addViaCLI(executableURL: executableURL, extraArguments: [], commandPath: commandPath)
+            try addViaCLI(
+                executableURL: executableURL,
+                scopeArguments: [],
+                environmentArguments: ["--env", "TORROMAIL_TOKEN=\(token)"],
+                commandPath: commandPath
+            )
         case let .claudeCodeCLI(executableURL, _):
             // `-s user` registers globally; the default scope is the current
             // project, which for a background app would be nowhere useful.
-            try addViaCLI(executableURL: executableURL, extraArguments: ["-s", "user"], commandPath: commandPath)
+            try addViaCLI(
+                executableURL: executableURL,
+                scopeArguments: ["-s", "user"],
+                environmentArguments: ["-e", "TORROMAIL_TOKEN=\(token)"],
+                commandPath: commandPath
+            )
         }
     }
 
     private static func addToJSONConfig(
         at target: URL,
         commandPath: String,
+        token: String,
         fileManager: FileManager
     ) throws {
         var root: [String: Any] = [:]
@@ -455,7 +697,10 @@ public enum MCPClientSetup {
             root = existing
         }
         var servers = root["mcpServers"] as? [String: Any] ?? [:]
-        servers[MCPClientRegistry.serverName] = ["command": commandPath]
+        servers[MCPClientRegistry.serverName] = [
+            "command": commandPath,
+            "env": ["TORROMAIL_TOKEN": token]
+        ]
         root["mcpServers"] = servers
 
         try fileManager.createDirectory(
@@ -468,18 +713,34 @@ public enum MCPClientSetup {
 
     /// Runs `<cli> mcp add <name> [extraArguments] -- <commandPath>`. The tool
     /// that owns the config does the merge, so other servers are safe.
+    ///
+    /// An existing entry is removed first: the CLIs refuse to add a name that
+    /// already exists (`claude mcp add` exits with "already exists"), and
+    /// reconnecting or healing a key *is* replacing the entry. The remove may
+    /// fail freely — a missing entry is exactly the state it aims for.
     private static func addViaCLI(
         executableURL: URL,
-        extraArguments: [String],
+        scopeArguments: [String],
+        environmentArguments: [String],
         commandPath: String
     ) throws {
+        _ = try? runCLI(
+            executableURL: executableURL,
+            arguments: ["mcp", "remove", MCPClientRegistry.serverName] + scopeArguments
+        )
+        try runCLI(
+            executableURL: executableURL,
+            arguments: ["mcp", "add", MCPClientRegistry.serverName]
+                + scopeArguments + environmentArguments + ["--", commandPath]
+        )
+    }
+
+    private static func runCLI(executableURL: URL, arguments: [String]) throws {
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = ["mcp", "add", MCPClientRegistry.serverName]
-            + extraArguments + ["--", commandPath]
-        let errorPipe = Pipe()
+        process.arguments = arguments
         process.standardOutput = Pipe()
-        process.standardError = errorPipe
+        process.standardError = Pipe()
 
         do {
             try process.run()
@@ -643,11 +904,21 @@ public struct MCPClientSetupStatus: Hashable, Sendable {
 
     public var isInstalled: Bool
     public var isConfigured: Bool
+    /// Whether the config carries the client's current access key. A client
+    /// that is configured without one points at the server but will be
+    /// refused — the state the UI has to call out for re-connecting.
+    public var hasCurrentKey: Bool
     public var server: Server
 
-    public init(isInstalled: Bool, isConfigured: Bool, server: Server = .unknown) {
+    public init(
+        isInstalled: Bool,
+        isConfigured: Bool,
+        hasCurrentKey: Bool = false,
+        server: Server = .unknown
+    ) {
         self.isInstalled = isInstalled
         self.isConfigured = isConfigured
+        self.hasCurrentKey = hasCurrentKey
         self.server = server
     }
 }
@@ -713,11 +984,21 @@ extension MCPClientSetup {
             return MCPClientSetupStatus(isInstalled: false, isConfigured: false)
         }
         let configured = isConfigured(client)
+        let keyed = configured && hasCurrentKey(client)
         guard configured, runServerTest else {
-            return MCPClientSetupStatus(isInstalled: true, isConfigured: configured)
+            return MCPClientSetupStatus(
+                isInstalled: true,
+                isConfigured: configured,
+                hasCurrentKey: keyed
+            )
         }
         let server = MCPServerSelfTest.run(executableName: executableName)
-        return MCPClientSetupStatus(isInstalled: true, isConfigured: configured, server: server)
+        return MCPClientSetupStatus(
+            isInstalled: true,
+            isConfigured: configured,
+            hasCurrentKey: keyed,
+            server: server
+        )
     }
 
     /// Removes TorroMail from a client's configuration — the counterpart to
@@ -750,20 +1031,10 @@ extension MCPClientSetup {
     }
 
     private static func removeViaCLI(executableURL: URL, extraArguments: [String]) throws {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["mcp", "remove", MCPClientRegistry.serverName] + extraArguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            throw Failure("The assistant's setup tool could not be started.")
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw Failure("The assistant's setup tool reported an error.")
-        }
+        try runCLI(
+            executableURL: executableURL,
+            arguments: ["mcp", "remove", MCPClientRegistry.serverName] + extraArguments
+        )
     }
 }
 
@@ -858,10 +1129,23 @@ public enum PolicyDocument {
             .appendingPathComponent("policy.json")
     }
 
-    public static func data(for accounts: [MailAccount]) throws -> Data {
+    /// `clients` is deliberately not defaulted: the allowlist is what stands
+    /// between the accounts and any process that spawns the server, so every
+    /// caller has to say who is allowed — an empty list means "nobody yet".
+    public static func data(
+        for accounts: [MailAccount],
+        clients: [MCPClientKeyStore.Pairing]
+    ) throws -> Data {
         let document: [String: Any] = [
             "version": version,
-            "accounts": accounts.map(accountObject(for:))
+            "accounts": accounts.map(accountObject(for:)),
+            "clients": clients.map { pairing in
+                [
+                    "id": pairing.clientID,
+                    "name": pairing.name,
+                    "token_sha256": pairing.tokenSHA256
+                ]
+            }
         ]
         return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
     }
@@ -869,6 +1153,7 @@ public enum PolicyDocument {
     /// Writes atomically so a reloading server never sees a half document.
     public static func publish(
         accounts: [MailAccount],
+        clients: [MCPClientKeyStore.Pairing],
         to url: URL? = nil,
         fileManager: FileManager = .default
     ) throws {
@@ -877,7 +1162,10 @@ public enum PolicyDocument {
             at: target.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try data(for: accounts).write(to: target, options: .atomic)
+        try data(for: accounts, clients: clients).write(to: target, options: .atomic)
+        // Connection facts and the allowlist are nobody else's read: the
+        // document stays owner-only, like the configs that carry the keys.
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 
     private static func accountObject(for account: MailAccount) -> [String: Any] {
@@ -1530,6 +1818,10 @@ public final class MCPServerSupervisor: ObservableObject {
         var environment = ProcessInfo.processInfo.environment
         if let policyURL = try? PolicyDocument.defaultURL() {
             environment["TORROMAIL_POLICY_PATH"] = policyURL.path
+        }
+        // The app's own instance is a paired client like any other.
+        if let appToken = try? MCPClientKeyStore.appToken() {
+            environment["TORROMAIL_TOKEN"] = appToken
         }
         process.environment = environment
         standardInput = Pipe()

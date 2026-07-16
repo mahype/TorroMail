@@ -133,6 +133,20 @@ where an `account_id` is learned, so requiring one would lock every client out:
 - `mail_get_policy`
 - `mail_get_cache_status`
 
+## Client Pairing
+
+Every MCP client presents an access key via the `TORROMAIL_TOKEN` environment
+variable in its own MCP config; the app writes it there on connect (or hands
+it over in the manual snippet, masked on screen). The policy document carries
+a `clients` allowlist of SHA-256 hashes — never a usable key; plaintext lives
+only in the client's config and the app's keychain (`client-key-<id>` under
+service `TorroMail`). The server checks the hash per tool call, so revoking in
+the app bites running sessions. `initialize` and `tools/list` stay open; every
+`tools/call` from an unpaired client answers `-32001` with instructions the
+assistant can relay. A document *without* a `clients` key (pre-pairing or
+hand-managed) enforces nothing; the app always publishes one. `--check-account`
+sits behind the same gate — the app presents its own key (`torromail-app`).
+
 Reading mail has no browsing tool by design. "What came in lately?" is
 `mail_search` with an empty query: no filter, newest first, INBOX unless a
 mailbox is named. Ordering follows IMAP UIDs — arrival at the server — not the

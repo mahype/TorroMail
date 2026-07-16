@@ -2,8 +2,9 @@
 //!
 //! The SwiftUI app writes this JSON whenever account permissions change;
 //! every `torromail-mcp` instance — no matter who spawned it — reloads it
-//! per tool call, so a switch flipped in the UI applies immediately. The
-//! format mirrors `PermissionSet` on both sides:
+//! per tool call, so a switch flipped in the UI applies immediately — and a
+//! client key revoked there locks that client out mid-session. The format
+//! mirrors `PermissionSet` on both sides:
 //!
 //! ```json
 //! {
@@ -27,9 +28,21 @@
 //!              "auth": "xoauth2",
 //!              "token_endpoint": "https://oauth2.googleapis.com/token",
 //!              "client_id": "…apps.googleusercontent.com"}
+//!   }],
+//!   "clients": [{
+//!     "id": "claude-desktop",
+//!     "name": "Claude Desktop",
+//!     "token_sha256": "9f86d081884c7d65…"
 //!   }]
 //! }
 //! ```
+//!
+//! `clients` is the pairing allowlist: the app hands every connected
+//! assistant an access key (`TORROMAIL_TOKEN` in its MCP config) and
+//! publishes only the key's SHA-256 here — the document never holds a
+//! usable secret. A document *without* the key predates pairing (or is
+//! hand-managed) and enforces no client auth; a document *with* it, even an
+//! empty list, admits only the clients it names.
 //!
 //! Anything unreadable fails closed: a broken document grants nothing.
 
@@ -84,14 +97,68 @@ impl Default for CacheFacts {
     }
 }
 
-pub(crate) fn parse_policy_document(text: &str) -> Result<Vec<DocumentAccount>, String> {
+/// The whole document, parsed: the accounts it serves and — when the app
+/// has published one — the client allowlist guarding them.
+pub(crate) struct ParsedDocument {
+    pub(crate) accounts: Vec<DocumentAccount>,
+    pub(crate) clients: Option<Vec<DocumentClient>>,
+}
+
+/// One paired assistant: which one (labels for attribution) and the SHA-256
+/// of the access key it must present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocumentClient {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) token_sha256: String,
+}
+
+pub(crate) fn parse_policy_document(text: &str) -> Result<ParsedDocument, String> {
     let document: Value =
         serde_json::from_str(text).map_err(|error| format!("policy document invalid: {error}"))?;
     let accounts = document["accounts"]
         .as_array()
         .ok_or("policy document invalid: accounts must be an array")?;
 
-    accounts.iter().map(parse_account).collect()
+    Ok(ParsedDocument {
+        accounts: accounts
+            .iter()
+            .map(parse_account)
+            .collect::<Result<_, _>>()?,
+        clients: parse_clients(&document)?,
+    })
+}
+
+/// A missing key means "no pairing published" and is legal; a present but
+/// malformed one is an error — guessing at an allowlist would either lock
+/// every client out or let the wrong one in.
+fn parse_clients(document: &Value) -> Result<Option<Vec<DocumentClient>>, String> {
+    let clients = match document.get("clients") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(clients) => clients
+            .as_array()
+            .ok_or("policy document invalid: clients must be an array")?,
+    };
+
+    clients
+        .iter()
+        .map(|client| {
+            let id = client["id"]
+                .as_str()
+                .ok_or("policy document invalid: client id must be a string")?;
+            let token_sha256 = client["token_sha256"]
+                .as_str()
+                .ok_or("policy document invalid: client token_sha256 must be a string")?;
+            Ok(DocumentClient {
+                id: id.to_owned(),
+                // A label, not a right — an entry from a build that wrote
+                // no name still guards its key.
+                name: client["name"].as_str().unwrap_or(id).to_owned(),
+                token_sha256: token_sha256.to_ascii_lowercase(),
+            })
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
