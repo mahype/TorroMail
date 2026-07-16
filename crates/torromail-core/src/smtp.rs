@@ -45,7 +45,8 @@ pub struct SmtpClient<T: SmtpTransport> {
 }
 
 impl<T: SmtpTransport> SmtpClient<T> {
-    /// Read the greeting, greet back, and authenticate.
+    /// Read the greeting, greet back, and authenticate — implicit TLS, where
+    /// the server speaks first.
     pub fn connect(transport: T, ehlo_domain: &str, auth: SmtpAuth) -> CoreResult<Self> {
         let mut client = Self { transport };
 
@@ -55,11 +56,23 @@ impl<T: SmtpTransport> SmtpClient<T> {
                 "unexpected SMTP greeting: {greeting}"
             )));
         }
-
-        client.transport.send_line(&format!("EHLO {ehlo_domain}"))?;
-        client.read_reply("250")?;
-        client.authenticate(auth)?;
+        client.handshake(ehlo_domain, auth)?;
         Ok(client)
+    }
+
+    /// Greet and authenticate on a connection whose greeting was already read
+    /// — the state right after a STARTTLS upgrade, where the server waits for
+    /// EHLO and sends no fresh greeting. Reading for one here would hang.
+    pub fn connect_upgraded(transport: T, ehlo_domain: &str, auth: SmtpAuth) -> CoreResult<Self> {
+        let mut client = Self { transport };
+        client.handshake(ehlo_domain, auth)?;
+        Ok(client)
+    }
+
+    fn handshake(&mut self, ehlo_domain: &str, auth: SmtpAuth) -> CoreResult<()> {
+        self.transport.send_line(&format!("EHLO {ehlo_domain}"))?;
+        self.read_reply("250")?;
+        self.authenticate(auth)
     }
 
     /// One message to one or more recipients. The envelope sender and the
@@ -288,6 +301,34 @@ mod tests {
 
         // The body line ".hidden" travelled as "..hidden".
         assert!(sent.borrow().iter().any(|line| line == "..hidden"));
+    }
+
+    #[test]
+    fn an_upgraded_session_does_not_wait_for_a_second_greeting() {
+        // After STARTTLS the server sends no greeting — the script starts at
+        // the EHLO reply. Reading for a greeting here would block forever.
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let transport = Scripted::new(
+            &[
+                "250-mail.example.com",
+                "250 AUTH LOGIN",
+                "334 VXNlcm5hbWU6",
+                "334 UGFzc3dvcmQ6",
+                "235 authenticated",
+            ],
+            sent.clone(),
+        );
+
+        let client = SmtpClient::connect_upgraded(
+            transport,
+            "torro.local",
+            SmtpAuth::Login {
+                username: "me@example.com".to_owned(),
+                secret: "secret".to_owned(),
+            },
+        );
+        assert!(client.is_ok(), "upgraded connect authenticates");
+        assert_eq!(sent.borrow()[0], "EHLO torro.local");
     }
 
     #[test]

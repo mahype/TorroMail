@@ -71,12 +71,14 @@ pub fn connect_smtp(
     ehlo_domain: &str,
     auth: SmtpAuth,
 ) -> CoreResult<TlsSmtpClient> {
-    let transport = if port == 465 {
-        connect_transport(host, port)?
+    if port == 465 {
+        // Implicit TLS: the server sends a greeting first.
+        SmtpClient::connect(connect_transport(host, port)?, ehlo_domain, auth)
     } else {
-        starttls(host, port, ehlo_domain)?
-    };
-    SmtpClient::connect(transport, ehlo_domain, auth)
+        // STARTTLS consumed the greeting before the upgrade, so the TLS
+        // session opens straight at EHLO.
+        SmtpClient::connect_upgraded(starttls(host, port, ehlo_domain)?, ehlo_domain, auth)
+    }
 }
 
 /// The plaintext SMTP handshake up to STARTTLS, then the TLS upgrade. Raw
