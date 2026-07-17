@@ -3,3 +3,4 @@ target/
 .swiftpm/
 .superpowers/
 .DS_Store
+.claude/settings.local.json
