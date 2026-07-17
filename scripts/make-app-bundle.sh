@@ -20,26 +20,12 @@ cp "$ROOT/target/debug/torromail-mcp" "$APP/Contents/MacOS/torromail-mcp"
 cp -R "$BIN/TorroMailApp_TorroMailApp.bundle" "$APP/Contents/Resources/"
 cp "$PKG/Icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key><string>TorroMail</string>
-    <key>CFBundleIdentifier</key><string>com.torromail.app</string>
-    <key>CFBundleName</key><string>TorroMail</string>
-    <key>CFBundleDisplayName</key><string>TorroMail</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>3</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleLocalizations</key><array><string>en</string><string>de</string></array>
-</dict>
-</plist>
-PLIST
+# Share the checked-in Info.plist template with the release build so the two
+# never drift. Stamp a dev version so the bundle is identifiable.
+cp "$PKG/Resources/Info.plist" "$APP/Contents/Info.plist"
+DEV_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString ${DEV_VERSION:-dev}" \
+    "$APP/Contents/Info.plist" >/dev/null
 
 echo "Bundle: $APP"

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+    TorroMail runs under the hardened runtime but is NOT App-Sandboxed:
+    it needs unrestricted outbound network access (IMAP/SMTP), Keychain
+    access for per-client access keys, and it spawns the bundled
+    `torromail-mcp` helper over stdio. None of those require an explicit
+    entitlement for a Developer ID (non-sandboxed) distribution — the helper
+    is signed with the same Team ID, so hardened-runtime library validation
+    passes without `disable-library-validation`.
+
+    This dict is intentionally empty. Add keys here if a future capability
+    (e.g. App Sandbox) requires them.
+-->
+<dict>
+</dict>
+</plist>

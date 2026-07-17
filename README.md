@@ -48,3 +48,13 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 ```
 
 In development, build `torromail-mcp` before launching the SwiftUI app if you want the app supervisor to start the MCP process automatically from `target/debug/torromail-mcp`.
+
+For a runnable dev bundle, use `scripts/make-app-bundle.sh`.
+
+## Releases
+
+Pushing a `v*` tag triggers [.github/workflows/release.yml](.github/workflows/release.yml),
+which builds a universal `TorroMail.app`, signs and notarizes it, packages a
+`.dmg`, and publishes it as a GitHub Release asset. See
+[docs/RELEASING.md](docs/RELEASING.md) for versioning rules, the required
+signing secrets, and how to build a release locally.
