@@ -445,6 +445,11 @@ public struct MCPClient: Identifiable, Hashable {
     public enum Setup: Hashable {
         /// A JSON file with a top-level `mcpServers` object we own and merge.
         case mcpServersJSON(configURL: URL)
+        /// VS Code keeps the same shape under a top-level `servers` key instead
+        /// (its `mcp.json`, alongside an `inputs` array we leave untouched), and
+        /// tags each stdio server with `"type": "stdio"`. Same merge as
+        /// `mcpServersJSON`, one different root key.
+        case serversJSON(configURL: URL)
         /// ChatGPT keeps its servers in TOML and bundles the codex CLI that
         /// owns that file. Handing the edit to that tool beats writing TOML
         /// here — preserving the user's other servers stays its problem. The
@@ -471,8 +476,21 @@ public struct MCPClient: Identifiable, Hashable {
     /// manual edit has somewhere to go.
     public var configURL: URL {
         switch setup {
-        case let .mcpServersJSON(url), let .codexCLI(_, url), let .claudeCodeCLI(_, url):
+        case let .mcpServersJSON(url), let .serversJSON(url),
+             let .codexCLI(_, url), let .claudeCodeCLI(_, url):
             return url
+        }
+    }
+}
+
+extension MCPClient.Setup {
+    /// For the JSON-file clients: the top-level key their servers live under.
+    /// VS Code uses `servers`; everyone else with a JSON file — and Claude
+    /// Code's `~/.claude.json`, which we only read — uses `mcpServers`.
+    var jsonRootKey: String {
+        switch self {
+        case .serversJSON: return "servers"
+        case .mcpServersJSON, .codexCLI, .claudeCodeCLI: return "mcpServers"
         }
     }
 }
@@ -530,6 +548,45 @@ public enum MCPClientRegistry {
                 displayName: "Cursor",
                 setup: .mcpServersJSON(
                     configURL: cursorDirectory.appendingPathComponent("mcp.json")
+                )
+            ))
+        }
+
+        // LM Studio keeps the identical `mcpServers` JSON at `~/.lmstudio/mcp.json`.
+        let lmStudioDirectory = home.appendingPathComponent(".lmstudio", isDirectory: true)
+        if fileManager.fileExists(atPath: lmStudioDirectory.path) {
+            clients.append(MCPClient(
+                id: "lm-studio",
+                displayName: "LM Studio",
+                setup: .mcpServersJSON(
+                    configURL: lmStudioDirectory.appendingPathComponent("mcp.json")
+                )
+            ))
+        }
+
+        // Windsurf (Codeium) — same `mcpServers` schema, under its own directory.
+        let windsurfDirectory = home
+            .appendingPathComponent(".codeium/windsurf", isDirectory: true)
+        if fileManager.fileExists(atPath: windsurfDirectory.path) {
+            clients.append(MCPClient(
+                id: "windsurf",
+                displayName: "Windsurf",
+                setup: .mcpServersJSON(
+                    configURL: windsurfDirectory.appendingPathComponent("mcp_config.json")
+                )
+            ))
+        }
+
+        // VS Code keeps its servers under `servers` (not `mcpServers`) in the
+        // user-profile `mcp.json`. The `User` directory is the app's marker.
+        let vsCodeUserDirectory = home
+            .appendingPathComponent("Library/Application Support/Code/User", isDirectory: true)
+        if fileManager.fileExists(atPath: vsCodeUserDirectory.path) {
+            clients.append(MCPClient(
+                id: "vscode",
+                displayName: "VS Code",
+                setup: .serversJSON(
+                    configURL: vsCodeUserDirectory.appendingPathComponent("mcp.json")
                 )
             ))
         }
@@ -645,8 +702,9 @@ public enum MCPClientSetup {
     /// Whether a client already points at TorroMail.
     public static func isConfigured(_ client: MCPClient) -> Bool {
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .claudeCodeCLI(_, configURL):
-            return jsonConfigHasServer(at: configURL)
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL),
+             let .claudeCodeCLI(_, configURL):
+            return jsonConfigHasServer(at: configURL, rootKey: client.setup.jsonRootKey)
         case let .codexCLI(_, configURL):
             // Reading the file beats launching the CLI on every refresh, and
             // a TOML table header is unambiguous enough to scan for.
@@ -657,12 +715,13 @@ public enum MCPClientSetup {
         }
     }
 
-    /// Whether a top-level `mcpServers` object names our server. Shared by the
-    /// clients whose config is JSON, including Claude Code's `~/.claude.json`.
-    private static func jsonConfigHasServer(at configURL: URL) -> Bool {
+    /// Whether the top-level server object (`mcpServers`, or `servers` for VS
+    /// Code) names our server. Shared by the clients whose config is JSON,
+    /// including Claude Code's `~/.claude.json`.
+    private static func jsonConfigHasServer(at configURL: URL, rootKey: String) -> Bool {
         guard let data = try? Data(contentsOf: configURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let servers = root["mcpServers"] as? [String: Any] else {
+              let servers = root[rootKey] as? [String: Any] else {
             return false
         }
         return servers[MCPClientRegistry.serverName] != nil
@@ -677,8 +736,9 @@ public enum MCPClientSetup {
             return false
         }
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .claudeCodeCLI(_, configURL):
-            return jsonConfigToken(at: configURL) == token
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL),
+             let .claudeCodeCLI(_, configURL):
+            return jsonConfigToken(at: configURL, rootKey: client.setup.jsonRootKey) == token
         case let .codexCLI(_, configURL):
             // The key is high-entropy, so plain containment on the TOML is
             // unambiguous — better than parsing a format we never write.
@@ -689,10 +749,10 @@ public enum MCPClientSetup {
         }
     }
 
-    private static func jsonConfigToken(at configURL: URL) -> String? {
+    private static func jsonConfigToken(at configURL: URL, rootKey: String) -> String? {
         guard let data = try? Data(contentsOf: configURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let servers = root["mcpServers"] as? [String: Any],
+              let servers = root[rootKey] as? [String: Any],
               let server = servers[MCPClientRegistry.serverName] as? [String: Any],
               let env = server["env"] as? [String: Any] else {
             return nil
@@ -755,6 +815,20 @@ public enum MCPClientSetup {
               }
             }
             """
+        case .serversJSON:
+            return """
+            {
+              "servers": {
+                "\(name)": {
+                  "type": "stdio",
+                  "command": "\(commandPath)",
+                  "env": {
+                    "TORROMAIL_TOKEN": "\(token)"
+                  }
+                }
+              }
+            }
+            """
         case .hermesYAML:
             return """
             mcp_servers:
@@ -792,9 +866,10 @@ public enum MCPClientSetup {
         fileManager: FileManager = .default
     ) throws {
         switch client.setup {
-        case let .mcpServersJSON(configURL):
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL):
             try addToJSONConfig(
                 at: configURL,
+                rootKey: client.setup.jsonRootKey,
                 commandPath: commandPath,
                 token: token,
                 fileManager: fileManager
@@ -820,6 +895,7 @@ public enum MCPClientSetup {
 
     private static func addToJSONConfig(
         at target: URL,
+        rootKey: String,
         commandPath: String,
         token: String,
         fileManager: FileManager
@@ -833,12 +909,16 @@ public enum MCPClientSetup {
             }
             root = existing
         }
-        var servers = root["mcpServers"] as? [String: Any] ?? [:]
-        servers[MCPClientRegistry.serverName] = [
+        var servers = root[rootKey] as? [String: Any] ?? [:]
+        var entry: [String: Any] = [
             "command": commandPath,
             "env": ["TORROMAIL_TOKEN": token]
         ]
-        root["mcpServers"] = servers
+        // VS Code's `servers` schema tags the transport; the `mcpServers`
+        // clients infer stdio from `command` and reject an unknown key here.
+        if rootKey == "servers" { entry["type"] = "stdio" }
+        servers[MCPClientRegistry.serverName] = entry
+        root[rootKey] = servers
 
         try fileManager.createDirectory(
             at: target.deletingLastPathComponent(),
@@ -914,6 +994,9 @@ public struct MCPClientDescriptor: Identifiable, Hashable, Sendable {
         /// Top-level `mcpServers` JSON object (Claude Desktop, Cursor, and the
         /// generic default).
         case mcpServersJSON
+        /// VS Code's `mcp.json`: the same entry under a `servers` key, tagged
+        /// with `"type": "stdio"`.
+        case serversJSON
         /// Hermes' `~/.hermes/config.yaml`: YAML under `mcp_servers`.
         case hermesYAML
         /// OpenClaw's `~/.openclaw/openclaw.json`: JSON nested under
@@ -989,6 +1072,25 @@ extension MCPClientRegistry {
             displayName: "Cursor",
             symbol: "cursorarrow.rays",
             verificationHintKey: "Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "lm-studio",
+            displayName: "LM Studio",
+            symbol: "cpu",
+            verificationHintKey: "Restart LM Studio and open its MCP panel (the tools/plug icon); “torromail” must appear. Then ask a model: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "vscode",
+            displayName: "VS Code",
+            symbol: "chevron.left.forwardslash.chevron.right",
+            snippetFormat: .serversJSON,
+            verificationHintKey: "Reload VS Code, open the MCP view (Command Palette → “MCP: List Servers”), and start “torromail” — trust it if asked. Then in Chat: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "windsurf",
+            displayName: "Windsurf",
+            symbol: "wind",
+            verificationHintKey: "Restart Windsurf and open Settings → MCP (or the Cascade MCP panel); “torromail” must show as active. Then ask: “List my mail accounts.”"
         ),
         MCPClientDescriptor(
             id: "clawbot",
@@ -1146,8 +1248,12 @@ extension MCPClientSetup {
         fileManager: FileManager = .default
     ) throws {
         switch client.setup {
-        case let .mcpServersJSON(configURL):
-            try removeFromJSONConfig(at: configURL, fileManager: fileManager)
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL):
+            try removeFromJSONConfig(
+                at: configURL,
+                rootKey: client.setup.jsonRootKey,
+                fileManager: fileManager
+            )
         case let .codexCLI(executableURL, _):
             try removeViaCLI(executableURL: executableURL, extraArguments: [])
         case let .claudeCodeCLI(executableURL, _):
@@ -1155,14 +1261,18 @@ extension MCPClientSetup {
         }
     }
 
-    private static func removeFromJSONConfig(at target: URL, fileManager: FileManager) throws {
+    private static func removeFromJSONConfig(
+        at target: URL,
+        rootKey: String,
+        fileManager: FileManager
+    ) throws {
         guard let data = try? Data(contentsOf: target), !data.isEmpty else { return }
         guard var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw Failure("The existing configuration could not be read.")
         }
-        guard var servers = root["mcpServers"] as? [String: Any] else { return }
+        guard var servers = root[rootKey] as? [String: Any] else { return }
         servers[MCPClientRegistry.serverName] = nil
-        root["mcpServers"] = servers
+        root[rootKey] = servers
         let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         try updated.write(to: target, options: .atomic)
     }

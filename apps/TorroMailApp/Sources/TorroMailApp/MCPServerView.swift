@@ -12,18 +12,29 @@ struct MCPServerListView: View {
     /// for a list that redraws.
     @State private var statuses: [String: MCPClientSetupStatus] = [:]
 
+    /// Two equal columns. Each card is then "half the width, minus the gap" —
+    /// the pairing the layout is built around.
+    private static let columns = [
+        GridItem(.flexible(), spacing: 10),
+        GridItem(.flexible(), spacing: 10)
+    ]
+
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 10) {
-                ForEach(MCPClientRegistry.catalog) { descriptor in
-                    NavigationLink(value: descriptor.id) {
-                        MCPClientRow(
-                            descriptor: descriptor,
-                            status: statuses[descriptor.id]
-                                ?? MCPClientSetupStatus(isInstalled: false, isConfigured: false)
-                        )
+            VStack(spacing: 12) {
+                // Two columns: the cards go half-width and pair up, leaving room
+                // to grow the field of assistants without a taller scroll.
+                LazyVGrid(columns: Self.columns, spacing: 10) {
+                    ForEach(MCPClientRegistry.catalog) { descriptor in
+                        NavigationLink(value: descriptor.id) {
+                            MCPClientRow(
+                                descriptor: descriptor,
+                                status: statuses[descriptor.id]
+                                    ?? MCPClientSetupStatus(isInstalled: false, isConfigured: false)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 Text(L("Pick an assistant to connect it — TorroMail writes itself into the ones it knows, and hands you a snippet for the rest. Nothing is sent until you restart the assistant."))
@@ -31,7 +42,6 @@ struct MCPServerListView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 2)
-                    .padding(.top, 2)
             }
             .padding(20)
             .frame(maxWidth: 720, alignment: .top)
