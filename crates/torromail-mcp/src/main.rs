@@ -15,6 +15,17 @@ fn policy_path() -> Option<PathBuf> {
 }
 
 fn main() -> io::Result<()> {
+    // A headless server must never block on a keychain consent dialog. Disable
+    // the interaction UI for the whole process, so a secret it cannot read
+    // silently fails with an error the client can see, rather than a dialog
+    // nobody is there to answer. The app scopes every stored item to the shared
+    // Team ID, so in practice reads just succeed; this only removes the last way
+    // a prompt could ever reach the user through the server. macOS only; the
+    // lock re-enables on drop, so it is held for the entire run.
+    #[cfg(target_os = "macos")]
+    let _keychain_ui =
+        security_framework::os::macos::keychain::SecKeychain::disable_user_interaction();
+
     let arguments: Vec<String> = std::env::args().collect();
 
     if arguments.iter().any(|argument| argument == "--list-tools") {
