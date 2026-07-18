@@ -340,9 +340,13 @@ struct MCPClientDetailView: View {
     private var testSection: some View {
         if status.isInstalled {
             Section {
-                Button(L("Test setup")) { refresh(runServerTest: true) }
-                    .torroButton()
-                    .disabled(isBusy)
+                // The headline: did this client actually reach the server? The
+                // one fact a config file cannot give — read live from the log
+                // the server writes on every handshake.
+                connectionStatusRow
+
+                // One level down, what TorroMail can prove on its own: the
+                // server answers, and this client is set up to reach it.
                 checkRow(
                     ok: status.isConfigured,
                     title: L("Written into %@’s configuration"),
@@ -356,12 +360,56 @@ struct MCPClientDetailView: View {
                     )
                 }
                 serverCheckRow
+                Button(L("Check again")) { refresh(runServerTest: true) }
+                    .torroButton()
+                    .disabled(isBusy)
             } header: {
-                Text(L("Setup test"))
+                Text(L("Connection status"))
             } footer: {
-                Text(L("TorroMail can prove its own server answers and that this client points at it. Whether the client has loaded it only shows after a restart — see below."))
+                Text(L("The top line turns green when the client itself connects — the real proof, which shows after you restart it. The checks below are what TorroMail can verify on its own: its server answers, and this client is set up to reach it."))
             }
         }
+    }
+
+    /// The section's lead: the real connection, read live from `model`. Green
+    /// once the client has handshaked; a plain hint until it does, because a
+    /// configured client that never launched has never actually connected.
+    @ViewBuilder
+    private var connectionStatusRow: some View {
+        if let connection = model.clientConnections[descriptor.id] {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(String(format: L("%@ has connected to the server"), descriptor.displayName))
+                    Text(connectedDetail(connection))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Has not connected yet"))
+                    Text(String(format: L("Restart %@ to connect — it turns green here once it has."), descriptor.displayName))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    /// "Last connected 3 minutes ago", with the client's reported version when
+    /// it sent one — a small proof the handshake was real, not just configured.
+    private func connectedDetail(_ connection: ClientConnection) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        let when = formatter.localizedString(for: connection.lastConnected, relativeTo: Date())
+        let base = String(format: L("Last connected %@"), when)
+        guard !connection.reportedVersion.isEmpty else { return base }
+        return base + " · " + String(format: L("version %@"), connection.reportedVersion)
     }
 
     private var confirmSection: some View {
@@ -525,6 +573,9 @@ struct MCPClientDetailView: View {
     private func refresh(runServerTest: Bool) {
         let executable = model.generalSettings.mcpExecutable
         let descriptor = descriptor
+        // The watcher keeps this current within a couple of seconds; re-reading
+        // here makes "Check again" — and returning to the screen — immediate.
+        model.reloadClientConnections()
         if !runServerTest {
             status = MCPClientSetup.status(for: descriptor, executableName: executable, runServerTest: false)
             model.connectedClients = MCPClientRegistry.catalog

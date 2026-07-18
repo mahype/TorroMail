@@ -1633,6 +1633,98 @@ public final class AuditWatcher {
     }
 }
 
+/// One MCP client's most recent handshake with the server. This is the signal
+/// a config file cannot give: proof the client actually reached the server, not
+/// merely that it is set up to. The server records it on every `initialize`,
+/// attributed to the paired key the client presented.
+public struct ClientConnection: Hashable, Sendable {
+    public var clientID: String
+    public var lastConnected: Date
+    /// What the client called itself in the handshake, and its version — empty
+    /// when it sent none. Flavour for the UI, not identity: attribution is the
+    /// paired key, not this self-reported label.
+    public var reportedName: String
+    public var reportedVersion: String
+
+    public init(
+        clientID: String,
+        lastConnected: Date,
+        reportedName: String = "",
+        reportedVersion: String = ""
+    ) {
+        self.clientID = clientID
+        self.lastConnected = lastConnected
+        self.reportedName = reportedName
+        self.reportedVersion = reportedVersion
+    }
+}
+
+/// Reads `connections.jsonl` — the log the server appends to on every
+/// `initialize` handshake — and reduces it to each paired client's most recent
+/// connection. Sibling of `audit.jsonl`, and shares its append-only,
+/// never-throw contract: a missing file or a half-written trailing line yields
+/// what it can rather than taking the window down.
+public enum ClientConnectionLog {
+    /// `~/Library/Application Support/TorroMail/connections.jsonl` — beside the
+    /// policy document and the audit log the server also writes.
+    public static func defaultURL(fileManager: FileManager = .default) throws -> URL {
+        try fileManager
+            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("TorroMail", isDirectory: true)
+            .appendingPathComponent("connections.jsonl")
+    }
+
+    /// One line as the server writes it. Snake-case keys are mapped by hand,
+    /// mirroring `AuditLog.RawEntry`; a field an older build omitted defaults
+    /// rather than dropping the whole line.
+    private struct RawEntry: Decodable {
+        var ts: TimeInterval
+        var clientID: String?
+        var clientName: String?
+        var clientVersion: String?
+
+        enum CodingKeys: String, CodingKey {
+            case ts
+            case clientID = "client_id"
+            case clientName = "client_name"
+            case clientVersion = "client_version"
+        }
+    }
+
+    /// Each client's latest connection, keyed by the client id the server
+    /// attributed it to. A client reconnects on every launch, so the newest
+    /// line for an id wins.
+    public static func latestByClient(
+        from url: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> [String: ClientConnection] {
+        guard let target = try? url ?? defaultURL(fileManager: fileManager),
+              let text = try? String(contentsOf: target, encoding: .utf8) else {
+            return [:]
+        }
+        let decoder = JSONDecoder()
+        var latest: [String: ClientConnection] = [:]
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? decoder.decode(RawEntry.self, from: data),
+                  let id = raw.clientID, !id.isEmpty else {
+                continue
+            }
+            let date = Date(timeIntervalSince1970: raw.ts)
+            if let existing = latest[id], existing.lastConnected >= date {
+                continue
+            }
+            latest[id] = ClientConnection(
+                clientID: id,
+                lastConnected: date,
+                reportedName: raw.clientName ?? "",
+                reportedVersion: raw.clientVersion ?? ""
+            )
+        }
+        return latest
+    }
+}
+
 public enum Provider: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
@@ -2289,6 +2381,11 @@ public final class TorroMailModel: ObservableObject {
     @Published public var audit: [AuditEntry]
     /// Assistants currently talking to the MCP server.
     @Published public var connectedClients: [String]
+    /// Each MCP client's most recent handshake, keyed by client id — the live
+    /// "last connected" the detail view shows. Kept fresh by a watcher on
+    /// `connections.jsonl`, so a client restarting to connect turns the screen
+    /// green without a reload.
+    @Published public var clientConnections: [String: ClientConnection]
     @Published public var news: [NewsItem]
 
     public init(
@@ -2300,6 +2397,7 @@ public final class TorroMailModel: ObservableObject {
         generalSettings: GeneralSettings,
         audit: [AuditEntry],
         connectedClients: [String] = [],
+        clientConnections: [String: ClientConnection] = [:],
         news: [NewsItem] = []
     ) {
         self.accounts = accounts
@@ -2310,6 +2408,7 @@ public final class TorroMailModel: ObservableObject {
         self.generalSettings = generalSettings
         self.audit = audit
         self.connectedClients = connectedClients
+        self.clientConnections = clientConnections
         self.news = news
     }
 
@@ -2381,6 +2480,7 @@ extension TorroMailModel {
             // card's empty state is for.
             audit: AuditLog.load(accountNames: accountNames(state.accounts)),
             connectedClients: MCPClientSetup.configuredClientNames(),
+            clientConnections: ClientConnectionLog.latestByClient(),
             news: releaseNotes()
         )
     }
@@ -2395,6 +2495,12 @@ extension TorroMailModel {
     /// account names it resolves against may have changed.
     public func reloadAudit() {
         audit = AuditLog.load(accountNames: TorroMailModel.accountNames(accounts))
+    }
+
+    /// Re-read the connection log — after its watcher reports the file grew, so
+    /// a client that just handshook shows as connected while the app is open.
+    public func reloadClientConnections() {
+        clientConnections = ClientConnectionLog.latestByClient()
     }
 
     /// Local notes from Torro — not account data, so they are not stored.

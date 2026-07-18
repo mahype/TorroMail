@@ -386,6 +386,10 @@ struct TorroMailApp: App {
     @StateObject private var model = TorroMailModel.stored()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
     @State private var auditWatcher = AuditWatcher()
+    /// The same file watcher, pointed at `connections.jsonl` — the server
+    /// appends there on every client handshake, so watching it keeps each
+    /// client's "last connected" live rather than frozen at launch.
+    @State private var connectionWatcher = AuditWatcher(url: try? ClientConnectionLog.defaultURL())
 
     init() {
         // Before any keychain access: the app never shows the consent dialog.
@@ -422,6 +426,9 @@ struct TorroMailApp: App {
                     // than frozen at whatever launch read.
                     auditWatcher.start {
                         Task { @MainActor in model.reloadAudit() }
+                    }
+                    connectionWatcher.start {
+                        Task { @MainActor in model.reloadClientConnections() }
                     }
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in

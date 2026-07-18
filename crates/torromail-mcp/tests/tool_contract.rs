@@ -1365,6 +1365,56 @@ fn a_tool_call_appends_an_audit_line_attributing_the_client() {
 }
 
 #[test]
+fn the_initialize_handshake_records_a_connection_for_a_paired_client() {
+    let dir = temp_audit_dir("connect");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    let server =
+        LineMcpServer::with_policy_path(policy).with_presented_token(Some(TEST_KEY));
+    server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Claude Desktop","version":"1.2.3"}}}"#,
+        )
+        .expect("a response");
+
+    let log =
+        std::fs::read_to_string(dir.join("connections.jsonl")).expect("a connection line was written");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let entry: serde_json::Value =
+        serde_json::from_str(log.lines().next().expect("one line")).expect("valid json line");
+    // The handshake alone — no tool call — proves the client reached the
+    // server, attributed to the paired client that presented the key.
+    assert_eq!(entry["client_id"], "test-client");
+    assert_eq!(entry["client"], "Test Client");
+    assert_eq!(entry["protocol_version"], "2025-06-18");
+    assert_eq!(entry["client_name"], "Claude Desktop");
+    assert_eq!(entry["client_version"], "1.2.3");
+    assert!(entry["ts"].is_u64(), "the timestamp is a machine number: {entry}");
+}
+
+#[test]
+fn an_unpaired_client_leaves_no_connection_record() {
+    let dir = temp_audit_dir("connect-unpaired");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    let server = LineMcpServer::with_policy_path(policy)
+        .with_presented_token(Some("torro_intruder_ffffffffffffffffffffffffffffffff"));
+    server
+        .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .expect("a response");
+
+    let wrote_connection = dir.join("connections.jsonl").exists();
+    std::fs::remove_dir_all(&dir).ok();
+
+    // A key the allowlist does not name resolves to no identity, so a
+    // connection we cannot attribute is never claimed.
+    assert!(!wrote_connection, "an unpaired handshake must leave no trace");
+}
+
+#[test]
 fn a_refused_tool_call_is_logged_as_an_error() {
     let dir = temp_audit_dir("error-result");
     let policy = dir.join("policy.json");

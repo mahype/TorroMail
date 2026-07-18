@@ -351,6 +351,11 @@ pub struct LineMcpServer {
     /// mode — a test run without a policy path has no shared place to write,
     /// and no activity worth keeping.
     audit_path: Option<PathBuf>,
+    /// Sibling of the policy file: every `initialize` handshake from a paired
+    /// client appends one JSONL line here, so the app can prove a client
+    /// actually connected — not merely that its config points here. `None` in
+    /// fixture mode, for the same reason as `audit_path`.
+    connections_path: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -368,6 +373,7 @@ impl LineMcpServer {
             presented_token_hash: None,
             connect_override: None,
             audit_path: None,
+            connections_path: None,
         }
     }
 
@@ -384,12 +390,14 @@ impl LineMcpServer {
     /// every tool call so permission changes in the app apply immediately.
     pub fn with_policy_path(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        // The log lives beside the policy document, in the app's shared
+        // The logs live beside the policy document, in the app's shared
         // support folder — the one place both the server and the app agree on.
         let audit_path = path.parent().map(|dir| dir.join("audit.jsonl"));
+        let connections_path = path.parent().map(|dir| dir.join("connections.jsonl"));
         Self {
             policy_path: Some(path),
             audit_path,
+            connections_path,
             ..Self::fixture()
         }
     }
@@ -432,14 +440,21 @@ impl LineMcpServer {
         };
 
         Some(match request["method"].as_str().unwrap_or_default() {
-            "initialize" => json_rpc_result(
-                &id,
-                &json!({
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "TorroMail", "version": "0.1.0"}
-                }),
-            ),
+            "initialize" => {
+                // The handshake is the first — and for a client that only
+                // lists tools, the only — proof it actually reached the server.
+                // Record it so the app can show a real connection, not just a
+                // config file that points here.
+                self.record_connection(&request);
+                json_rpc_result(
+                    &id,
+                    &json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "TorroMail", "version": "0.1.0"}
+                    }),
+                )
+            }
             "tools/list" => format!(
                 r#"{{"jsonrpc":"2.0","id":{id},"result":{}}}"#,
                 self.catalog.to_mcp_tools_json()
@@ -588,6 +603,55 @@ impl LineMcpServer {
 
         // Append mode is atomic per write on the platforms we run, so parallel
         // clients writing their own processes' lines never interleave.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes());
+        }
+    }
+
+    /// Append one line noting that a paired client completed the `initialize`
+    /// handshake — the "last connected" the app cannot learn any other way, and
+    /// the half of "is it set up?" that only the client itself can prove.
+    /// Best-effort like the audit log: a handshake must never fail because its
+    /// record could not be written. Only paired clients are recorded; an
+    /// unknown key resolves to no identity and leaves no trace, so the signal
+    /// stays trustworthy — a line here means a client the app minted a key for
+    /// really connected.
+    fn record_connection(&self, request: &Value) {
+        let Some(path) = &self.connections_path else {
+            return;
+        };
+        let (client_id, client_name) = self.client_identity();
+        // The neutral fallback from `client_identity` — an unpaired or
+        // unrecognised key. Recording it would claim a connection we cannot
+        // attribute, so we stay silent.
+        if client_id == "unknown" {
+            return;
+        }
+        let params = &request["params"];
+        let protocol = params["protocolVersion"].as_str().unwrap_or_default();
+        let reported_name = params["clientInfo"]["name"].as_str().unwrap_or_default();
+        let reported_version = params["clientInfo"]["version"].as_str().unwrap_or_default();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let line = json!({
+            "ts": ts,
+            "client_id": client_id,
+            "client": client_name,
+            "protocol_version": protocol,
+            "client_name": reported_name,
+            "client_version": reported_version,
+        })
+        .to_string();
+
+        // Append mode is atomic per write on the platforms we run, so parallel
+        // clients handshaking never interleave their lines. The app derives
+        // each client's latest connection by scanning for the newest line.
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
