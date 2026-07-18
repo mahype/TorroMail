@@ -377,13 +377,7 @@ struct AccountSetupWizard: View {
 
         step = .testing
         do {
-            try KeychainStore.savePassword(
-                password,
-                forAccount: accountID,
-                alsoTrusting: MCPClientSetup.trustedExecutablePaths(
-                    executableName: model.generalSettings.mcpExecutable
-                )
-            )
+            try KeychainStore.savePassword(password, forAccount: accountID)
         } catch {
             failure = L("Could not save the password to the keychain.")
             step = .login
@@ -413,10 +407,7 @@ struct AccountSetupWizard: View {
             }
             try KeychainStore.savePassword(
                 result.tokens.keychainPayload(),
-                forAccount: accountID,
-                alsoTrusting: MCPClientSetup.trustedExecutablePaths(
-                    executableName: model.generalSettings.mcpExecutable
-                )
+                forAccount: accountID
             )
             step = .testing
             runTrial()

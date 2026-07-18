@@ -67,10 +67,12 @@ public enum TorroMailAppearance {
 /// Passwords live in the macOS keychain and nowhere else. The app writes
 /// them under one service name; the policy document only ever carries the
 /// reference (`keychain://TorroMail/{account}`), which the MCP server
-/// resolves itself. Each item's access list names the server binary,
-/// because the consent dialog macOS would otherwise show cannot appear
-/// for a headless process — it answers "no UI possible" and the lookup
-/// fails instead.
+/// resolves itself. Each item's access list is scoped to TorroMail's signing
+/// Team ID rather than to a particular binary: the app and the bundled server
+/// share one team, so both read the secret without a consent dialog — which
+/// matters because the server runs headless under an assistant and could
+/// never answer one — and the grant outlives a rebuild, because a Team ID
+/// does not change when a binary's hash does.
 public enum KeychainStore {
     public static let service = "TorroMail"
 
@@ -82,27 +84,55 @@ public enum KeychainStore {
         "keychain://\(service)/\(accountID)"
     }
 
+    /// Silences the keychain consent dialog for the whole process. TorroMail
+    /// reaches its own items by Team ID and never needs to ask the user; a read
+    /// that cannot be satisfied that way — a legacy item an old build wrote with
+    /// a binary-pinned list — should fail quietly and be skipped or re-minted,
+    /// not put a keychain-password dialog in front of someone who did nothing to
+    /// invite it. Process-wide and thread-global, so one call at launch covers
+    /// the background enumerations too. Call before any keychain access.
+    public static func silenceInteractivePrompts() {
+        SecKeychainSetUserInteractionAllowed(false)
+    }
+
     public static func savePassword(
         _ password: String,
-        forAccount accountID: String,
-        alsoTrusting executablePaths: [String] = []
+        forAccount accountID: String
     ) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: accountID
         ]
-        // Delete and re-add instead of updating in place: the access list
-        // is fixed at creation, and every save must bless the binaries as
-        // they exist right now — an update would keep the item trusting
-        // builds that are already gone.
-        SecItemDelete(query as CFDictionary)
+        let secret = Data(password.utf8)
 
+        // Add first, update on duplicate — never delete then re-add. A delete
+        // that succeeds followed by an add that fails would drop the secret
+        // entirely, which is how a rebuilt binary could wipe a stored key.
         var attributes = query
-        attributes[kSecValueData as String] = Data(password.utf8)
-        attributes[kSecAttrAccess as String] = try access(alsoTrusting: executablePaths)
+        attributes[kSecValueData as String] = secret
+        // A fresh item is scoped to the signing Team ID, so the app and the
+        // bundled server both read it without a dialog. An unsigned local build
+        // has no team to scope to and stores it with the keychain's default.
+        if let access = teamScopedAccess() {
+            attributes[kSecAttrAccess as String] = access
+        }
         let addStatus = SecItemAdd(attributes as CFDictionary, nil)
-        guard addStatus == errSecSuccess else { throw Failure(status: addStatus) }
+        if addStatus == errSecSuccess {
+            return
+        }
+        guard addStatus == errSecDuplicateItem else {
+            throw Failure(status: addStatus)
+        }
+        // The item is already there: refresh its value in place. Its existing
+        // access list is left untouched — a fresh account is written team-scoped
+        // from the start, so only a legacy item keeps an older list, and it does
+        // so without ever risking the secret.
+        let update: [String: Any] = [kSecValueData as String: secret]
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        guard updateStatus == errSecSuccess else {
+            throw Failure(status: updateStatus)
+        }
     }
 
     /// The stored secret, or nil when it is missing or this process may not
@@ -122,55 +152,76 @@ public enum KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Re-writes stored secrets so their access lists bless the binaries as
-    /// they are right now. Trust pins to a binary's hash while nothing is
-    /// code-signed, so every rebuild orphans the existing grants; running
-    /// this on launch heals them. An item this process may not read is
-    /// skipped — its next regular save carries the fresh list.
-    public static func refreshAccessControl(
-        forAccounts accountIDs: [String],
-        alsoTrusting executablePaths: [String]
-    ) {
-        for accountID in accountIDs {
-            guard let password = readPassword(forAccount: accountID) else {
-                NSLog("TorroMail: keychain item for %@ is unreadable, leaving it as is", accountID)
-                continue
-            }
-            do {
-                try savePassword(password, forAccount: accountID, alsoTrusting: executablePaths)
-            } catch {
-                NSLog("TorroMail: keychain access refresh for %@ failed", accountID)
-            }
-        }
-    }
-
-    /// An access list naming the app and the given executables. The MCP
-    /// server is a separate binary, so without it on the list every lookup
-    /// wants a consent dialog — and the server runs headless under an
-    /// assistant, where macOS cannot show one and fails the lookup outright.
-    /// These APIs are deprecated without a file-keychain replacement;
-    /// keychain access groups can take over once both binaries share a
-    /// code signature.
-    private static func access(alsoTrusting executablePaths: [String]) throws -> SecAccess {
-        var trusted: [SecTrustedApplication] = []
-        var appItself: SecTrustedApplication?
-        if SecTrustedApplicationCreateFromPath(nil, &appItself) == errSecSuccess,
-           let appItself {
-            trusted.append(appItself)
-        }
-        for path in executablePaths {
-            var executable: SecTrustedApplication?
-            if SecTrustedApplicationCreateFromPath(path, &executable) == errSecSuccess,
-               let executable {
-                trusted.append(executable)
-            }
-        }
+    /// An access list that grants read and write to any binary signed with
+    /// TorroMail's Team ID and nothing else. The application list is left empty
+    /// ("any application"); the partition list — the gate macOS actually
+    /// enforces — is pinned to this one team. Both the app and the bundled
+    /// server carry that team, so both get in without a dialog, and a rebuild
+    /// keeps working because the team outlives any single binary hash.
+    ///
+    /// Returns nil for an unsigned local build, which has no team to scope to.
+    /// The SecAccess/partition APIs are deprecated but remain the only way to
+    /// do this on the file keychain without a provisioning profile — which the
+    /// bundled server, a bare executable the assistants launch directly, cannot
+    /// carry, and which the data-protection keychain would otherwise require.
+    private static func teamScopedAccess() -> SecAccess? {
+        guard let team = ownTeamIdentifier() else { return nil }
         var created: SecAccess?
-        let status = SecAccessCreate(service as CFString, trusted as CFArray, &created)
-        guard status == errSecSuccess, let created else {
-            throw Failure(status: status)
+        guard SecAccessCreate(service as CFString, [] as CFArray, &created) == errSecSuccess,
+              let created else {
+            return nil
+        }
+        var aclList: CFArray?
+        guard SecAccessCopyACLList(created, &aclList) == errSecSuccess,
+              let acls = aclList as? [SecACL] else {
+            return nil
+        }
+        for acl in acls {
+            let auths = SecACLCopyAuthorizations(acl) as? [String] ?? []
+            var apps: CFArray?
+            var description: CFString?
+            var prompt = SecKeychainPromptSelector()
+            SecACLCopyContents(acl, &apps, &description, &prompt)
+            let label = (description as String?) ?? service
+            if auths.contains("ACLAuthorizationDecrypt") || auths.contains("ACLAuthorizationEncrypt") {
+                // Empty application list means "any application"; access is held
+                // back to the team by the partition list, not by naming binaries.
+                SecACLSetContents(acl, nil, label as CFString, SecKeychainPromptSelector(rawValue: 0))
+            }
+            if auths.contains("ACLAuthorizationPartitionID") {
+                let partitions = ["Partitions": ["teamid:\(team)"]]
+                guard let data = try? PropertyListSerialization.data(
+                    fromPropertyList: partitions, format: .xml, options: 0) else {
+                    continue
+                }
+                let hex = data.map { String(format: "%02x", $0) }.joined()
+                SecACLSetContents(acl, apps, hex as CFString, prompt)
+            }
         }
         return created
+    }
+
+    /// The Team ID in the running binary's own code signature, or nil if it
+    /// carries none (an unsigned local build). Everything TorroMail ships is
+    /// signed with one team, so this is the identity the keychain items scope
+    /// to — read once here rather than hardcoded, so it tracks the signature.
+    static func ownTeamIdentifier() -> String? {
+        var code: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else {
+            return nil
+        }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode) == errSecSuccess,
+              let staticCode else {
+            return nil
+        }
+        var infoRef: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(staticCode, flags, &infoRef) == errSecSuccess,
+              let info = infoRef as? [String: Any] else {
+            return nil
+        }
+        return info[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     /// Drops a secret. An abandoned setup writes a password to the keychain
@@ -579,16 +630,6 @@ public enum MCPClientSetup {
             return nil
         }
         return command.displayPath
-    }
-
-    /// What a fresh keychain item trusts besides the app: the server binary,
-    /// resolved the same way client configs are — the grant has to land on
-    /// the binary the assistants actually launch.
-    public static func trustedExecutablePaths(executableName: String) -> [String] {
-        guard let path = serverCommandPath(executableName: executableName) else {
-            return []
-        }
-        return [path]
     }
 
     /// Which assistants are set up to reach TorroMail — configured *and*
@@ -1345,6 +1386,143 @@ public enum PolicyDocument {
     }
 }
 
+/// The other half of the bridge: the MCP server appends one line per tool call
+/// to `audit.jsonl`, and the app reads it here to show what assistants have
+/// been doing. Read-only — the app never writes this file.
+public enum AuditLog {
+    /// `~/Library/Application Support/TorroMail/audit.jsonl` — the sibling of
+    /// the policy document the server writes to.
+    public static func defaultURL(fileManager: FileManager = .default) throws -> URL {
+        try fileManager
+            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("TorroMail", isDirectory: true)
+            .appendingPathComponent("audit.jsonl")
+    }
+
+    /// One line exactly as the server writes it: machine fields the app turns
+    /// into the display strings `AuditEntry` carries. A field an older server
+    /// build omitted defaults rather than dropping the whole line.
+    private struct RawEntry: Decodable {
+        var ts: TimeInterval
+        var client: String?
+        var account: String?
+        var tool: String?
+        var detail: String?
+        var result: String?
+    }
+
+    /// The most recent `limit` entries, newest last. Never throws: a missing
+    /// file (nothing has happened yet) or a half-written trailing line yields
+    /// what it can, because a broken log must not take the window down.
+    ///
+    /// `accountNames` maps account ids to the names the user gave them, so the
+    /// log reads "Work" rather than the internal id; an id with no match (a
+    /// since-removed account) falls back to the id itself.
+    public static func load(
+        limit: Int = 500,
+        accountNames: [String: String] = [:],
+        from url: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> [AuditEntry] {
+        guard let target = try? url ?? defaultURL(fileManager: fileManager),
+              let text = try? String(contentsOf: target, encoding: .utf8) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .suffix(limit)
+            .compactMap { line -> AuditEntry? in
+                guard let data = line.data(using: .utf8),
+                      let raw = try? decoder.decode(RawEntry.self, from: data) else {
+                    return nil
+                }
+                let accountID = raw.account ?? ""
+                let account = accountID.isEmpty
+                    ? ""
+                    : (accountNames[accountID] ?? accountID)
+                let date = Date(timeIntervalSince1970: raw.ts)
+                return AuditEntry(
+                    timestamp: date,
+                    time: displayTime(for: date),
+                    client: raw.client ?? "",
+                    account: account,
+                    event: raw.tool ?? "",
+                    detail: raw.detail ?? "",
+                    result: raw.result ?? ""
+                )
+            }
+    }
+
+    /// Compact for the activity card, dated once the entry is not from today —
+    /// a log spanning days must not show two "09:14"s that are a week apart.
+    private static func displayTime(for date: Date, now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        if Calendar.current.isDate(date, inSameDayAs: now) {
+            formatter.dateFormat = "HH:mm"
+        } else {
+            formatter.dateFormat = "dd.MM. HH:mm"
+        }
+        return formatter.string(from: date)
+    }
+}
+
+/// Watches `audit.jsonl` and fires when it grows, so the log and activity view
+/// update while the app is open rather than only on relaunch. Polls the file's
+/// size and modification date: the server only ever appends, the file may not
+/// exist yet, and a poll sidesteps the descriptor churn a vnode source would
+/// need to survive that.
+public final class AuditWatcher {
+    private let url: URL?
+    private let interval: TimeInterval
+    private var timer: DispatchSourceTimer?
+    private var lastSignature: String?
+
+    public init(url: URL? = nil, interval: TimeInterval = 2) {
+        self.url = (try? url ?? AuditLog.defaultURL())
+        self.interval = interval
+    }
+
+    /// Calls `onChange` on the main queue whenever the file changes. The first
+    /// tick establishes a baseline without firing — the caller already loaded
+    /// the log once at launch.
+    public func start(onChange: @escaping @Sendable () -> Void) {
+        stop()
+        lastSignature = currentSignature()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let signature = self.currentSignature()
+            guard signature != self.lastSignature else { return }
+            self.lastSignature = signature
+            DispatchQueue.main.async(execute: onChange)
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    public func stop() {
+        timer?.cancel()
+        timer = nil
+    }
+
+    deinit { stop() }
+
+    /// Size and mtime together: either changing means the server touched the
+    /// file. A missing file has no signature, so its later creation reads as a
+    /// change and triggers the first real load.
+    private func currentSignature() -> String? {
+        guard let url,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return nil
+        }
+        let size = (attributes[.size] as? Int) ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size)-\(modified)"
+    }
+}
+
 public enum Provider: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
     case imapSmtp = "IMAP/SMTP"
     case gmail = "Gmail"
@@ -1951,25 +2129,37 @@ public final class MCPServerSupervisor: ObservableObject {
 
 public struct AuditEntry: Identifiable, Hashable {
     public var id: UUID
+    /// When the action happened — the sortable source of truth. `time` is only
+    /// its human-facing rendering, which is not orderable on its own (a compact
+    /// "HH:mm" for today sits next to a dated "dd.MM. HH:mm" for older entries).
+    public var timestamp: Date
     public var time: String
     public var client: String
     public var account: String
     public var event: String
+    /// What the call acted on — the query searched, the message read, the
+    /// recipients a draft names, the count and destination of a move or delete.
+    /// Empty for calls that name nothing (listing accounts, reading the policy).
+    public var detail: String
     public var result: String
 
     public init(
         id: UUID = UUID(),
+        timestamp: Date = Date(),
         time: String,
         client: String,
         account: String,
         event: String,
+        detail: String = "",
         result: String
     ) {
         self.id = id
+        self.timestamp = timestamp
         self.time = time
         self.client = client
         self.account = account
         self.event = event
+        self.detail = detail
         self.result = result
     }
 }
@@ -2076,12 +2266,25 @@ extension TorroMailModel {
             accounts: state.accounts,
             selectedSidebarItem: .dashboard,
             generalSettings: state.settings,
-            // Audit entries need real logging; until then the log is honest
-            // about being empty.
-            audit: [],
+            // What the assistants have done, as the MCP server recorded it.
+            // Empty until the first tool call — that is what the activity
+            // card's empty state is for.
+            audit: AuditLog.load(accountNames: accountNames(state.accounts)),
             connectedClients: MCPClientSetup.configuredClientNames(),
             news: releaseNotes()
         )
+    }
+
+    /// Account id → the name the user gave it, so the log can attribute a call
+    /// to "Work" rather than its internal id.
+    public static func accountNames(_ accounts: [MailAccount]) -> [String: String] {
+        Dictionary(accounts.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Re-read the log — after the watcher reports the file grew, or when the
+    /// account names it resolves against may have changed.
+    public func reloadAudit() {
+        audit = AuditLog.load(accountNames: TorroMailModel.accountNames(accounts))
     }
 
     /// Local notes from Torro — not account data, so they are not stored.
@@ -2161,18 +2364,28 @@ extension TorroMailModel {
             generalSettings: GeneralSettings(),
             audit: [
                 AuditEntry(
-                    time: "10:42:18",
+                    time: "10:42",
                     client: "Claude Desktop",
                     account: "Work",
                     event: "mail_search",
-                    result: "Allowed"
+                    detail: "Rechnung · INBOX",
+                    result: "ok"
                 ),
                 AuditEntry(
-                    time: "10:43:05",
+                    time: "10:43",
                     client: "Claude Desktop",
                     account: "Work",
-                    event: "mail_prepare_send",
-                    result: "Pending"
+                    event: "mail_prepare_move",
+                    detail: "3 → Archiv",
+                    result: "ok"
+                ),
+                AuditEntry(
+                    time: "10:44",
+                    client: "Claude Desktop",
+                    account: "Work",
+                    event: "mail_confirm_action",
+                    detail: "moved 3 → Archiv",
+                    result: "ok"
                 )
             ],
             connectedClients: ["Claude Desktop"],

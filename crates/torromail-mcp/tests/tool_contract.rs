@@ -1327,3 +1327,173 @@ fn check_account_sits_behind_the_pairing_gate() {
     assert!(wrong.contains("revoked or is not valid"), "got: {wrong}");
     assert!(through.contains("keychain"), "got: {through}");
 }
+
+// --- Audit log ------------------------------------------------------------
+//
+// Every tool call appends one JSONL line beside the policy document, so the
+// app's activity view and log have something real to show. These pin the
+// shape and the client attribution.
+
+/// A policy path inside a fresh directory, so the `audit.jsonl` the server
+/// writes as a sibling is isolated from every other test's calls.
+fn temp_audit_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("torromail-audit-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("audit test directory");
+    dir
+}
+
+#[test]
+fn a_tool_call_appends_an_audit_line_attributing_the_client() {
+    let dir = temp_audit_dir("attribution");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(policy)
+        .with_presented_token(Some(TEST_KEY));
+    server.handle_line(LIST_ACCOUNTS).expect("a response");
+
+    let log = std::fs::read_to_string(dir.join("audit.jsonl")).expect("an audit line was written");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let entry: serde_json::Value =
+        serde_json::from_str(log.lines().next().expect("one line")).expect("valid json line");
+    assert_eq!(entry["tool"], "mail_list_accounts");
+    assert_eq!(entry["result"], "ok");
+    assert_eq!(entry["client_id"], "test-client");
+    assert_eq!(entry["client"], "Test Client");
+    assert!(entry["ts"].is_u64(), "the timestamp is a machine number: {entry}");
+}
+
+#[test]
+fn a_refused_tool_call_is_logged_as_an_error() {
+    let dir = temp_audit_dir("error-result");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    // A paired client asking for an account the document does not name: the
+    // gate passes, the account lookup refuses, and that refusal is the line.
+    let server = LineMcpServer::with_policy_path_and_fixtures(policy)
+        .with_presented_token(Some(TEST_KEY));
+    let missing = r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"mail_list_mailboxes","arguments":{"account_id":"nope"}}}"#;
+    server.handle_line(missing).expect("a response");
+
+    let log = std::fs::read_to_string(dir.join("audit.jsonl")).expect("an audit line was written");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let entry: serde_json::Value =
+        serde_json::from_str(log.lines().next().expect("one line")).expect("valid json line");
+    assert_eq!(entry["tool"], "mail_list_mailboxes");
+    assert_eq!(entry["account"], "nope");
+    assert_eq!(entry["result"], "error");
+}
+
+#[test]
+fn an_unpaired_refusal_is_still_logged_for_the_owner_to_see() {
+    let dir = temp_audit_dir("unpaired");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    // No token: the gate refuses before dispatch, but the owner still wants
+    // to know something knocked — logged as an unknown client.
+    let server = LineMcpServer::with_policy_path_and_fixtures(policy);
+    server.handle_line(LIST_ACCOUNTS).expect("a response");
+
+    let log = std::fs::read_to_string(dir.join("audit.jsonl")).expect("an audit line was written");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let entry: serde_json::Value =
+        serde_json::from_str(log.lines().next().expect("one line")).expect("valid json line");
+    assert_eq!(entry["tool"], "mail_list_accounts");
+    assert_eq!(entry["result"], "error");
+    assert_eq!(entry["client_id"], "unknown");
+}
+
+/// Every line of the isolated audit log, parsed.
+fn audit_lines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("audit.jsonl"))
+        .expect("an audit log was written")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid json line"))
+        .collect()
+}
+
+#[test]
+fn audit_detail_names_what_a_search_and_draft_touched() {
+    let dir = temp_audit_dir("detail-read");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+
+    let server = LineMcpServer::with_policy_path_and_fixtures(policy)
+        .with_presented_token(Some(TEST_KEY));
+    server
+        .handle_line(r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"Rechnung","mailbox":"INBOX"}}}"#)
+        .expect("a response");
+    server
+        .handle_line(r#"{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["kunde@example.com"],"subject":"Angebot"}}}"#)
+        .expect("a response");
+
+    let lines = audit_lines(&dir);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let search = &lines[0];
+    assert_eq!(search["tool"], "mail_search");
+    // The query and the mailbox it scanned — what was retrieved, not just that
+    // a search happened.
+    assert_eq!(search["detail"], "Rechnung · INBOX");
+
+    let draft = &lines[1];
+    assert_eq!(draft["tool"], "mail_create_draft");
+    assert_eq!(draft["detail"], "kunde@example.com — Angebot");
+}
+
+#[test]
+fn audit_detail_follows_a_move_from_intent_to_execution() {
+    let dir = temp_audit_dir("detail-move");
+    let policy = dir.join("policy.json");
+    // Move granted, and an allowlist so the line is attributed to a real client.
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"full_message","write":{{"move":true}},"send":false,"per_folder":false,"folder_rules":{{}}}}],"clients":[{{"id":"test-client","name":"Test Client","token_sha256":"{TEST_KEY_SHA256}"}}]}}"#
+        ),
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([StoredMessage::new(
+            AccountId::new("work"),
+            "INBOX",
+            "m1",
+            "thread-1",
+            "Subject",
+            "s@example.com",
+            "snippet",
+            "body",
+        )])) as Box<dyn MailProvider>)
+    })
+    .with_presented_token(Some(TEST_KEY));
+
+    let prepare = server
+        .handle_line(r#"{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"mail_prepare_move","arguments":{"account_id":"work","message_ids":["m1"],"target_mailbox":"Archive"}}}"#)
+        .expect("a response");
+    let pending_id = payload_field(&prepare, "pending_action_id");
+    let code = payload_field(&prepare, "confirmation_code");
+    server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":93,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"{code}"}}}}}}"#
+        ))
+        .expect("a response");
+
+    let lines = audit_lines(&dir);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // The intent: what would move, and where.
+    assert_eq!(lines[0]["tool"], "mail_prepare_move");
+    assert_eq!(lines[0]["detail"], "1 → Archive");
+    // The execution: read from the result, so the confirm line stands on its
+    // own rather than only referencing a pending id.
+    assert_eq!(lines[1]["tool"], "mail_confirm_action");
+    assert_eq!(lines[1]["detail"], "moved 1 → Archive");
+    assert_eq!(lines[1]["result"], "ok");
+    assert_eq!(lines[1]["client"], "Test Client");
+}

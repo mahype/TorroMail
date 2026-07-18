@@ -346,6 +346,11 @@ pub struct LineMcpServer {
     presented_token_hash: Option<String>,
     /// Test seam: when set, this makes the mailbox instead of a TLS session.
     connect_override: Option<ConnectOverride>,
+    /// Sibling of the policy file: every tool call appends one JSONL line here
+    /// so the app can show what assistants have been doing. `None` in fixture
+    /// mode — a test run without a policy path has no shared place to write,
+    /// and no activity worth keeping.
+    audit_path: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -362,6 +367,7 @@ impl LineMcpServer {
             drafts: RefCell::default(),
             presented_token_hash: None,
             connect_override: None,
+            audit_path: None,
         }
     }
 
@@ -377,8 +383,13 @@ impl LineMcpServer {
     /// A server that enforces the policy document at `path`, reloading it on
     /// every tool call so permission changes in the app apply immediately.
     pub fn with_policy_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        // The log lives beside the policy document, in the app's shared
+        // support folder — the one place both the server and the app agree on.
+        let audit_path = path.parent().map(|dir| dir.join("audit.jsonl"));
         Self {
-            policy_path: Some(path.into()),
+            policy_path: Some(path),
+            audit_path,
             ..Self::fixture()
         }
     }
@@ -433,7 +444,11 @@ impl LineMcpServer {
                 r#"{{"jsonrpc":"2.0","id":{id},"result":{}}}"#,
                 self.catalog.to_mcp_tools_json()
             ),
-            "tools/call" => self.handle_tool_call(&request, &id),
+            "tools/call" => {
+                let response = self.handle_tool_call(&request, &id);
+                self.record_audit(&request, &response);
+                response
+            }
             _ => json_rpc_error(&id, -32601, "method not found"),
         })
     }
@@ -529,6 +544,78 @@ impl LineMcpServer {
         }
 
         json_rpc_error(id, -32000, "tool not implemented yet")
+    }
+
+    /// Append one line describing a finished tool call, so the app's log and
+    /// activity view have something real to show. Best-effort by design: a
+    /// mail action must never fail because its audit line could not be written,
+    /// so every error here is swallowed.
+    fn record_audit(&self, request: &Value, response: &str) {
+        let Some(path) = &self.audit_path else {
+            return;
+        };
+        let name = request["params"]["name"].as_str().unwrap_or_default();
+        if name.is_empty() {
+            return;
+        }
+        let arguments = &request["params"]["arguments"];
+        let account = arguments["account_id"].as_str().unwrap_or_default();
+        // A JSON-RPC error object is the only failure shape; anything else the
+        // dispatch produced is a result the tool meant to return.
+        let parsed = serde_json::from_str::<Value>(response).ok();
+        let failed = parsed
+            .as_ref()
+            .is_some_and(|value| value.get("error").is_some());
+        // The tool's own payload rides as a JSON string inside the MCP text
+        // content — where a confirmed action's executed counts live.
+        let payload = parsed.as_ref().and_then(audit_payload);
+        let detail = audit_detail(name, arguments, payload.as_ref());
+        let (client_id, client_name) = self.client_identity();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let line = json!({
+            "ts": ts,
+            "client_id": client_id,
+            "client": client_name,
+            "account": account,
+            "tool": name,
+            "detail": detail,
+            "result": if failed { "error" } else { "ok" },
+        })
+        .to_string();
+
+        // Append mode is atomic per write on the platforms we run, so parallel
+        // clients writing their own processes' lines never interleave.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes());
+        }
+    }
+
+    /// Which paired client is calling, resolved from the token it presented
+    /// against the document's allowlist — labels for attribution, not a right.
+    /// Falls back to a neutral label when there is no allowlist (fixture data)
+    /// or the key matches no entry.
+    fn client_identity(&self) -> (String, String) {
+        let unknown = || ("unknown".to_owned(), "Unknown".to_owned());
+        let Some(hash) = &self.presented_token_hash else {
+            return unknown();
+        };
+        let Ok(Some(document)) = self.document() else {
+            return unknown();
+        };
+        let Some(clients) = document.clients else {
+            return unknown();
+        };
+        clients
+            .into_iter()
+            .find(|client| &client.token_sha256 == hash)
+            .map_or_else(unknown, |client| (client.id, client.name))
     }
 
     /// Run one mail operation against a pooled connection. The connection is
@@ -1617,6 +1704,105 @@ fn handle_mail_list_mailboxes(
         .list_mailboxes(account_id)
         .map_err(ToolFailure::Core)?;
     Ok(json!({ "mailboxes": mailboxes }))
+}
+
+/// Unwrap a tool's own payload from a response envelope: it rides as a JSON
+/// string inside the first text-content block. `None` for an error response
+/// (no content) or anything that does not parse.
+fn audit_payload(response: &Value) -> Option<Value> {
+    let text = response["result"]["content"][0]["text"].as_str()?;
+    serde_json::from_str(text).ok()
+}
+
+/// A short, human-meaningful description of what a call acted on — the query
+/// searched, the message read, the recipients a draft names, the count and
+/// destination of a move or delete. Empty for calls that name nothing (listing
+/// accounts or mailboxes, reading the policy). For a confirmed action the
+/// detail comes from the result, which is where the executed counts live.
+fn audit_detail(name: &str, arguments: &Value, payload: Option<&Value>) -> String {
+    let count = |value: &Value| string_array(value).len();
+    match name {
+        "mail_search" => {
+            let query = arguments["query"].as_str().unwrap_or_default();
+            match arguments["mailbox"].as_str() {
+                Some(mailbox) if !mailbox.is_empty() && !query.is_empty() => {
+                    format!("{query} · {mailbox}")
+                }
+                Some(mailbox) if !mailbox.is_empty() => mailbox.to_owned(),
+                _ => query.to_owned(),
+            }
+        }
+        "mail_refine_search" => arguments["refinement"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        "mail_get_message" => arguments["message_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        "mail_get_thread" => arguments["thread_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        "mail_mark" => {
+            let mark = arguments["mark"].as_str().unwrap_or_default();
+            if mark.is_empty() {
+                String::new()
+            } else {
+                format!("{mark} ×{}", count(&arguments["message_ids"]))
+            }
+        }
+        "mail_create_draft" => {
+            let to = string_array(&arguments["to"]).join(", ");
+            let subject = arguments["subject"].as_str().unwrap_or_default();
+            match (to.is_empty(), subject.is_empty()) {
+                (false, false) => format!("{to} — {subject}"),
+                (false, true) => to,
+                (true, false) => subject.to_owned(),
+                (true, true) => String::new(),
+            }
+        }
+        "mail_prepare_send" => arguments["draft_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        "mail_prepare_move" => format!(
+            "{} → {}",
+            count(&arguments["message_ids"]),
+            arguments["target_mailbox"].as_str().unwrap_or_default()
+        ),
+        "mail_prepare_delete" => {
+            let n = count(&arguments["message_ids"]);
+            if arguments["permanent"].as_bool().unwrap_or(false) {
+                format!("{n} · permanent")
+            } else {
+                format!("{n} → Trash")
+            }
+        }
+        "mail_confirm_action" => confirm_detail(arguments, payload),
+        _ => String::new(),
+    }
+}
+
+/// What a confirmed action actually did, read from its result. Falls back to
+/// the pending id when there is no result to describe — a refusal, an expired
+/// or already-used confirmation.
+fn confirm_detail(arguments: &Value, payload: Option<&Value>) -> String {
+    let Some(payload) = payload else {
+        return arguments["pending_action_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+    };
+    let n = |key: &str| payload[key].as_u64().unwrap_or_default();
+    let at = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
+    match payload["status"].as_str().unwrap_or_default() {
+        "moved" => format!("moved {} → {}", n("moved"), at("target")),
+        "trashed" => format!("trashed {} → {}", n("trashed"), at("mailbox")),
+        "deleted" => format!("deleted {}", n("deleted")),
+        "sent" => format!("sent → {} recipient(s)", n("recipients")),
+        other => other.to_owned(),
+    }
 }
 
 /// Tool payloads travel as MCP text content: JSON inside a text block.

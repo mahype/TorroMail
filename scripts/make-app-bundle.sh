@@ -28,4 +28,22 @@ DEV_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed
     -c "Set :CFBundleShortVersionString ${DEV_VERSION:-dev}" \
     "$APP/Contents/Info.plist" >/dev/null
 
+# Sign both binaries with a stable team identity. The keychain grants read
+# access to a stored password by the caller's signing Team ID, so the app and
+# the bundled server — same team — reach it without a consent dialog, and the
+# grant survives a rebuild. Adhoc/unsigned builds carry no team, so the
+# keychain would fall back to prompting once per item on every rebuild.
+# Sign the nested server first, then the bundle, so both executables are
+# covered (a bundle signature does not reach a second Mach-O in MacOS/).
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Apple Development|Developer ID Application/ { print $2; exit }')}"
+if [ -n "$IDENTITY" ]; then
+    codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/torromail-mcp"
+    codesign --force --sign "$IDENTITY" "$APP"
+    echo "Signed: $IDENTITY"
+else
+    echo "warning: no codesigning identity found; keychain will prompt per item" >&2
+    echo "         set CODESIGN_IDENTITY or install an Apple Development certificate" >&2
+fi
+
 echo "Bundle: $APP"

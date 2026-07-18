@@ -33,6 +33,40 @@ func label(for preset: PermissionPreset) -> String {
     }
 }
 
+/// A log entry's tool name in plain language. An unknown tool — an entry from
+/// a newer server than this app — shows its raw name rather than nothing.
+func auditEventLabel(_ tool: String) -> String {
+    switch tool {
+    case "mail_list_accounts": L("Listed accounts")
+    case "mail_search": L("Searched mail")
+    case "mail_refine_search": L("Refined a search")
+    case "mail_get_message": L("Read a message")
+    case "mail_get_thread": L("Read a conversation")
+    case "mail_list_mailboxes": L("Listed mailboxes")
+    case "mail_mark": L("Marked a message")
+    case "mail_create_draft": L("Created a draft")
+    case "mail_prepare_send": L("Prepared a send")
+    case "mail_prepare_move": L("Prepared a move")
+    case "mail_prepare_delete": L("Prepared a delete")
+    case "mail_confirm_action": L("Confirmed an action")
+    case "mail_get_policy": L("Checked permissions")
+    case "mail_get_cache_status": L("Checked cache status")
+    case "": ""
+    default: tool
+    }
+}
+
+/// A log entry's outcome in plain language: the server records only whether
+/// the call produced a result or an error.
+func auditResultLabel(_ result: String) -> String {
+    switch result {
+    case "ok": L("Completed")
+    case "error": L("Refused")
+    case "": ""
+    default: result
+    }
+}
+
 /// SF Symbol for a mailbox by its common IMAP name; a plain folder otherwise.
 private func mailboxSymbol(_ name: String) -> String {
     switch name.lowercased() {
@@ -351,8 +385,13 @@ struct TorroMailApp: App {
     @NSApplicationDelegateAdaptor(TorroMailPresence.self) private var presence
     @StateObject private var model = TorroMailModel.stored()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
+    @State private var auditWatcher = AuditWatcher()
 
     init() {
+        // Before any keychain access: the app never shows the consent dialog.
+        // It reads its own items by Team ID; anything it cannot read that way
+        // is skipped or re-minted rather than prompting the user.
+        KeychainStore.silenceInteractivePrompts()
         registerBrandFont()
     }
 
@@ -367,19 +406,6 @@ struct TorroMailApp: App {
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                     let executable = model.generalSettings.mcpExecutable
-                    // Unsigned builds pin keychain trust to binary hashes, so
-                    // a rebuilt server loses its read grants; re-blessing on
-                    // every launch keeps lookups from wanting a consent
-                    // dialog the headless server can never show.
-                    let accountIDs = model.accounts.map(\.id)
-                    await Task.detached(priority: .utility) {
-                        KeychainStore.refreshAccessControl(
-                            forAccounts: accountIDs,
-                            alsoTrusting: MCPClientSetup.trustedExecutablePaths(
-                                executableName: executable
-                            )
-                        )
-                    }.value
                     // Configs written before access keys existed get theirs
                     // now. Off the main actor — the CLI-owned ones are
                     // rewritten by their own tools, and that is a process
@@ -391,6 +417,12 @@ struct TorroMailApp: App {
                     if healed {
                         publishPolicyDocument(for: model.accounts)
                     }
+                    // The MCP server appends to the log as assistants work;
+                    // watching it keeps the activity card and log live rather
+                    // than frozen at whatever launch read.
+                    auditWatcher.start {
+                        Task { @MainActor in model.reloadAudit() }
+                    }
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show
@@ -401,6 +433,9 @@ struct TorroMailApp: App {
                 .onChange(of: model.accounts, initial: true) { _, accounts in
                     publishPolicyDocument(for: accounts)
                     persistState(accounts: accounts, settings: model.generalSettings)
+                    // A renamed or removed account changes how the log reads —
+                    // re-map its entries against the current names.
+                    model.reloadAudit()
                 }
                 .onChange(of: model.generalSettings) { _, settings in
                     persistState(accounts: model.accounts, settings: settings)
@@ -803,25 +838,42 @@ private struct RecentActivityCard: View {
 
     var body: some View {
         DashboardCard(title: L("Recent Activity")) {
-            VStack(spacing: 0) {
-                ForEach(Array(model.audit.suffix(4).reversed().enumerated()), id: \.element.id) { index, entry in
-                    if index > 0 { Divider() }
-                    HStack(spacing: 10) {
-                        Text(entry.time)
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                        Text(entry.client)
-                        Text(entry.event)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 8)
-                        Text(entry.result)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+            if model.audit.isEmpty {
+                Text(L("No activity yet. It appears here the moment an assistant does something."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 7)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(model.audit.suffix(4).reversed().enumerated()), id: \.element.id) { index, entry in
+                        if index > 0 { Divider() }
+                        HStack(spacing: 10) {
+                            Text(entry.time)
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                            Text(entry.client)
+                            Text(auditEventLabel(entry.event))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                            if !entry.detail.isEmpty {
+                                Text(entry.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer(minLength: 8)
+                            Text(auditResultLabel(entry.result))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 7)
+                    }
                 }
             }
         } accessory: {
@@ -1679,14 +1731,30 @@ private struct SettingsView: View {
 
 private struct LogView: View {
     @EnvironmentObject private var model: TorroMailModel
+    // Newest first by default. Ordering keys off the real timestamp, never the
+    // rendered `time` string (which is not orderable across days); clicking any
+    // header re-sorts by that column.
+    @State private var sortOrder = [KeyPathComparator(\AuditEntry.timestamp, order: .reverse)]
 
     var body: some View {
-        Table(model.audit) {
-            TableColumn(L("Time"), value: \.time)
-            TableColumn(L("Client"), value: \.client)
-            TableColumn(L("Account"), value: \.account)
-            TableColumn(L("Event"), value: \.event)
-            TableColumn(L("Result"), value: \.result)
+        Table(model.audit.sorted(using: sortOrder), sortOrder: $sortOrder) {
+            TableColumn(L("Time"), value: \.timestamp) { Text($0.time).monospacedDigit() }
+            TableColumn(L("Client"), value: \.client) { Text($0.client) }
+            TableColumn(L("Account"), value: \.account) { Text($0.account) }
+            TableColumn(L("Event"), value: \.event) { Text(auditEventLabel($0.event)) }
+            TableColumn(L("Details"), value: \.detail) { entry in
+                Text(entry.detail).textSelection(.enabled)
+            }
+            TableColumn(L("Result"), value: \.result) { Text(auditResultLabel($0.result)) }
+        }
+        .overlay {
+            if model.audit.isEmpty {
+                ContentUnavailableView(
+                    L("No activity yet"),
+                    systemImage: "clock.arrow.circlepath",
+                    description: Text(L("Every action an assistant takes is recorded here — reading, searching, drafting and the rest."))
+                )
+            }
         }
         .navigationTitle(L("Log"))
         .toolbar {

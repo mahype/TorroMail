@@ -212,6 +212,25 @@
 "Event" = "Ereignis";
 "Result" = "Ergebnis";
 "Export…" = "Exportieren …";
+"No activity yet. It appears here the moment an assistant does something." = "Noch keine Aktivität. Sie erscheint hier, sobald ein Assistent etwas tut.";
+"No activity yet" = "Noch keine Aktivität";
+"Every action an assistant takes is recorded here — reading, searching, drafting and the rest." = "Jede Aktion eines Assistenten wird hier festgehalten — Lesen, Suchen, Entwerfen und der Rest.";
+"Listed accounts" = "Konten aufgelistet";
+"Searched mail" = "E-Mails durchsucht";
+"Refined a search" = "Suche verfeinert";
+"Read a message" = "Nachricht gelesen";
+"Read a conversation" = "Konversation gelesen";
+"Listed mailboxes" = "Ordner aufgelistet";
+"Marked a message" = "Nachricht markiert";
+"Created a draft" = "Entwurf erstellt";
+"Prepared a send" = "Senden vorbereitet";
+"Prepared a move" = "Verschieben vorbereitet";
+"Prepared a delete" = "Löschen vorbereitet";
+"Confirmed an action" = "Aktion bestätigt";
+"Checked permissions" = "Berechtigungen abgefragt";
+"Checked cache status" = "Cache-Status abgefragt";
+"Completed" = "Erledigt";
+"Refused" = "Abgelehnt";
 
 /* Wizard */
 "Email" = "E-Mail";
