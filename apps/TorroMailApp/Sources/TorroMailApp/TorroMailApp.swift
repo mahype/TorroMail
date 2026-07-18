@@ -616,7 +616,6 @@ private struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                BrandHero()
                 if model.health == .notConfigured {
                     GettingStartedCard()
                 } else {
@@ -634,33 +633,52 @@ private struct DashboardView: View {
             .frame(maxWidth: .infinity)
         }
         .background(.background.secondary)
-        .navigationTitle(L("Overview"))
+        // The hero is the header of this pane: pinned above the scroll
+        // content at full width, its red running up behind the toolbar. The
+        // toolbar keeps no background and no title text — the wordmark takes
+        // that role. An empty string (not a removed modifier) so the title a
+        // previously selected pane set does not linger over the red.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            BrandHero()
+        }
+        .navigationTitle("")
+        .toolbarBackground(.hidden, for: .windowToolbar)
     }
 }
 
 /// The one place the brand gets to be loud: red ground, the wordmark, and in
-/// one line what this app actually does.
+/// one line what this app actually does. A full-bleed header band across the
+/// detail pane, not a card: the text column mirrors the card column below so
+/// wordmark and content share a left edge.
 private struct BrandHero: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TorroWordmark(capHeight: 15)
+            TorroWordmark(capHeight: 16)
+            // No `.fixedSize(horizontal: false, vertical: true)` here: outside
+            // a ScrollView it drives the window's fitting-size negotiation
+            // into the text's minimum width, and the whole split view lays
+            // out collapsed and clipped. Plain wrapping needs no help in this
+            // stack anyway.
             Text(L("Your mailboxes for AI assistants — nothing leaves without your say-so."))
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.92))
-                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 6)
+        .padding(.bottom, 16)
         .background {
-            let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+            // Vertical, not diagonal: one unbroken red from the window's top
+            // edge — the expanded bounds reach it — down to the deep-red foot.
             LinearGradient(
                 colors: [.torroRed, .torroRedDeep],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                startPoint: .top,
+                endPoint: .bottom
             )
             // The signet as a watermark, the use torro-design lists for it. It
-            // runs off the right edge on purpose — cropped by the card rather
+            // runs off the right edge on purpose — cropped by the band rather
             // than floating as a lone shape. It has to be an overlay: as a
             // sibling in a stack its fixed 150pt would set the height, and the
             // red would spill past the hero onto whatever sits below.
@@ -670,11 +688,12 @@ private struct BrandHero: View {
                     .frame(width: 260, height: 150)
                     .offset(x: 95)
             }
-            .clipShape(shape)
-            .overlay {
-                shape.strokeBorder(.white.opacity(0.18), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
+            // Clip before extending: the expanded frame is what the signet
+            // gets cropped against, so the red — and the crop — reach the
+            // window's top edge behind the background-less toolbar.
+            .clipped()
+            .shadow(color: .black.opacity(0.25), radius: 7, y: 2)
+            .ignoresSafeArea(edges: .top)
         }
     }
 }
