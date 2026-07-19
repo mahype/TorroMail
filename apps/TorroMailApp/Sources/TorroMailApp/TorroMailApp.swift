@@ -603,6 +603,17 @@ private struct TorroMailRootView: View {
             .safeAreaInset(edge: .bottom) {
                 SidebarBrandFooter()
             }
+            // The sidebar is an opaque surface, not translucent material
+            // (design guide §Fenster): the sidebar material blends against
+            // what is behind the window and falls back to exactly this grey
+            // whenever the compositor cannot sample — first frames after the
+            // window opens, window not key, Mission Control, screen capture.
+            // The surface flickered between two states anyway; we take the
+            // stable one. Applied after the footer inset so list and footer
+            // share one ground, with the panel shadow towards the content.
+            .scrollContentBackground(.hidden)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .shadow(color: .black.opacity(0.12), radius: 6, x: 2, y: 0)
         } detail: {
             detailView
         }
@@ -723,7 +734,7 @@ private struct DashboardView: View {
 private struct BrandHero: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TorroWordmark(capHeight: 16)
+            TorroWordmark(capHeight: 15)
             // No `.fixedSize(horizontal: false, vertical: true)` here: outside
             // a ScrollView it drives the window's fitting-size negotiation
             // into the text's minimum width, and the whole split view lays
@@ -740,12 +751,14 @@ private struct BrandHero: View {
         .padding(.top, 6)
         .padding(.bottom, 16)
         .background {
-            // Vertical, not diagonal: one unbroken red from the window's top
-            // edge — the expanded bounds reach it — down to the deep-red foot.
+            // Diagonal, top-left to bottom-right, as torro-design specifies:
+            // the red still reaches the window's top edge unbroken — the
+            // expanded bounds see to that — it just runs to the deep-red foot
+            // across the band rather than straight down it.
             LinearGradient(
                 colors: [.torroRed, .torroRedDeep],
-                startPoint: .top,
-                endPoint: .bottom
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
             )
             // The signet as a watermark, the use torro-design lists for it. It
             // runs off the right edge on purpose — cropped by the band rather
@@ -754,7 +767,7 @@ private struct BrandHero: View {
             // red would spill past the hero onto whatever sits below.
             .overlay(alignment: .trailing) {
                 TorroSignet()
-                    .fill(.white.opacity(0.09))
+                    .fill(.white.opacity(0.10))
                     .frame(width: 260, height: 150)
                     .offset(x: 95)
             }
