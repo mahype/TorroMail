@@ -337,11 +337,11 @@ dependencies = [
 
 [[package]]
 name = "torromail-core"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "torromail-imap-tls"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rustls",
  "torromail-core",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "security-framework",
  "serde_json",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-oauth"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde_json",
  "ureq",
