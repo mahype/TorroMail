@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- TorroMail app icon: the Torro horns signet on the brand red square, per
-     the torro-design guide ("App-Icons das Quadrat"). Canvas follows the
-     macOS icon grid: 1024pt canvas, 824pt rounded square with transparent
-     margins. Colors from tokens/tokens.json (torro-red, torro-red-deep). -->
+<!-- TorroMail app icon, per the torro-design family system (design guide,
+     section 08): the horns signet on top, the function glyph — an envelope —
+     below it, both white on the brand red gradient. Traced from the template
+     at logo/icon-square/products/torromail-icon.svg, laid out on the macOS
+     icon grid: 1024pt canvas, 824pt rounded square with transparent margins.
+     Colors from tokens/tokens.json (torro-red, torro-red-deep). -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="torro-bg" x1="0" y1="0" x2="0" y2="1">
@@ -11,12 +13,15 @@
     </linearGradient>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#torro-bg)"/>
-  <g transform="translate(204, 209) scale(4.12)" fill="#FFFFFF">
-    <path d="M54,108.4c-9.1-1.5-15.5-2.9-22.4-5.1C18,99,11.1,90.2,12.3,78.6c0.8-7.8,4.5-14.2,12.9-22.1
-      c8.1-7.8,23.8-18.9,24.9-17.8c0.3,0.5-0.2,5.5-1.2,11.3c-2,11.3-2.3,16.8-1.1,18.6c1.5,2.3,5.6,3.6,13.5,4.2l8.2,0.7V91v17.5
-      l-6.5,0.1C59.4,108.7,55.4,108.6,54,108.4z"/>
-    <path d="M79.5,107.9c-0.3-0.8-0.4-8.9-0.3-17.9l0.3-16.5l8.2-0.7c7.9-0.6,12-1.9,13.5-4.2c1.2-1.8,0.9-7.3-1.1-18.6
-      c-1-5.8-1.5-10.8-1.2-11.3c1.1-1.1,16.8,10,24.9,17.8c4.2,3.9,8.5,9.1,9.9,11.9c3,6,4,14,2.3,19.1c-1.9,5.9-8.3,12.1-14.8,14.5
-      C106.9,107.4,80.7,111,79.5,107.9z"/>
+  <!-- The horns, from the square logo — the family watermark every app shares. -->
+  <g transform="translate(311.15, 127.34) scale(0.26985)" fill="#FFFFFF">
+    <path d="M540 1084 c-91 -15 -155 -29 -224 -51 -136 -43 -205 -131 -193 -247 8 -78 45 -142 129 -221 81 -78 238 -189 249 -178 3 5 -2 55 -12 113 -20 113 -23 168 -11 186 15 23 56 36 135 42 l82 7 0 175 0 175 -65 1 c-36 1 -76 0 -90 -2z"/>
+    <path d="M795 1079 c-3 -8 -4 -89 -3 -179 l3 -165 82 -7 c79 -6 120 -19 135 -42 12 -18 9 -73 -11 -186 -10 -58 -15 -108 -12 -113 11 -11 168 100 249 178 42 39 85 91 99 119 30 60 40 140 23 191 -19 59 -83 121 -148 145 -143 54 -405 90 -417 59z"/>
+  </g>
+  <!-- The function glyph: this is the mail app. -->
+  <g transform="translate(354.1, 484.5) scale(13.1625)" fill="none" stroke="#FFFFFF"
+     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="5" width="18" height="14" rx="2"/>
+    <polyline points="4 7.5 12 13 20 7.5"/>
   </g>
 </svg>

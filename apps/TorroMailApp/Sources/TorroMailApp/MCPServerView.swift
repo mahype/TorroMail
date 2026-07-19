@@ -102,6 +102,8 @@ struct MCPServerStatusCard: View {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 9, height: 9)
+                    .help(statusText)
+                    .accessibilityLabel(statusText)
                 if mcpSupervisor.status.isRunning {
                     Button(L("Stop")) { mcpSupervisor.stop() }
                         .torroButton()
@@ -112,10 +114,13 @@ struct MCPServerStatusCard: View {
                     .torroButton()
                 }
             }
+            // A diagnosis, not a decision: it sits as a footnote where it
+            // happened. The dot above already carries the colour, and the raw
+            // process message stays in the log.
             if let errorDetail {
                 Text(errorDetail)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 14)
@@ -132,12 +137,14 @@ struct MCPServerStatusCard: View {
         }
     }
 
+    /// The answer to the user's question — "can assistants reach my mail?" —
+    /// never the process state behind it.
     private var statusText: String {
         switch mcpSupervisor.status {
-        case .running: L("Running in the background")
-        case .starting: L("Starting")
-        case .stopped: L("Stopped")
-        case .notFound, .failed: L("Error")
+        case .running: L("Ready for assistants")
+        case .starting: L("Starting up…")
+        case .stopped: L("Not reachable for assistants")
+        case .notFound, .failed: L("Not answering")
         }
     }
 
@@ -177,6 +184,7 @@ private struct MCPClientRow: View {
                     .fill(dotColor)
                     .frame(width: 9, height: 9)
                     .help(summary)
+                    .accessibilityLabel(summary)
             }
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
@@ -301,13 +309,18 @@ struct MCPClientDetailView: View {
                 }
                 Spacer()
                 Circle().fill(dotColor).frame(width: 9, height: 9)
+                    .help(stateText)
+                    .accessibilityLabel(stateText)
             }
             .padding(.vertical, 2)
 
             if status.isInstalled {
                 HStack {
                     if status.isConfigured {
+                        // The destructive role gives it its colour; the style
+                        // keeps it the same system button as its neighbour.
                         Button(L("Disconnect"), role: .destructive) { disconnect() }
+                            .buttonStyle(.bordered)
                             .disabled(isBusy)
                         Spacer()
                         Button(L("Reconnect")) { connect() }
@@ -450,11 +463,13 @@ struct MCPClientDetailView: View {
                             systemImage: revealKey ? "eye.slash" : "eye"
                         )
                     }
+                    .torroButton()
                     // Automatic clients rotate their key by disconnecting
                     // and connecting; a manual client has no such buttons,
                     // so renewal lives here.
                     if descriptor.kind == .manual {
                         Button(L("Renew key")) { renewKey() }
+                            .torroButton()
                     }
                     Spacer()
                     if snippetCopied {
@@ -470,9 +485,9 @@ struct MCPClientDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text(L("The MCP server binary was not found."))
+                Text(L("The snippet appears here as soon as TorroMail finds its server."))
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text(L("Manual setup"))
