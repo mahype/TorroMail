@@ -279,3 +279,16 @@
 "Connected as %@" = "Verbunden als %@";
 "What may connected assistants do with this account?" = "Was dürfen verbundene Assistenten mit diesem Konto tun?";
 "Every send waits for your approval, whatever you pick here. You can change this any time." = "Jeder Versand wartet auf deine Freigabe, egal was du hier wählst. Du kannst das jederzeit ändern.";
+
+/* Help */
+"Help" = "Hilfe";
+"About TorroMail" = "Über TorroMail";
+"Your mailboxes for AI assistants" = "Deine Postfächer für KI-Assistenten";
+"Version" = "Version";
+"Bundle" = "Bundle";
+"Open release notes on GitHub" = "Release Notes auf GitHub öffnen";
+"Open documentation" = "Dokumentation öffnen";
+"Report a problem" = "Problem melden";
+"Please include the version above when you report something." = "Gib bei einer Meldung bitte die Version oben mit an.";
+"Diagnostics" = "Diagnose";
+"Every action an assistant takes is recorded in the log — that is the first place to look when something went differently than expected." = "Jede Aktion eines Assistenten steht im Protokoll — dort schaust du zuerst nach, wenn etwas anders lief als erwartet.";

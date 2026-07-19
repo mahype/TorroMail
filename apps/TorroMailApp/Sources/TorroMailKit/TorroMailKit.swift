@@ -9,6 +9,7 @@ public enum TorroMailSidebarSelection: Hashable {
     case mcp
     case settings
     case log
+    case help
 }
 
 /// What the app wants to say about itself in one word. The dashboard leads

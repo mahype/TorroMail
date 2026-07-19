@@ -596,6 +596,8 @@ private struct TorroMailRootView: View {
                     .tag(TorroMailSidebarSelection.settings)
                 Label(L("Log"), systemImage: "list.bullet.rectangle")
                     .tag(TorroMailSidebarSelection.log)
+                Label(L("Help"), systemImage: "questionmark.circle")
+                    .tag(TorroMailSidebarSelection.help)
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
@@ -651,6 +653,8 @@ private struct TorroMailRootView: View {
             SettingsView()
         case .log:
             LogView()
+        case .help:
+            HelpView()
         }
     }
 
@@ -1886,5 +1890,134 @@ private struct LogView: View {
             }
             .tint(nil)
         }
+    }
+}
+
+/// Where the app says which version it is, and where to go when something is
+/// wrong. Built like TorroWhisper's help page so the two apps answer "what am
+/// I running?" in the same place and the same words.
+private struct HelpView: View {
+    @EnvironmentObject private var model: TorroMailModel
+
+    /// The repository is the whole support surface: releases, docs, issues.
+    private static let repository = "https://github.com/mahype/TorroMail"
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 12) {
+                    AppIconTile(size: 40)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: "TorroMail")
+                            .font(.title3.weight(.semibold))
+                        Text(L("Your mailboxes for AI assistants"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 2)
+
+                LabeledContent(L("Version")) {
+                    Text(verbatim: appVersion).monospacedDigit().textSelection(.enabled)
+                }
+                LabeledContent(L("Bundle")) {
+                    Text(verbatim: bundleIdentifier).textSelection(.enabled)
+                }
+
+                Button(L("Open release notes on GitHub")) {
+                    open("\(Self.repository)/releases/tag/v\(appVersion)")
+                }
+                .torroButton()
+                // A dev build carries no released version, so there is no
+                // release page to open — the tag would 404.
+                .disabled(!hasReleasedVersion)
+            } header: {
+                Text(L("About TorroMail"))
+            }
+
+            Section {
+                Button(L("Open documentation")) {
+                    open(Self.repository)
+                }
+                .torroButton()
+                Button(L("Report a problem")) {
+                    open("\(Self.repository)/issues/new")
+                }
+                .torroButton()
+            } header: {
+                Text(L("Help"))
+            } footer: {
+                Text(L("Please include the version above when you report something."))
+            }
+
+            Section {
+                Button(L("Open Log")) {
+                    model.selectedSidebarItem = .log
+                }
+                .torroButton()
+            } header: {
+                Text(L("Diagnostics"))
+            } footer: {
+                Text(L("Every action an assistant takes is recorded in the log — that is the first place to look when something went differently than expected."))
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(L("Help"))
+    }
+
+    /// Stamped into `Info.plist` at build time from the workspace version; the
+    /// dev bundle stamps `dev` instead.
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
+    private var bundleIdentifier: String {
+        Bundle.main.bundleIdentifier ?? "—"
+    }
+
+    /// Only a plain SemVer has a release page behind it. Dev bundles stamp
+    /// `git describe` — `0.2.1-dirty`, `0.2.1-3-gabc123` — and those tags do
+    /// not exist, so the button would open a 404.
+    private var hasReleasedVersion: Bool {
+        appVersion.wholeMatch(of: /\d+\.\d+\.\d+(-rc\.\d+)?/) != nil
+    }
+
+    private func open(_ string: String) {
+        guard let url = URL(string: string) else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+/// The app icon itself, at tile size — the real artwork from the bundle rather
+/// than a redrawn lookalike, so it cannot drift from what the Dock shows. The
+/// red signet stands in while running unbundled, where there is no icon.
+private struct AppIconTile: View {
+    var size: CGFloat = 40
+
+    var body: some View {
+        Group {
+            if let icon = NSApp?.applicationIconImage {
+                Image(nsImage: icon).resizable()
+            } else {
+                RoundedRectangle(cornerRadius: size * 0.2237, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [.torroRed, .torroRedDeep],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .overlay {
+                        TorroSignet()
+                            .fill(.white)
+                            .frame(width: size * 0.62, height: size * 0.35)
+                    }
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
