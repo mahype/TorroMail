@@ -8,6 +8,69 @@ func L(_ key: String) -> String {
     NSLocalizedString(key, bundle: .module, comment: "")
 }
 
+/// The names the two encryptions go by everywhere else — mail clients say
+/// "SSL/TLS" and "STARTTLS", so TorroMail does too rather than inventing its
+/// own wording for a setting people copy from a provider's help page.
+func label(for security: ConnectionSecurity) -> String {
+    switch security {
+    case .tls: L("SSL/TLS")
+    case .startTLS: L("STARTTLS")
+    }
+}
+
+/// Port and encryption on one row.
+///
+/// They belong together because they used to be one thing: the port decided
+/// which TLS was spoken. Now that the server decides, side by side is what
+/// keeps them readable as a single answer to "how do I reach this server".
+///
+/// The text is buffered rather than bound straight to the `Int`, so a field
+/// cleared mid-edit stays empty instead of snapping to 0; the number only
+/// travels once it parses.
+struct PortField: View {
+    let title: String
+    @Binding var port: Int
+    @Binding var security: ConnectionSecurity
+
+    @State private var text: String = ""
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 8) {
+                TextField("", text: $text)
+                    .labelsHidden()
+                    // Right-aligned and only as wide as a port needs to be, so
+                    // the number sits against the picker instead of floating
+                    // in the middle of the row.
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 56)
+                    .onChange(of: text) { _, typed in
+                        if let value = Int(typed), (1...65535).contains(value) {
+                            port = value
+                        }
+                    }
+                Picker("", selection: $security) {
+                    ForEach(ConnectionSecurity.allCases) { option in
+                        Text(label(for: option)).tag(option)
+                    }
+                }
+                .labelsHidden()
+                // Hugging its content rather than a fixed width: with the row
+                // pinned trailing, both pickers then end on the same edge as
+                // every other value in the form, whichever option is showing.
+                .fixedSize()
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .onAppear { text = String(port) }
+        .onChange(of: port) { _, value in
+            // Discovery filling the field in behind the user's back — the
+            // guard keeps it from fighting what is being typed.
+            if Int(text) != value { text = String(value) }
+        }
+    }
+}
+
 private func label(for method: LoginMethod) -> String {
     switch method {
     case .password: L("Password")
@@ -761,6 +824,8 @@ private struct StatusTile: View {
                 .fill(color)
                 .frame(width: 8, height: 8)
                 .padding(.top, 5)
+                .help(title)
+                .accessibilityLabel(title)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.headline)
@@ -805,6 +870,7 @@ private struct PendingApprovalsCard: View {
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                         Button(L("Reject"), role: .destructive) {}
+                            .buttonStyle(.bordered)
                         Button(L("Approve")) {}
                             .torroButton()
                     }
@@ -1073,11 +1139,14 @@ private struct AccountListView: View {
         .background(.background.secondary)
         .navigationTitle(L("Mail Accounts"))
         .toolbar {
+            // The title bar stays macOS: the app tint would paint this brand
+            // red, and the chrome carries no brand colour.
             Button {
                 model.beginAccountWizard()
             } label: {
                 Label(L("Add Account"), systemImage: "plus")
             }
+            .tint(nil)
         }
     }
 }
@@ -1165,8 +1234,8 @@ private struct CredentialStatusDot: View {
     private var helpText: String {
         switch state {
         case .connected: L("Credentials verified")
-        case .needsTest: L("Needs test")
-        case .notConfigured: L("Not configured")
+        case .needsTest: L("Not tested yet — run Test Connection.")
+        case .notConfigured: L("No credentials stored yet.")
         case let .failed(message): message
         }
     }
@@ -1245,7 +1314,20 @@ private struct AccountDetailView: View {
 
             if account.loginMethod == .password {
                 TextField(L("IMAP Server"), text: $account.imapHost, prompt: Text(verbatim: "imap.example.com"))
+                // Ports and encryption belong here too: setup guesses them,
+                // and a wrong guess was previously uncorrectable without
+                // removing the account and starting over.
+                PortField(
+                    title: L("IMAP Port"),
+                    port: $account.imapPort,
+                    security: $account.imapSecurity
+                )
                 TextField(L("SMTP Server"), text: $account.smtpHost, prompt: Text(verbatim: "smtp.example.com"))
+                PortField(
+                    title: L("SMTP Port"),
+                    port: $account.smtpPort,
+                    security: $account.smtpSecurity
+                )
                 TextField(L("Username"), text: $account.username)
                 SecureField(L("Password"), text: $password)
             }
@@ -1629,6 +1711,7 @@ private struct AccountDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Button(L("Reject"), role: .destructive) {}
+                        .buttonStyle(.bordered)
                     Button(L("Approve")) {}
                         .torroButton()
                 }
@@ -1712,8 +1795,8 @@ private struct ConnectionStatusBadge: View {
     private var text: String {
         switch state {
         case .connected: L("Connected")
-        case .needsTest: L("Needs test")
-        case .notConfigured: L("Not configured")
+        case .needsTest: L("Not tested yet")
+        case .notConfigured: L("No credentials stored yet")
         case let .failed(message): message
         }
     }
@@ -1788,6 +1871,7 @@ private struct LogView: View {
             } label: {
                 Label(L("Export…"), systemImage: "square.and.arrow.up")
             }
+            .tint(nil)
         }
     }
 }

@@ -1453,6 +1453,7 @@ public enum PolicyDocument {
             var imap: [String: Any] = [
                 "host": account.imapHost,
                 "port": account.imapPort,
+                "security": account.imapSecurity.rawValue,
                 "username": account.username,
                 "secret_ref": KeychainStore.secretReference(forAccount: account.id)
             ]
@@ -1468,11 +1469,13 @@ public enum PolicyDocument {
             object["imap"] = imap
         }
         // Submission facts travel the same way, so mail_prepare_send can reach
-        // the outgoing server. Port 465 is implicit TLS; 587 gets STARTTLS.
+        // the outgoing server. The encryption is stated rather than inferred
+        // from the port — the server is what decides it.
         if !account.smtpHost.isEmpty, !account.username.isEmpty {
             var smtp: [String: Any] = [
                 "host": account.smtpHost,
                 "port": account.smtpPort,
+                "security": account.smtpSecurity.rawValue,
                 "username": account.username,
                 "secret_ref": KeychainStore.secretReference(forAccount: account.id)
             ]
@@ -1994,6 +1997,30 @@ public struct PendingAction: Identifiable, Hashable, Sendable {
     }
 }
 
+/// How a connection gets its TLS. A fact about the server, not about the
+/// port: 993 and 465 are conventions, and providers do stray from them — an
+/// implicit-TLS server on an unusual port used to be unreachable because the
+/// port number was the only thing deciding this.
+public enum ConnectionSecurity: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// TLS from the first byte.
+    case tls
+    /// Plaintext until the `STARTTLS` upgrade, which happens before any
+    /// credential moves.
+    case startTLS = "starttls"
+
+    public var id: String { rawValue }
+
+    /// What the port used to imply, for records written before this was
+    /// stated. Keeps an existing account connecting exactly as it did.
+    public static func impliedByIMAPPort(_ port: Int) -> ConnectionSecurity {
+        port == 993 ? .tls : .startTLS
+    }
+
+    public static func impliedBySMTPPort(_ port: Int) -> ConnectionSecurity {
+        port == 465 ? .tls : .startTLS
+    }
+}
+
 public struct MailAccount: Identifiable, Hashable, Sendable {
     public var id: String
     public var name: String
@@ -2009,8 +2036,10 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
     /// opens the manual details. 993/587 are the defaults, not a rule —
     /// providers do differ.
     public var imapPort: Int
+    public var imapSecurity: ConnectionSecurity
     public var smtpHost: String
     public var smtpPort: Int
+    public var smtpSecurity: ConnectionSecurity
     public var username: String
     public var connectionState: ConnectionState
     /// Mailboxes the server reported (`mail_list_mailboxes`), in display
@@ -2030,8 +2059,10 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         oauthIssuer: OAuthIssuer? = nil,
         imapHost: String = "",
         imapPort: Int = 993,
+        imapSecurity: ConnectionSecurity = .tls,
         smtpHost: String = "",
         smtpPort: Int = 587,
+        smtpSecurity: ConnectionSecurity = .startTLS,
         username: String = "",
         connectionState: ConnectionState = .notConfigured,
         knownMailboxes: [String] = ["INBOX"],
@@ -2047,8 +2078,10 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         self.oauthIssuer = oauthIssuer
         self.imapHost = imapHost
         self.imapPort = imapPort
+        self.imapSecurity = imapSecurity
         self.smtpHost = smtpHost
         self.smtpPort = smtpPort
+        self.smtpSecurity = smtpSecurity
         self.username = username
         self.connectionState = connectionState
         self.knownMailboxes = knownMailboxes
@@ -2071,6 +2104,7 @@ extension MailAccount: Codable {
         case id, name, email, provider, loginMethod, imapHost, smtpHost
         case username, knownMailboxes, permissions, searchCache, isVerified
         case imapPort, smtpPort, oauthIssuer
+        case imapSecurity, smtpSecurity
     }
 
     public init(from decoder: Decoder) throws {
@@ -2078,6 +2112,11 @@ extension MailAccount: Codable {
         let username = try container.decode(String.self, forKey: .username)
         let imapHost = try container.decode(String.self, forKey: .imapHost)
         let isVerified = try container.decodeIfPresent(Bool.self, forKey: .isVerified) ?? false
+        // Ports first: a record from before the encryption was stated has to
+        // fall back to what its port implied, or a 587 account would suddenly
+        // be asked for implicit TLS.
+        let imapPort = try container.decodeIfPresent(Int.self, forKey: .imapPort) ?? 993
+        let smtpPort = try container.decodeIfPresent(Int.self, forKey: .smtpPort) ?? 587
 
         self.init(
             id: try container.decode(String.self, forKey: .id),
@@ -2089,9 +2128,17 @@ extension MailAccount: Codable {
             imapHost: imapHost,
             // Accounts written before ports were configurable carry neither
             // key; they were all implicitly 993/587.
-            imapPort: try container.decodeIfPresent(Int.self, forKey: .imapPort) ?? 993,
+            imapPort: imapPort,
+            imapSecurity: try container.decodeIfPresent(
+                ConnectionSecurity.self,
+                forKey: .imapSecurity
+            ) ?? .impliedByIMAPPort(imapPort),
             smtpHost: try container.decode(String.self, forKey: .smtpHost),
-            smtpPort: try container.decodeIfPresent(Int.self, forKey: .smtpPort) ?? 587,
+            smtpPort: smtpPort,
+            smtpSecurity: try container.decodeIfPresent(
+                ConnectionSecurity.self,
+                forKey: .smtpSecurity
+            ) ?? .impliedBySMTPPort(smtpPort),
             username: username,
             connectionState: MailAccount.restoredState(
                 isVerified: isVerified,
@@ -2114,8 +2161,10 @@ extension MailAccount: Codable {
         try container.encodeIfPresent(oauthIssuer, forKey: .oauthIssuer)
         try container.encode(imapHost, forKey: .imapHost)
         try container.encode(imapPort, forKey: .imapPort)
+        try container.encode(imapSecurity, forKey: .imapSecurity)
         try container.encode(smtpHost, forKey: .smtpHost)
         try container.encode(smtpPort, forKey: .smtpPort)
+        try container.encode(smtpSecurity, forKey: .smtpSecurity)
         try container.encode(username, forKey: .username)
         try container.encode(knownMailboxes, forKey: .knownMailboxes)
         try container.encode(permissions, forKey: .permissions)

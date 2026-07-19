@@ -55,6 +55,35 @@ pub enum ImapAuth {
     XOAuth2,
 }
 
+/// How the session gets its TLS. This is a fact about the server, not about
+/// the port: 993 and 465 are conventions, not rules, and a provider is free
+/// to offer implicit TLS somewhere else entirely. Deriving it from the port
+/// number is what used to make such a server unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionSecurity {
+    /// TLS from the first byte — the server speaks only after the handshake.
+    #[default]
+    Tls,
+    /// Plaintext up to the `STARTTLS` upgrade, which happens before a single
+    /// byte of credentials moves.
+    StartTls,
+}
+
+impl ConnectionSecurity {
+    /// What a connection block without an explicit `security` key meant when
+    /// only the port could say. Kept so documents written by an older app
+    /// build keep connecting exactly as they did.
+    #[must_use]
+    pub fn implied_by_imap_port(port: u16) -> Self {
+        if port == 993 { Self::Tls } else { Self::StartTls }
+    }
+
+    #[must_use]
+    pub fn implied_by_smtp_port(port: u16) -> Self {
+        if port == 465 { Self::Tls } else { Self::StartTls }
+    }
+}
+
 /// Everything the IMAP adapter needs to connect, minus the secret it
 /// resolves at connect time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +94,7 @@ pub struct ImapProviderConfig {
     pub username: String,
     pub secret_ref: SecretRef,
     pub auth: ImapAuth,
+    pub security: ConnectionSecurity,
 }
 
 impl ImapProviderConfig {
@@ -82,12 +112,19 @@ impl ImapProviderConfig {
             username: username.into(),
             secret_ref,
             auth: ImapAuth::Password,
+            security: ConnectionSecurity::Tls,
         }
     }
 
     #[must_use]
     pub fn with_auth(mut self, auth: ImapAuth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    #[must_use]
+    pub fn with_security(mut self, security: ConnectionSecurity) -> Self {
+        self.security = security;
         self
     }
 }
@@ -177,18 +214,40 @@ impl<T: ImapTransport> ImapClient<T> {
                 "unexpected IMAP greeting: {greeting}"
             )));
         }
+        client.authenticate(username, secret, auth)?;
+        Ok(client)
+    }
 
+    /// Authenticates on a connection whose greeting was already read — the
+    /// state right after a STARTTLS upgrade, where the server sends no fresh
+    /// greeting and reading for one would hang.
+    pub fn connect_upgraded_with(
+        transport: T,
+        username: &str,
+        secret: &str,
+        auth: ImapAuth,
+    ) -> CoreResult<Self> {
+        let mut client = Self {
+            transport,
+            next_tag: 0,
+            selected: None,
+        };
+        client.authenticate(username, secret, auth)?;
+        Ok(client)
+    }
+
+    fn authenticate(&mut self, username: &str, secret: &str, auth: ImapAuth) -> CoreResult<()> {
         match auth {
             ImapAuth::Password => {
-                client.command(&format!(
+                self.command(&format!(
                     "LOGIN {} {}",
                     imap_quoted(username),
                     imap_quoted(secret)
                 ))?;
             }
-            ImapAuth::XOAuth2 => client.authenticate_xoauth2(username, secret)?,
+            ImapAuth::XOAuth2 => self.authenticate_xoauth2(username, secret)?,
         }
-        Ok(client)
+        Ok(())
     }
 
     /// SASL XOAUTH2: one base64 blob carrying the user and a bearer token.

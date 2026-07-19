@@ -45,15 +45,23 @@
 "Password" = "Passwort";
 "OAuth" = "OAuth";
 "IMAP Server" = "IMAP-Server";
+"IMAP Port" = "IMAP-Port";
 "SMTP Server" = "SMTP-Server";
+"SMTP Port" = "SMTP-Port";
 "Username" = "Benutzername";
+/* Both are the names the providers' own help pages use — untranslated on
+   purpose, so a copied setting matches what is on screen. */
+"SSL/TLS" = "SSL/TLS";
+"STARTTLS" = "STARTTLS";
 "Sign In…" = "Anmelden…";
 "Test Connection" = "Verbindung testen";
 "Could not save the password to the keychain." = "Das Passwort konnte nicht im Schlüsselbund gespeichert werden.";
 "Connected" = "Verbunden";
 "Credentials verified" = "Zugangsdaten geprüft";
-"Needs test" = "Test erforderlich";
-"Not configured" = "Nicht eingerichtet";
+"Not tested yet — run Test Connection." = "Noch nicht getestet — führe „Verbindung testen“ aus.";
+"No credentials stored yet." = "Es sind noch keine Zugangsdaten hinterlegt.";
+"Not tested yet" = "Noch nicht getestet";
+"No credentials stored yet" = "Noch keine Zugangsdaten hinterlegt";
 
 /* Permissions */
 "Permissions" = "Berechtigungen";
@@ -134,9 +142,8 @@
 "TorroMail serves assistants either way. With both off it only shows up while this window is open — open TorroMail again to bring it back." = "TorroMail bedient Assistenten so oder so. Sind beide aus, ist es nur sichtbar, solange dieses Fenster offen ist — öffne TorroMail einfach erneut, um es zurückzuholen.";
 "MCP Server" = "MCP-Server";
 "Running" = "Läuft";
-"Starting" = "Startet";
-"Stopped" = "Gestoppt";
-"Error" = "Fehler";
+"Starting up…" = "Startet gerade …";
+"Not answering" = "Antwortet nicht";
 "Start" = "Starten";
 "Stop" = "Stoppen";
 "MCP executable “%@” not found." = "MCP-Programm „%@“ nicht gefunden.";
@@ -147,7 +154,7 @@
 "No supported assistant found on this Mac." = "Kein unterstützter Assistent auf diesem Mac gefunden.";
 "Added. Restart the assistant to connect." = "Hinzugefügt. Starte den Assistenten neu, um zu verbinden.";
 "Copied to the clipboard." = "In die Zwischenablage kopiert.";
-"The MCP server binary was not found." = "Das MCP-Server-Programm wurde nicht gefunden.";
+"The snippet appears here as soon as TorroMail finds its server." = "Der Ausschnitt erscheint hier, sobald TorroMail seinen Server findet.";
 "The existing configuration could not be read." = "Die vorhandene Konfiguration konnte nicht gelesen werden.";
 "Could not update the configuration." = "Die Konfiguration konnte nicht aktualisiert werden.";
 "The assistant's setup tool could not be started." = "Das Einrichtungsprogramm des Assistenten konnte nicht gestartet werden.";
@@ -267,6 +274,8 @@
 "Nothing could be found for this domain — the server details have to come from you." = "Für diese Domain war nichts zu finden — die Server-Angaben musst du selbst eintragen.";
 "Could not save the password to the keychain." = "Das Passwort konnte nicht im Schlüsselbund gesichert werden.";
 "The connection could not be checked." = "Die Verbindung konnte nicht geprüft werden.";
+"The sign-in was declined. Try again, or set the account up with an app password." = "Die Anmeldung wurde abgelehnt. Versuche es erneut oder richte das Konto mit einem App-Passwort ein.";
+"The server did not accept these details. Check the password, or open the server details below." = "Der Server hat diese Angaben nicht angenommen. Prüfe das Passwort oder öffne unten die Serverdetails.";
 "Connected as %@" = "Verbunden als %@";
 "What may connected assistants do with this account?" = "Was dürfen verbundene Assistenten mit diesem Konto tun?";
 "Every send waits for your approval, whatever you pick here. You can change this any time." = "Jeder Versand wartet auf deine Freigabe, egal was du hier wählst. Du kannst das jederzeit ändern.";

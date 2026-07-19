@@ -13,7 +13,8 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use torromail_core::smtp::{SmtpAuth, SmtpClient};
 use torromail_core::{
-    CoreError, CoreResult, ImapClient, ImapMailProvider, ImapProviderConfig, StreamImapTransport,
+    ConnectionSecurity, CoreError, CoreResult, ImapClient, ImapMailProvider, ImapProviderConfig,
+    StreamImapTransport,
 };
 
 /// The TLS stream the transport runs over.
@@ -49,42 +50,105 @@ fn tls_over(tcp: TcpStream, host: &str) -> CoreResult<TlsStream> {
     Ok(StreamOwned::new(connection, tcp))
 }
 
-/// One logged-in provider for a configured account: TLS, LOGIN, done. The
+/// One logged-in provider for a configured account: TLS, login, done. The
 /// secret arrives already resolved — how it is resolved (keychain) is the
 /// caller's business, never this crate's.
+///
+/// Which TLS is a fact carried by the config, not a guess from the port: a
+/// server offering implicit TLS on an unusual port used to be unreachable
+/// because 993 was the only thing that counted as "secure".
 pub fn connect_account(
     config: &ImapProviderConfig,
     secret: &str,
 ) -> CoreResult<TlsImapMailProvider> {
-    let transport = connect_transport(&config.host, config.port)?;
-    let client = ImapClient::connect(transport, &config.username, secret)?;
+    let client = match config.security {
+        ConnectionSecurity::Tls => ImapClient::connect_with(
+            connect_transport(&config.host, config.port)?,
+            &config.username,
+            secret,
+            config.auth,
+        )?,
+        // The greeting was read in the clear before the upgrade, so the TLS
+        // session opens straight at the login.
+        ConnectionSecurity::StartTls => ImapClient::connect_upgraded_with(
+            imap_starttls(&config.host, config.port)?,
+            &config.username,
+            secret,
+            config.auth,
+        )?,
+    };
     Ok(ImapMailProvider::new(config.account_id.clone(), client))
 }
 
-/// An authenticated SMTP submission session. Port 465 is implicit TLS; any
-/// other port (typically 587) is plaintext with a STARTTLS upgrade before a
-/// single byte of credentials moves. `ehlo_domain` is what the client
-/// announces itself as; the secret and auth arrive already resolved.
+/// The plaintext IMAP greeting, then `STARTTLS`, then the upgrade. Raw line
+/// I/O for the same reason as the SMTP one below: nothing may be buffered
+/// past the server's go-ahead, or it is lost when the socket becomes TLS.
+fn imap_starttls(host: &str, port: u16) -> CoreResult<StreamImapTransport<TlsStream>> {
+    let mut tcp = TcpStream::connect((host, port)).map_err(|error| {
+        CoreError::ProviderFailure(format!("connecting {host}:{port} failed: {error}"))
+    })?;
+
+    let greeting = read_line(&mut tcp)?;
+    if !greeting.starts_with("* OK") {
+        return Err(CoreError::ProviderFailure(format!(
+            "unexpected IMAP greeting: {greeting}"
+        )));
+    }
+
+    write_line(&mut tcp, "t0 STARTTLS")?;
+    // Untagged chatter may precede the verdict; only the tagged line counts.
+    loop {
+        let line = read_line(&mut tcp)?;
+        if let Some(rest) = line.strip_prefix("t0 ") {
+            if rest.starts_with("OK") {
+                break;
+            }
+            return Err(CoreError::ProviderFailure(format!(
+                "STARTTLS refused: {rest}"
+            )));
+        }
+        if line.is_empty() {
+            return Err(CoreError::ProviderFailure(
+                "the server closed the connection during STARTTLS".to_owned(),
+            ));
+        }
+    }
+
+    Ok(StreamImapTransport::new(tls_over(tcp, host)?))
+}
+
+/// An authenticated SMTP submission session. `security` says which TLS the
+/// server speaks; STARTTLS upgrades before a single byte of credentials
+/// moves. `ehlo_domain` is what the client announces itself as; the secret
+/// and auth arrive already resolved.
 pub fn connect_smtp(
     host: &str,
     port: u16,
+    security: ConnectionSecurity,
     ehlo_domain: &str,
     auth: SmtpAuth,
 ) -> CoreResult<TlsSmtpClient> {
-    if port == 465 {
+    match security {
         // Implicit TLS: the server sends a greeting first.
-        SmtpClient::connect(connect_transport(host, port)?, ehlo_domain, auth)
-    } else {
+        ConnectionSecurity::Tls => {
+            SmtpClient::connect(connect_transport(host, port)?, ehlo_domain, auth)
+        }
         // STARTTLS consumed the greeting before the upgrade, so the TLS
         // session opens straight at EHLO.
-        SmtpClient::connect_upgraded(starttls(host, port, ehlo_domain)?, ehlo_domain, auth)
+        ConnectionSecurity::StartTls => {
+            SmtpClient::connect_upgraded(smtp_starttls(host, port, ehlo_domain)?, ehlo_domain, auth)
+        }
     }
 }
 
 /// The plaintext SMTP handshake up to STARTTLS, then the TLS upgrade. Raw
 /// line I/O — no buffering — so no plaintext is read past the server's
 /// go-ahead and lost when the socket becomes the TLS stream.
-fn starttls(host: &str, port: u16, ehlo_domain: &str) -> CoreResult<StreamImapTransport<TlsStream>> {
+fn smtp_starttls(
+    host: &str,
+    port: u16,
+    ehlo_domain: &str,
+) -> CoreResult<StreamImapTransport<TlsStream>> {
     let mut tcp = TcpStream::connect((host, port)).map_err(|error| {
         CoreError::ProviderFailure(format!("connecting {host}:{port} failed: {error}"))
     })?;

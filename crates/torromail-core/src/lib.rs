@@ -5,8 +5,8 @@ mod mime;
 pub mod smtp;
 
 pub use imap_provider::{
-    FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig, ImapTransport,
-    SecretRef, StreamImapTransport, TcpImapTransport,
+    ConnectionSecurity, FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig,
+    ImapTransport, SecretRef, StreamImapTransport, TcpImapTransport,
 };
 
 use std::collections::BTreeMap;

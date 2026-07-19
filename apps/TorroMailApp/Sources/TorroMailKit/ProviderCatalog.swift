@@ -121,8 +121,10 @@ public enum OAuthIssuer: String, Hashable, Sendable, Codable {
 public struct DiscoveredConfig: Hashable, Sendable {
     public var imapHost: String
     public var imapPort: Int
+    public var imapSecurity: ConnectionSecurity
     public var smtpHost: String
     public var smtpPort: Int
+    public var smtpSecurity: ConnectionSecurity
     public var auth: AuthPath
     /// What to call the provider in the UI ("Google Workspace", "Mailbox.org").
     public var providerLabel: String
@@ -130,11 +132,15 @@ public struct DiscoveredConfig: Hashable, Sendable {
     /// How this was found — for the log, not for the user.
     public var source: String
 
+    /// The encryption defaults to what the port implies, so a catalog entry
+    /// only states it where the provider is unusual.
     public init(
         imapHost: String,
         imapPort: Int = 993,
+        imapSecurity: ConnectionSecurity? = nil,
         smtpHost: String,
         smtpPort: Int = 587,
+        smtpSecurity: ConnectionSecurity? = nil,
         auth: AuthPath,
         providerLabel: String,
         provider: Provider = .imapSmtp,
@@ -142,8 +148,10 @@ public struct DiscoveredConfig: Hashable, Sendable {
     ) {
         self.imapHost = imapHost
         self.imapPort = imapPort
+        self.imapSecurity = imapSecurity ?? .impliedByIMAPPort(imapPort)
         self.smtpHost = smtpHost
         self.smtpPort = smtpPort
+        self.smtpSecurity = smtpSecurity ?? .impliedBySMTPPort(smtpPort)
         self.auth = auth
         self.providerLabel = providerLabel
         self.provider = provider

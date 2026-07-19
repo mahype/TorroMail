@@ -312,6 +312,34 @@ require(
     imapEntry["port"] as? Int == 993 && imapEntry["auth"] == nil,
     "a password account names its port and says nothing about OAuth"
 )
+// The encryption is stated, not left to be inferred from the port. A server
+// speaking implicit TLS somewhere other than 993 is the whole reason.
+require(
+    imapEntry["security"] as? String == "tls",
+    "the IMAP block says which encryption to use"
+)
+let statedSecurity = MailAccount(
+    id: "odd",
+    name: "Odd",
+    email: "odd@example.org",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    imapHost: "imap.example.org",
+    imapPort: 1993,
+    imapSecurity: .tls,
+    smtpHost: "smtp.example.org",
+    smtpPort: 2465,
+    smtpSecurity: .startTLS,
+    username: "odd@example.org"
+)
+let oddData = (try? PolicyDocument.data(for: [statedSecurity], clients: [])) ?? Data()
+let oddObject = (try? JSONSerialization.jsonObject(with: oddData)) as? [String: Any] ?? [:]
+let oddAccount = (oddObject["accounts"] as? [[String: Any]])?.first ?? [:]
+require(
+    (oddAccount["imap"] as? [String: Any])?["security"] as? String == "tls"
+        && (oddAccount["smtp"] as? [String: Any])?["security"] as? String == "starttls",
+    "an unconventional port does not override the stated encryption"
+)
 
 // An OAuth account carries the same block plus what the server needs to renew
 // the token on its own — it runs when the app does not, and a Google access
@@ -402,8 +430,8 @@ let storedAccounts = ((try? JSONSerialization.jsonObject(with: encodedState)) as
 require(
     Set(storedAccounts?.first?.keys ?? [:].keys) == [
         "id", "name", "email", "provider", "loginMethod", "imapHost",
-        "imapPort", "smtpHost", "smtpPort", "username", "knownMailboxes",
-        "permissions", "searchCache", "isVerified"
+        "imapPort", "imapSecurity", "smtpHost", "smtpPort", "smtpSecurity",
+        "username", "knownMailboxes", "permissions", "searchCache", "isVerified"
     ],
     "the state file stores the configured facts and nothing else"
 )
@@ -421,6 +449,8 @@ legacyObject["accounts"] = (legacyObject["accounts"] as? [[String: Any]])?.map {
     var stripped = account
     stripped["imapPort"] = nil
     stripped["smtpPort"] = nil
+    stripped["imapSecurity"] = nil
+    stripped["smtpSecurity"] = nil
     return stripped
 }
 let legacyState = (try? JSONSerialization.data(withJSONObject: legacyObject)) ?? Data()
@@ -432,6 +462,10 @@ require(
 require(
     legacy?.accounts.allSatisfy { $0.imapPort == 993 && $0.smtpPort == 587 } == true,
     "accounts predating the port fields fall back to the ports they implicitly used"
+)
+require(
+    legacy?.accounts.allSatisfy { $0.imapSecurity == .tls && $0.smtpSecurity == .startTLS } == true,
+    "and to the encryption those ports used to imply, so they connect as before"
 )
 
 // Connecting a client merges into its configuration instead of replacing

@@ -39,8 +39,11 @@ struct AccountSetupWizard: View {
     // Manual overrides. Seeded from discovery, editable behind "Details" —
     // and the only thing on screen when discovery came up empty.
     @State private var imapHost = ""
-    @State private var imapPort = "993"
+    @State private var imapPort = 993
+    @State private var imapSecurity: ConnectionSecurity = .tls
     @State private var smtpHost = ""
+    @State private var smtpPort = 587
+    @State private var smtpSecurity: ConnectionSecurity = .startTLS
     @State private var username = ""
 
     var body: some View {
@@ -110,6 +113,7 @@ struct AccountSetupWizard: View {
             }
             Spacer()
             Button(L("Cancel"), role: .cancel) { dismiss() }
+                .torroButton()
 
             switch step {
             case .identity:
@@ -261,6 +265,7 @@ struct AccountSetupWizard: View {
             Button(L("Create an app password…")) {
                 NSWorkspace.shared.open(setupURL)
             }
+            .torroButton()
 
             SecureField(L("App password"), text: $password)
                 .textFieldStyle(.roundedBorder)
@@ -298,8 +303,9 @@ struct AccountSetupWizard: View {
         DisclosureGroup(L("Details"), isExpanded: $showManualDetails) {
             Form {
                 TextField(L("IMAP Server"), text: $imapHost, prompt: Text(verbatim: "imap.example.com"))
-                TextField(L("Port"), text: $imapPort)
+                PortField(title: L("IMAP Port"), port: $imapPort, security: $imapSecurity)
                 TextField(L("SMTP Server"), text: $smtpHost, prompt: Text(verbatim: "smtp.example.com"))
+                PortField(title: L("SMTP Port"), port: $smtpPort, security: $smtpSecurity)
                 TextField(L("Username"), text: $username)
             }
             .formStyle(.columns)
@@ -361,8 +367,11 @@ struct AccountSetupWizard: View {
         username = email
         guard let config else { return }
         imapHost = config.imapHost
-        imapPort = String(config.imapPort)
+        imapPort = config.imapPort
+        imapSecurity = config.imapSecurity
         smtpHost = config.smtpHost
+        smtpPort = config.smtpPort
+        smtpSecurity = config.smtpSecurity
     }
 
     /// Saves the secret, proves the account, and only then moves on. A failure
@@ -415,7 +424,10 @@ struct AccountSetupWizard: View {
             // Closing the window is a decision, not an error to explain.
             failure = nil
         } catch {
-            failure = error.localizedDescription
+            // On the surface a sentence the user can act on; the provider's
+            // own wording is a diagnosis and belongs in the log.
+            NSLog("TorroMail: sign-in failed: %@", error.localizedDescription)
+            failure = L("The sign-in was declined. Try again, or set the account up with an app password.")
         }
     }
 
@@ -430,7 +442,8 @@ struct AccountSetupWizard: View {
                     password = ""
                     step = .permissions
                 case .failed(let reason):
-                    failure = reason
+                    NSLog("TorroMail: account check failed: %@", reason)
+                    failure = L("The server did not accept these details. Check the password, or open the server details below.")
                     step = .login
                 case .notConfigured, .needsTest:
                     failure = L("The connection could not be checked.")
@@ -449,9 +462,15 @@ struct AccountSetupWizard: View {
             loginMethod: oauthIssuer == nil ? .password : .oauth,
             oauthIssuer: oauthIssuer,
             imapHost: imapHost,
-            imapPort: Int(imapPort) ?? 993,
+            // Every connection fact comes from the fields, discovered or
+            // typed. Reading the SMTP port off `discovered` instead pinned it
+            // to a default in exactly the case the fields exist for: a
+            // discovery that came up empty.
+            imapPort: imapPort,
+            imapSecurity: imapSecurity,
             smtpHost: smtpHost,
-            smtpPort: discovered?.smtpPort ?? 587,
+            smtpPort: smtpPort,
+            smtpSecurity: smtpSecurity,
             username: username.isEmpty ? email : username,
             connectionState: .connected,
             permissions: permissions

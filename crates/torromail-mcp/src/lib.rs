@@ -1682,6 +1682,7 @@ fn send_over_smtp(
     let mut client = torromail_imap_tls::connect_smtp(
         &config.host,
         config.port,
+        config.security,
         &ehlo_domain(&record.from),
         auth,
     )?;

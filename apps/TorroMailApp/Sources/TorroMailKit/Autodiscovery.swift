@@ -219,16 +219,35 @@ enum AutoconfigParser {
             auth = .password
         }
 
+        let imapPort = incoming.port ?? 993
+        let smtpPort = outgoing?.port ?? 587
+
         return DiscoveredConfig(
             imapHost: incoming.hostname,
-            imapPort: incoming.port ?? 993,
+            imapPort: imapPort,
+            imapSecurity: security(incoming.socketType)
+                ?? .impliedByIMAPPort(imapPort),
             smtpHost: outgoing?.hostname ?? "",
-            smtpPort: outgoing?.port ?? 587,
+            smtpPort: smtpPort,
+            smtpSecurity: outgoing.flatMap { security($0.socketType) }
+                ?? .impliedBySMTPPort(smtpPort),
             auth: auth,
             providerLabel: delegate.displayName ?? incoming.hostname,
             provider: provider(forHost: incoming.hostname),
             source: source
         )
+    }
+
+    /// Mozilla's `socketType`, which is the one place the encryption is stated
+    /// outright. `plain` is deliberately not honoured — TorroMail does not
+    /// send credentials in the clear — and anything unrecognised falls back to
+    /// what the port implies.
+    private static func security(_ socketType: String) -> ConnectionSecurity? {
+        switch socketType.uppercased() {
+        case "SSL", "TLS": .tls
+        case "STARTTLS": .startTLS
+        default: nil
+        }
     }
 
     /// OAuth2 in the XML tells us the server wants a token, but not who issues

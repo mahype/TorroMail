@@ -23,6 +23,7 @@
 //!               "index_bodies": false, "index_attachments": false,
 //!               "storage": "0 MB"},
 //!     "imap": {"host": "imap.gmail.com", "port": 993,
+//!              "security": "tls",
 //!              "username": "me@example.com",
 //!              "secret_ref": "keychain://TorroMail/work",
 //!              "auth": "xoauth2",
@@ -50,8 +51,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use torromail_core::{
-    AccountId, FolderRule, ImapAuth, ImapProviderConfig, PermissionSet, Policy, ReadAccess,
-    SecretRef, WriteAccess,
+    AccountId, ConnectionSecurity, FolderRule, ImapAuth, ImapProviderConfig, PermissionSet, Policy,
+    ReadAccess, SecretRef, WriteAccess,
 };
 
 /// One account as the document describes it: its permissions, how the admin
@@ -166,13 +167,26 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
     let (imap, oauth) = match account.get("imap") {
         None | Some(Value::Null) => (None, None),
         Some(imap) => (
-            Some(parse_connection_config(account, imap, 993)?),
+            Some(parse_connection_config(
+                account,
+                imap,
+                993,
+                ConnectionSecurity::implied_by_imap_port,
+            )?),
             parse_oauth_facts(imap)?,
         ),
     };
     let smtp = match account.get("smtp") {
         None | Some(Value::Null) => None,
-        Some(smtp) => Some(parse_connection_config(account, smtp, 465)?),
+        // 587 matches what the app assumes for a record written before ports
+        // travelled; 465 here would have the two disagree about the same
+        // account.
+        Some(smtp) => Some(parse_connection_config(
+            account,
+            smtp,
+            587,
+            ConnectionSecurity::implied_by_smtp_port,
+        )?),
     };
 
     // Name and email are labels, not rights: a document from an older app
@@ -229,6 +243,7 @@ fn parse_connection_config(
     account: &Value,
     block: &Value,
     default_port: u16,
+    implied_security: fn(u16) -> ConnectionSecurity,
 ) -> Result<ImapProviderConfig, String> {
     let id = account["id"]
         .as_str()
@@ -258,6 +273,21 @@ fn parse_connection_config(
         }
     };
 
+    // Absent means "whatever the port used to imply" — documents written
+    // before the app could say it out loud keep connecting as they did. An
+    // unknown value is refused rather than downgraded: guessing wrong here
+    // would put the secret on the wire in the clear.
+    let security = match block["security"].as_str() {
+        None => implied_security(port),
+        Some("tls") => ConnectionSecurity::Tls,
+        Some("starttls") => ConnectionSecurity::StartTls,
+        Some(other) => {
+            return Err(format!(
+                "policy document invalid: unknown connection security {other:?}"
+            ));
+        }
+    };
+
     Ok(ImapProviderConfig::new(
         AccountId::new(id),
         host,
@@ -265,7 +295,8 @@ fn parse_connection_config(
         username,
         SecretRef::new(secret_ref),
     )
-    .with_auth(auth))
+    .with_auth(auth)
+    .with_security(security))
 }
 
 /// What renewing an access token takes. Deliberately not part of
@@ -339,4 +370,66 @@ fn parse_account_policy(account: &Value) -> Result<Policy, String> {
     };
 
     Ok(Policy::new(AccountId::new(id), permissions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account_with(connection: &str) -> ParsedDocument {
+        parse_policy_document(&format!(
+            r#"{{"accounts":[{{"id":"a","read":"headers",{connection}}}]}}"#
+        ))
+        .expect("document parses")
+    }
+
+    #[test]
+    fn stated_security_wins_over_the_port() {
+        // The point of the field: implicit TLS on a port that is not 993, and
+        // STARTTLS on one that is not 587. Inferring from the port made both
+        // of these servers unreachable.
+        let parsed = account_with(
+            r#""imap":{"host":"h","port":1993,"security":"tls","username":"u","secret_ref":"keychain://s/a"},
+               "smtp":{"host":"h","port":465,"security":"starttls","username":"u","secret_ref":"keychain://s/a"}"#,
+        );
+        let account = &parsed.accounts[0];
+        assert_eq!(
+            account.imap.as_ref().expect("the IMAP block parsed").security,
+            ConnectionSecurity::Tls
+        );
+        assert_eq!(
+            account.smtp.as_ref().expect("the SMTP block parsed").security,
+            ConnectionSecurity::StartTls
+        );
+    }
+
+    #[test]
+    fn a_document_without_security_keeps_connecting_as_it_did() {
+        // Written by an app build that could not state it. The ports are all
+        // such a document ever had, so they still decide.
+        let parsed = account_with(
+            r#""imap":{"host":"h","port":993,"username":"u","secret_ref":"keychain://s/a"},
+               "smtp":{"host":"h","port":587,"username":"u","secret_ref":"keychain://s/a"}"#,
+        );
+        let account = &parsed.accounts[0];
+        assert_eq!(
+            account.imap.as_ref().expect("the IMAP block parsed").security,
+            ConnectionSecurity::Tls
+        );
+        assert_eq!(
+            account.smtp.as_ref().expect("the SMTP block parsed").security,
+            ConnectionSecurity::StartTls
+        );
+    }
+
+    #[test]
+    fn an_unknown_security_is_refused_rather_than_downgraded() {
+        // Guessing here would be guessing whether the secret goes over the
+        // wire in the clear.
+        let outcome = parse_policy_document(
+            r#"{"accounts":[{"id":"a","read":"headers","imap":{"host":"h","port":993,"security":"plain","username":"u","secret_ref":"keychain://s/a"}}]}"#,
+        );
+        let error = outcome.err().expect("an unknown security is an error");
+        assert!(error.contains("unknown connection security"), "{error}");
+    }
 }
