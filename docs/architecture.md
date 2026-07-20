@@ -55,7 +55,8 @@ Direct write tools (no approval, gated by the mark permission):
 
 Prepared action tools:
 
-- `mail_create_draft`
+- `mail_create_draft` — accepts optional MIME attachments as standard padded
+  base64, never as a local path or URL.
 - `mail_prepare_send`
 - `mail_prepare_move`
 - `mail_prepare_delete`
@@ -74,10 +75,9 @@ trait fixture-backed tests and real IMAP retrieval share; `MailAccessService`
 is the doorway MCP tools go through. Every read is authorized twice —
 account-wide and again for the mailbox the data actually lives in — so
 search results never contain hits from folders the permission rules block.
-`torromail-mcp` routes JSON-RPC `tools/call` into that service. `mail_search`,
-`mail_get_message`, `mail_mark`, and `mail_list_mailboxes` execute against
-fixture data today; the mailbox listing only ever names folders the policy
-grants something on. The remaining tools answer "not implemented yet".
+`torromail-mcp` routes JSON-RPC `tools/call` into that service. All catalog
+tools are implemented. The mailbox listing only ever names folders the policy
+grants something on.
 
 The real IMAP path exists as a protocol core behind `ImapTransport`:
 `ImapClient` speaks the smallest useful IMAP4rev1 subset (LOGIN, LIST,
@@ -116,6 +116,36 @@ The default cache policy persists metadata and headers only. Body cache, body in
 ## Risky Actions
 
 Send, move, and delete flows create pending actions with a preview, affected message count, account identity, tool call name, and expiration. Confirmation is single-use and expires by TTL.
+
+Sending re-checks the effective account policy when the prepared action is
+confirmed. A session draft is bound to the account that created it, so it
+cannot be submitted through another account. Send previews expose attachment
+names, media types, and byte sizes, but never their encoded content.
+
+## Outgoing Attachments
+
+`mail_create_draft` composes the text body and all attachments atomically, then
+appends the complete RFC 5322 message to the account's Drafts mailbox with the
+`\Draft` flag. With attachments the message is `multipart/mixed`; every binary
+part uses base64 transfer encoding and an RFC 2231 UTF-8 filename.
+
+The MCP contract accepts `filename`, optional `media_type`, and
+`content_base64`. It deliberately accepts neither filesystem paths nor URLs:
+the paired client supplies bytes it can already access, while TorroMail does
+not gain ambient file or network-reading authority. A draft may contain at
+most 20 attachments, and the finished MIME message may contain at most 20 MiB.
+
+```json
+{
+  "attachments": [
+    {
+      "filename": "angebot.pdf",
+      "media_type": "application/pdf",
+      "content_base64": "JVBERi0xLjQK..."
+    }
+  ]
+}
+```
 
 ## Provider Roadmap
 

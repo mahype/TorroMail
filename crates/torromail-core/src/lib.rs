@@ -992,11 +992,68 @@ impl SearchWindow {
     }
 }
 
+/// One binary file carried by an outgoing MIME message. Construction and
+/// limits live at the MCP boundary; the core only needs the already-validated
+/// facts required to serialize it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingAttachment {
+    filename: String,
+    media_type: String,
+    content: Vec<u8>,
+}
+
+impl OutgoingAttachment {
+    pub fn new(
+        filename: impl Into<String>,
+        media_type: impl Into<String>,
+        content: Vec<u8>,
+    ) -> Self {
+        Self {
+            filename: filename.into(),
+            media_type: media_type.into(),
+            content,
+        }
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn content(&self) -> &[u8] {
+        &self.content
+    }
+}
+
 /// A plain-text RFC 5322 message from its parts. The subject is encoded when
 /// it leaves ASCII; the body is normalised to CRLF line endings. `Bcc` is
 /// deliberately absent from the headers — a blind copy must not be visible to
 /// the other recipients; the bcc addresses travel only in the SMTP envelope.
-pub fn compose_message(from: &str, to: &[String], cc: &[String], subject: &str, body: &str) -> String {
+/// Kept as the source-compatible no-attachment doorway.
+pub fn compose_message(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    body: &str,
+) -> String {
+    compose_message_with_attachments(from, to, cc, subject, body, &[])
+}
+
+/// Compose the complete RFC 5322/MIME message that both IMAP APPEND and SMTP
+/// DATA consume. With attachments this becomes `multipart/mixed`; without
+/// them it stays byte-for-byte in the original plain-text shape.
+pub fn compose_message_with_attachments(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    body: &str,
+    attachments: &[OutgoingAttachment],
+) -> String {
     let mut message = String::new();
     message.push_str(&format!("From: {from}\r\n"));
     message.push_str(&format!("To: {}\r\n", to.join(", ")));
@@ -1005,6 +1062,39 @@ pub fn compose_message(from: &str, to: &[String], cc: &[String], subject: &str, 
     }
     message.push_str(&format!("Subject: {}\r\n", mime::encode_rfc2047(subject)));
     message.push_str("MIME-Version: 1.0\r\n");
+
+    if attachments.is_empty() {
+        append_plain_text_part(&mut message, body);
+        return message;
+    }
+
+    let boundary = attachment_boundary(body);
+    message.push_str(&format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
+    ));
+
+    message.push_str(&format!("--{boundary}\r\n"));
+    append_plain_text_part(&mut message, body);
+
+    for attachment in attachments {
+        message.push_str(&format!("--{boundary}\r\n"));
+        let filename = mime_parameter_value(attachment.filename());
+        message.push_str(&format!(
+            "Content-Type: {}; name*=UTF-8''{filename}\r\n",
+            attachment.media_type()
+        ));
+        message.push_str(&format!(
+            "Content-Disposition: attachment; filename*=UTF-8''{filename}\r\n"
+        ));
+        message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+        append_wrapped_base64(&mut message, attachment.content());
+    }
+
+    message.push_str(&format!("--{boundary}--\r\n"));
+    message
+}
+
+fn append_plain_text_part(message: &mut String, body: &str) {
     message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     message.push_str("Content-Transfer-Encoding: 8bit\r\n");
     message.push_str("\r\n");
@@ -1012,7 +1102,54 @@ pub fn compose_message(from: &str, to: &[String], cc: &[String], subject: &str, 
         message.push_str(line.strip_suffix('\r').unwrap_or(line));
         message.push_str("\r\n");
     }
-    message
+}
+
+/// Pick a deterministic boundary that cannot occur as a delimiter in the
+/// only unencoded part. Attachment bodies are base64 and therefore cannot
+/// contain the hyphens in this marker.
+fn attachment_boundary(body: &str) -> String {
+    let mut suffix = 1_u64;
+    loop {
+        let boundary = format!("=_TorroMail_mixed_{suffix}");
+        if !body.contains(&format!("--{boundary}")) {
+            return boundary;
+        }
+        suffix += 1;
+    }
+}
+
+/// RFC 2231 extended parameter value. The MCP boundary has already rejected
+/// controls and path separators; percent encoding makes every remaining UTF-8
+/// filename safe inside a MIME header without lossy ASCII fallbacks.
+fn mime_parameter_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+        {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn append_wrapped_base64(message: &mut String, content: &[u8]) {
+    let encoded = mime::encode_base64(content);
+    if encoded.is_empty() {
+        message.push_str("\r\n");
+        return;
+    }
+    for line in encoded.as_bytes().chunks(76) {
+        for &byte in line {
+            message.push(char::from(byte));
+        }
+        message.push_str("\r\n");
+    }
 }
 
 /// The boundary fixture-backed tests and real IMAP retrieval share: search

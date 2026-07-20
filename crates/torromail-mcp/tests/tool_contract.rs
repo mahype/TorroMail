@@ -770,6 +770,137 @@ fn a_draft_is_composed_and_appended() {
 }
 
 #[test]
+fn a_draft_accepts_base64_attachments_and_returns_only_safe_metadata() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Angebot","body":"Anbei.","attachments":[{"filename":"angebot.pdf","media_type":"application/pdf","content_base64":"AAEC/w=="}]}}}"#,
+        )
+        .expect("a response");
+
+    assert!(response.contains("draft_created"), "got: {response}");
+    assert!(response.contains(r#"\"attachment_count\":1"#), "got: {response}");
+    assert!(response.contains(r#"\"filename\":\"angebot.pdf\""#));
+    assert!(response.contains(r#"\"media_type\":\"application/pdf\""#));
+    assert!(response.contains(r#"\"size_bytes\":4"#));
+    assert!(!response.contains("AAEC/w=="), "file bytes must not be echoed");
+}
+
+#[test]
+fn attachment_inputs_are_validated_before_a_draft_is_written() {
+    let server = LineMcpServer::fixture();
+    let cases = [
+        (
+            "../secret.txt",
+            "text/plain",
+            "SGFsbG8=",
+            "path components",
+        ),
+        ("safe.txt", "text/plain; charset=utf-8", "SGFsbG8=", "media_type"),
+        ("safe.txt", "text/plain", "not base64", "padded base64"),
+    ];
+
+    for (index, (filename, media_type, content, expected)) in cases.iter().enumerate() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 74 + index,
+            "method": "tools/call",
+            "params": {
+                "name": "mail_create_draft",
+                "arguments": {
+                    "account_id": "work",
+                    "to": ["someone@example.com"],
+                    "subject": "Attachment",
+                    "body": "Text",
+                    "attachments": [{
+                        "filename": filename,
+                        "media_type": media_type,
+                        "content_base64": content
+                    }]
+                }
+            }
+        });
+        let response = server
+            .handle_line(&request.to_string())
+            .expect("a response");
+        assert!(response.contains(r#""code":-32602"#), "got: {response}");
+        assert!(response.contains(expected), "got: {response}");
+    }
+}
+
+#[test]
+fn an_attachment_without_a_media_type_uses_the_binary_default() {
+    let server = LineMcpServer::fixture();
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Bytes","body":"Text","attachments":[{"filename":"bytes.bin","content_base64":""}]}}}"#,
+        )
+        .expect("a response");
+
+    assert!(
+        response.contains(r#"\"media_type\":\"application/octet-stream\""#),
+        "got: {response}"
+    );
+    assert!(response.contains(r#"\"size_bytes\":0"#));
+}
+
+#[test]
+fn attachment_paths_and_excessive_attachment_counts_are_refused() {
+    let server = LineMcpServer::fixture();
+    let path_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 78,
+        "method": "tools/call",
+        "params": {
+            "name": "mail_create_draft",
+            "arguments": {
+                "account_id": "work",
+                "to": ["someone@example.com"],
+                "subject": "Path",
+                "body": "Text",
+                "attachments": [{
+                    "filename": "secret.txt",
+                    "content_base64": "",
+                    "path": "/tmp/secret.txt"
+                }]
+            }
+        }
+    });
+    let path_response = server
+        .handle_line(&path_request.to_string())
+        .expect("a response");
+    assert!(path_response.contains("unsupported field path"));
+
+    let attachments = (0..21)
+        .map(|index| {
+            serde_json::json!({
+                "filename": format!("file-{index}.txt"),
+                "content_base64": ""
+            })
+        })
+        .collect::<Vec<_>>();
+    let count_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 79,
+        "method": "tools/call",
+        "params": {
+            "name": "mail_create_draft",
+            "arguments": {
+                "account_id": "work",
+                "to": ["someone@example.com"],
+                "subject": "Many",
+                "body": "Text",
+                "attachments": attachments
+            }
+        }
+    });
+    let count_response = server
+        .handle_line(&count_request.to_string())
+        .expect("a response");
+    assert!(count_response.contains("at most 20 files"));
+}
+
+#[test]
 fn a_draft_needs_at_least_one_recipient() {
     let server = LineMcpServer::fixture();
     let response = server
@@ -948,6 +1079,7 @@ fn send_capable_document(path: &std::path::Path) {
 }
 
 const CREATE_DRAFT: &str = r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Hallo","body":"Text"}}}"#;
+const CREATE_DRAFT_WITH_ATTACHMENT: &str = r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Angebot","body":"Text","attachments":[{"filename":"angebot.pdf","media_type":"application/pdf","content_base64":"AAEC/w=="}]}}}"#;
 
 #[test]
 fn a_draft_can_be_prepared_for_sending() {
@@ -970,6 +1102,90 @@ fn a_draft_can_be_prepared_for_sending() {
 
     assert!(prepare.contains("pending_action_id"), "got: {prepare}");
     assert!(prepare.contains("Send to someone@example.com"), "got: {prepare}");
+}
+
+#[test]
+fn a_send_preview_names_attachments_without_exposing_their_bytes() {
+    let path = temp_policy_path("prepare-send-attachment");
+    send_capable_document(&path);
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([])) as Box<dyn MailProvider>)
+    });
+
+    let draft = server
+        .handle_line(CREATE_DRAFT_WITH_ATTACHMENT)
+        .expect("a response");
+    let draft_id = payload_field(&draft, "draft_id");
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"work","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(prepare.contains("with 1 attachment(s)"), "got: {prepare}");
+    assert!(prepare.contains(r#"\"subject\":\"Angebot\""#));
+    assert!(prepare.contains(r#"\"filename\":\"angebot.pdf\""#));
+    assert!(prepare.contains(r#"\"size_bytes\":4"#));
+    assert!(!prepare.contains("AAEC/w=="), "file bytes must not enter approval data");
+}
+
+#[test]
+fn a_draft_cannot_be_prepared_through_a_different_account() {
+    let path = temp_policy_path("send-other-account");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","email":"me@example.com","read":"full_message","write":{"drafts":true},"send":true,"per_folder":false,"folder_rules":{}},{"id":"personal","email":"me@example.net","read":"full_message","write":{"drafts":true},"send":true,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("policy document written");
+    let server = LineMcpServer::with_policy_path_and_fixtures(path.clone());
+
+    let draft = server.handle_line(CREATE_DRAFT).expect("a response");
+    let draft_id = payload_field(&draft, "draft_id");
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"personal","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(prepare.contains(r#""code":-32000"#), "got: {prepare}");
+    assert!(prepare.contains("different account"), "got: {prepare}");
+}
+
+#[test]
+fn confirming_a_send_rechecks_a_permission_revoked_after_prepare() {
+    let path = temp_policy_path("send-revoked-after-prepare");
+    send_capable_document(&path);
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([])) as Box<dyn MailProvider>)
+    });
+
+    let draft = server.handle_line(CREATE_DRAFT).expect("a response");
+    let draft_id = payload_field(&draft, "draft_id");
+    let prepare = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{{"name":"mail_prepare_send","arguments":{{"account_id":"work","draft_id":"{draft_id}"}}}}}}"#
+        ))
+        .expect("a response");
+    let pending_id = payload_field(&prepare, "pending_action_id");
+    let code = payload_field(&prepare, "confirmation_code");
+
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","email":"me@example.com","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{}}]}"#,
+    )
+    .expect("send permission revoked");
+    let confirm = server
+        .handle_line(&format!(
+            r#"{{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"{code}"}}}}}}"#
+        ))
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(confirm.contains(r#""code":-32000"#), "got: {confirm}");
+    assert!(confirm.contains("Send"), "got: {confirm}");
+    assert!(!confirm.contains("no SMTP"), "permission must fail first: {confirm}");
 }
 
 #[test]
@@ -1051,9 +1267,13 @@ fn tool_list_serializes_without_secrets_or_local_paths() {
 
     assert!(manifest.contains("\"mail_search\""));
     assert!(manifest.contains("\"result_set_id\""));
+    assert!(manifest.contains("\"attachments\""));
+    assert!(manifest.contains("\"content_base64\""));
     assert!(!manifest.contains("password"));
     assert!(!manifest.contains("token"));
     assert!(!manifest.contains("/Users/"));
+    assert!(!manifest.contains(r#""path":{"#));
+    assert!(!manifest.contains(r#""url":{"#));
 }
 
 /// The schema must promise only what the tools actually do. Both of these
@@ -1494,6 +1714,27 @@ fn audit_detail_names_what_a_search_and_draft_touched() {
     let draft = &lines[1];
     assert_eq!(draft["tool"], "mail_create_draft");
     assert_eq!(draft["detail"], "kunde@example.com — Angebot");
+}
+
+#[test]
+fn attachment_audit_data_contains_metadata_but_never_file_bytes() {
+    let dir = temp_audit_dir("attachment-redaction");
+    let policy = dir.join("policy.json");
+    paired_fixture_document(&policy);
+    let server = LineMcpServer::with_policy_path_and_fixtures(policy)
+        .with_presented_token(Some(TEST_KEY));
+
+    server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["kunde@example.com"],"subject":"Angebot","body":"Text","attachments":[{"filename":"angebot.pdf","media_type":"application/pdf","content_base64":"AAEC/w=="}]}}}"#,
+        )
+        .expect("a response");
+
+    let log = std::fs::read_to_string(dir.join("audit.jsonl")).expect("an audit line was written");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(log.contains("angebot.pdf"), "got: {log}");
+    assert!(log.contains("1 attachment(s)"), "got: {log}");
+    assert!(!log.contains("AAEC/w=="), "file bytes must not enter the audit log");
 }
 
 #[test]

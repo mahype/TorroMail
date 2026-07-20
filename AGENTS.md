@@ -109,7 +109,10 @@ Direct write tools (no approval, gated by the mark permission):
 Prepared action tools:
 
 - `mail_create_draft` — composes the message and appends it to the drafts
-  folder with `\Draft`; gated by the drafts right.
+  folder with `\Draft`; gated by the drafts right. Optional attachments travel
+  as standard padded base64 with a filename and optional media type; paths and
+  URLs are never accepted. At most 20 attachments and 20 MiB of finished MIME
+  data are allowed.
 - `mail_prepare_move` — holds a move for confirmation; gated by the move right.
 - `mail_prepare_delete` — holds a soft delete (move to Trash) or, with
   `permanent`, an expunge; gated by the matching right.

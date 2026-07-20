@@ -14,8 +14,9 @@ use serde_json::{Value, json};
 use torromail_core::smtp::SmtpAuth;
 use torromail_core::{
     AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
-    ImapProviderConfig, MailAccessService, MailProvider, MarkChange, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchSessionStore, SearchWindow, StoredMessage,
+    ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
+    PermissionSet, Policy, PolicyEngine, ReadAccess, SearchSessionStore, SearchWindow,
+    StoredMessage,
 };
 use torromail_oauth::TokenSet;
 
@@ -127,7 +128,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"}},"required":["account_id","to","subject","body"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
             }
             ToolName::MailPrepareSend => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
@@ -216,13 +217,28 @@ enum ConnIdentity {
 /// resolves the rest from the reloaded document itself.
 type ConnectOverride = Box<dyn Fn(&AccountId) -> CoreResult<Box<dyn MailProvider>>>;
 
+const MAX_ATTACHMENTS: usize = 20;
+const MAX_MESSAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Metadata safe to show in an approval or audit line. File bytes remain only
+/// in the raw MIME message and never enter either surface.
+#[derive(Clone)]
+struct AttachmentSummary {
+    filename: String,
+    media_type: String,
+    size_bytes: usize,
+}
+
 /// A composed draft the server remembers so a later `prepare_send` can find
 /// it by id. The recipients are the full envelope — to, cc and bcc — while
 /// the raw message carries only the visible headers.
 #[derive(Clone)]
 struct DraftRecord {
+    account_id: AccountId,
     from: String,
     recipients: Vec<String>,
+    subject: String,
+    attachments: Vec<AttachmentSummary>,
     raw: String,
 }
 
@@ -540,8 +556,20 @@ impl LineMcpServer {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 let (mailbox, record) =
                     compose_and_append(arguments, &account_id, provider, engine, &from)?;
+                let attachments = attachment_summaries_json(&record.attachments);
+                let attachment_count = record.attachments.len();
+                let total_attachment_bytes = total_attachment_bytes(&record.attachments);
+                let message_bytes = record.raw.len();
                 let draft_id = self.drafts.borrow_mut().insert(record);
-                Ok(json!({ "status": "draft_created", "draft_id": draft_id, "mailbox": mailbox }))
+                Ok(json!({
+                    "status": "draft_created",
+                    "draft_id": draft_id,
+                    "mailbox": mailbox,
+                    "attachments": attachments,
+                    "attachment_count": attachment_count,
+                    "total_attachment_bytes": total_attachment_bytes,
+                    "message_bytes": message_bytes
+                }))
             });
         }
         if name == ToolName::MailPrepareSend.as_str() {
@@ -821,11 +849,19 @@ impl LineMcpServer {
     /// Prepare a send for confirmation. The draft must have been composed this
     /// session, and the account must hold the send right — the one capability
     /// that acts on the outside world.
-    fn handle_mail_prepare_send(&self, arguments: &Value, account_id: &AccountId, id: &Value) -> String {
+    fn handle_mail_prepare_send(
+        &self,
+        arguments: &Value,
+        account_id: &AccountId,
+        id: &Value,
+    ) -> String {
         let draft_id = arguments["draft_id"].as_str().unwrap_or_default();
         let Some(record) = self.drafts.borrow().get(draft_id) else {
             return json_rpc_error(id, -32000, &format!("draft not found: {draft_id}"));
         };
+        if &record.account_id != account_id {
+            return json_rpc_error(id, -32000, "draft belongs to a different account");
+        }
 
         let engine = match self.runtime_for(account_id) {
             Ok((engine, _facts)) => engine,
@@ -835,7 +871,15 @@ impl LineMcpServer {
             return json_rpc_error(id, -32000, &error.to_string());
         }
 
-        let preview = format!("Send to {}", record.recipients.join(", "));
+        let preview = if record.attachments.is_empty() {
+            format!("Send to {}", record.recipients.join(", "))
+        } else {
+            format!(
+                "Send to {} with {} attachment(s)",
+                record.recipients.join(", "),
+                record.attachments.len()
+            )
+        };
         self.store_prepared(account_id, preview, Operation::Send { record }, id)
     }
 
@@ -847,6 +891,15 @@ impl LineMcpServer {
         operation: Operation,
         id: &Value,
     ) -> String {
+        let send_details = match &operation {
+            Operation::Send { record } => Some(json!({
+                "subject": record.subject,
+                "attachments": attachment_summaries_json(&record.attachments),
+                "attachment_count": record.attachments.len(),
+                "total_attachment_bytes": total_attachment_bytes(&record.attachments)
+            })),
+            _ => None,
+        };
         let action = PreparedAction {
             account_id: account_id.clone(),
             code: String::new(),
@@ -854,15 +907,19 @@ impl LineMcpServer {
             expires_at: now_secs() + PENDING_TTL_SECONDS,
         };
         let (pending_id, code) = self.pending.borrow_mut().prepare(action);
-        json_rpc_text_result(
-            id,
-            &json!({
-                "pending_action_id": pending_id,
-                "confirmation_code": code,
-                "preview": preview,
-                "expires_in_seconds": PENDING_TTL_SECONDS
-            }),
-        )
+        let mut payload = json!({
+            "pending_action_id": pending_id,
+            "confirmation_code": code,
+            "preview": preview,
+            "expires_in_seconds": PENDING_TTL_SECONDS
+        });
+        if let Some(details) = send_details {
+            payload["subject"] = details["subject"].clone();
+            payload["attachments"] = details["attachments"].clone();
+            payload["attachment_count"] = details["attachment_count"].clone();
+            payload["total_attachment_bytes"] = details["total_attachment_bytes"].clone();
+        }
+        json_rpc_text_result(id, &payload)
     }
 
     /// Confirm and carry out a prepared action. The action names its own
@@ -890,7 +947,22 @@ impl LineMcpServer {
 
     /// Submit a confirmed draft over SMTP. A fresh session each time — sends
     /// are rare enough that pooling a second connection is not worth it.
-    fn execute_send(&self, account_id: &AccountId, record: &DraftRecord, id: &Value) -> String {
+    fn execute_send(
+        &self,
+        account_id: &AccountId,
+        record: &DraftRecord,
+        id: &Value,
+    ) -> String {
+        if &record.account_id != account_id {
+            return json_rpc_error(id, -32000, "draft belongs to a different account");
+        }
+        let engine = match self.runtime_for(account_id) {
+            Ok((engine, _facts)) => engine,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        if let Err(error) = engine.authorize(account_id, Capability::Send) {
+            return json_rpc_error(id, -32000, &error.to_string());
+        }
         let Some((config, oauth)) = self.smtp_facts(account_id) else {
             return json_rpc_error(
                 id,
@@ -902,7 +974,12 @@ impl LineMcpServer {
         match send_over_smtp(&config, oauth.as_ref(), record) {
             Ok(()) => json_rpc_text_result(
                 id,
-                &json!({ "status": "sent", "recipients": record.recipients.len() }),
+                &json!({
+                    "status": "sent",
+                    "recipients": record.recipients.len(),
+                    "attachment_count": record.attachments.len(),
+                    "total_attachment_bytes": total_attachment_bytes(&record.attachments)
+                }),
             ),
             Err(error) => json_rpc_error(id, -32000, &error.to_string()),
         }
@@ -1542,6 +1619,7 @@ fn compose_and_append(
     let bcc = string_array(&arguments["bcc"]);
     let subject = arguments["subject"].as_str().unwrap_or_default();
     let body = arguments["body"].as_str().unwrap_or_default();
+    let attachments = parse_attachments(&arguments["attachments"])?;
 
     if to.is_empty() {
         return Err(ToolFailure::InvalidParams(
@@ -1549,7 +1627,28 @@ fn compose_and_append(
         ));
     }
 
-    let message = torromail_core::compose_message(from, &to, &cc, subject, body);
+    let attachment_summaries = attachments
+        .iter()
+        .map(|attachment| AttachmentSummary {
+            filename: attachment.filename().to_owned(),
+            media_type: attachment.media_type().to_owned(),
+            size_bytes: attachment.content().len(),
+        })
+        .collect::<Vec<_>>();
+    let message = torromail_core::compose_message_with_attachments(
+        from,
+        &to,
+        &cc,
+        subject,
+        body,
+        &attachments,
+    );
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(ToolFailure::InvalidParams(format!(
+            "the finished message is {} bytes; the limit is {MAX_MESSAGE_BYTES} bytes",
+            message.len()
+        )));
+    }
 
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
@@ -1567,11 +1666,221 @@ fn compose_and_append(
     recipients.extend(cc);
     recipients.extend(bcc);
     let record = DraftRecord {
+        account_id: account_id.clone(),
         from: from.to_owned(),
         recipients,
+        subject: subject.to_owned(),
+        attachments: attachment_summaries,
         raw: message,
     };
     Ok((mailbox, record))
+}
+
+/// Parse the only attachment source TorroMail accepts: bytes carried by the
+/// paired MCP client. Local paths and URLs deliberately have no schema shape,
+/// so the server never becomes a filesystem or network deputy.
+fn parse_attachments(value: &Value) -> Result<Vec<OutgoingAttachment>, ToolFailure> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| ToolFailure::InvalidParams("attachments must be an array".to_owned()))?;
+    if values.len() > MAX_ATTACHMENTS {
+        return Err(ToolFailure::InvalidParams(format!(
+            "attachments may contain at most {MAX_ATTACHMENTS} files"
+        )));
+    }
+
+    let mut attachments = Vec::with_capacity(values.len());
+    let mut total_bytes = 0_usize;
+    for (index, value) in values.iter().enumerate() {
+        let number = index + 1;
+        let object = value.as_object().ok_or_else(|| {
+            ToolFailure::InvalidParams(format!("attachment {number} must be an object"))
+        })?;
+        if let Some(field) = object
+            .keys()
+            .find(|field| !matches!(field.as_str(), "filename" | "media_type" | "content_base64"))
+        {
+            return Err(ToolFailure::InvalidParams(format!(
+                "attachment {number} contains unsupported field {field}"
+            )));
+        }
+        let filename = value["filename"].as_str().ok_or_else(|| {
+            ToolFailure::InvalidParams(format!("attachment {number} needs a filename"))
+        })?;
+        validate_attachment_filename(filename).map_err(|message| {
+            ToolFailure::InvalidParams(format!("attachment {number}: {message}"))
+        })?;
+
+        let media_type = match object.get("media_type") {
+            None => "application/octet-stream",
+            Some(value) => value.as_str().ok_or_else(|| {
+                ToolFailure::InvalidParams(format!(
+                    "attachment {number}: media_type must be a string"
+                ))
+            })?,
+        };
+        validate_media_type(media_type).map_err(|message| {
+            ToolFailure::InvalidParams(format!("attachment {number}: {message}"))
+        })?;
+
+        let encoded = value["content_base64"].as_str().ok_or_else(|| {
+            ToolFailure::InvalidParams(format!("attachment {number} needs content_base64"))
+        })?;
+        let content = decode_base64_strict(encoded).map_err(|message| {
+            ToolFailure::InvalidParams(format!("attachment {number}: {message}"))
+        })?;
+        total_bytes = total_bytes.checked_add(content.len()).ok_or_else(|| {
+            ToolFailure::InvalidParams("attachment size overflow".to_owned())
+        })?;
+        if total_bytes > MAX_MESSAGE_BYTES {
+            return Err(ToolFailure::InvalidParams(format!(
+                "attachment bytes exceed the {MAX_MESSAGE_BYTES}-byte message limit"
+            )));
+        }
+
+        attachments.push(OutgoingAttachment::new(filename, media_type, content));
+    }
+    Ok(attachments)
+}
+
+fn validate_attachment_filename(filename: &str) -> Result<(), &'static str> {
+    if filename.is_empty() || filename.trim().is_empty() {
+        return Err("filename must not be empty");
+    }
+    if filename.len() > 255 {
+        return Err("filename must not exceed 255 UTF-8 bytes");
+    }
+    if filename == "." || filename == ".." || filename.contains(['/', '\\']) {
+        return Err("filename must not contain path components");
+    }
+    if filename.chars().any(char::is_control) {
+        return Err("filename must not contain control characters");
+    }
+    Ok(())
+}
+
+fn validate_media_type(media_type: &str) -> Result<(), &'static str> {
+    if media_type.len() > 127 || !media_type.is_ascii() {
+        return Err("media_type must be at most 127 ASCII characters");
+    }
+    let Some((kind, subtype)) = media_type.split_once('/') else {
+        return Err("media_type must have the form type/subtype");
+    };
+    if kind.is_empty()
+        || subtype.is_empty()
+        || subtype.contains('/')
+        || !kind.bytes().all(is_mime_token_byte)
+        || !subtype.bytes().all(is_mime_token_byte)
+    {
+        return Err("media_type must be a valid type/subtype without parameters");
+    }
+    Ok(())
+}
+
+fn is_mime_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// Standard padded base64, with ASCII whitespace tolerated for clients that
+/// wrap long values. Padding and unused bits are checked so malformed payloads
+/// never silently turn into different bytes.
+fn decode_base64_strict(input: &str) -> Result<Vec<u8>, &'static str> {
+    let compact_len = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .count();
+    let maximum_encoded = MAX_MESSAGE_BYTES.saturating_mul(4).div_ceil(3) + 4;
+    if compact_len > maximum_encoded {
+        return Err("content_base64 is too large");
+    }
+    if compact_len % 4 != 0 {
+        return Err("content_base64 must use standard padded base64");
+    }
+
+    let compact = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    let mut decoded = Vec::with_capacity(compact.len() / 4 * 3);
+    let chunk_count = compact.len() / 4;
+    for (index, chunk) in compact.chunks_exact(4).enumerate() {
+        let last = index + 1 == chunk_count;
+        let a = base64_sextet(chunk[0]).ok_or("content_base64 contains invalid characters")?;
+        let b = base64_sextet(chunk[1]).ok_or("content_base64 contains invalid characters")?;
+        decoded.push((a << 2) | (b >> 4));
+
+        if chunk[2] == b'=' {
+            if !last || chunk[3] != b'=' || b & 0x0f != 0 {
+                return Err("content_base64 has invalid padding");
+            }
+            continue;
+        }
+        let c = base64_sextet(chunk[2]).ok_or("content_base64 contains invalid characters")?;
+        decoded.push((b << 4) | (c >> 2));
+
+        if chunk[3] == b'=' {
+            if !last || c & 0x03 != 0 {
+                return Err("content_base64 has invalid padding");
+            }
+            continue;
+        }
+        let d = base64_sextet(chunk[3]).ok_or("content_base64 contains invalid characters")?;
+        decoded.push((c << 6) | d);
+    }
+    Ok(decoded)
+}
+
+fn base64_sextet(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn attachment_summaries_json(attachments: &[AttachmentSummary]) -> Value {
+    Value::Array(
+        attachments
+            .iter()
+            .map(|attachment| {
+                json!({
+                    "filename": attachment.filename,
+                    "media_type": attachment.media_type,
+                    "size_bytes": attachment.size_bytes
+                })
+            })
+            .collect(),
+    )
+}
+
+fn total_attachment_bytes(attachments: &[AttachmentSummary]) -> usize {
+    attachments
+        .iter()
+        .map(|attachment| attachment.size_bytes)
+        .sum()
 }
 
 /// A JSON array of strings, or an empty list — used for recipient fields.
@@ -1820,11 +2129,29 @@ fn audit_detail(name: &str, arguments: &Value, payload: Option<&Value>) -> Strin
         "mail_create_draft" => {
             let to = string_array(&arguments["to"]).join(", ");
             let subject = arguments["subject"].as_str().unwrap_or_default();
-            match (to.is_empty(), subject.is_empty()) {
+            let base = match (to.is_empty(), subject.is_empty()) {
                 (false, false) => format!("{to} — {subject}"),
                 (false, true) => to,
                 (true, false) => subject.to_owned(),
                 (true, true) => String::new(),
+            };
+            let attachments = payload
+                .and_then(|value| value["attachments"].as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value["filename"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if attachments.is_empty() {
+                base
+            } else {
+                format!(
+                    "{base} · {} attachment(s): {}",
+                    attachments.len(),
+                    attachments.join(", ")
+                )
             }
         }
         "mail_prepare_send" => arguments["draft_id"]
@@ -1865,7 +2192,17 @@ fn confirm_detail(arguments: &Value, payload: Option<&Value>) -> String {
         "moved" => format!("moved {} → {}", n("moved"), at("target")),
         "trashed" => format!("trashed {} → {}", n("trashed"), at("mailbox")),
         "deleted" => format!("deleted {}", n("deleted")),
-        "sent" => format!("sent → {} recipient(s)", n("recipients")),
+        "sent" => {
+            let attachments = n("attachment_count");
+            if attachments == 0 {
+                format!("sent → {} recipient(s)", n("recipients"))
+            } else {
+                format!(
+                    "sent → {} recipient(s) · {attachments} attachment(s)",
+                    n("recipients")
+                )
+            }
+        }
         other => other.to_owned(),
     }
 }
@@ -1951,7 +2288,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
         ),
         prepare(
             ToolName::MailCreateDraft,
-            "Create a draft when the account policy allows drafts.",
+            "Create a plain-text draft with optional base64 attachments when the account policy allows drafts.",
         ),
         prepare(
             ToolName::MailPrepareSend,

@@ -1,9 +1,9 @@
 use torromail_core::{
     AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
-    PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet, Policy,
-    PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
-    WriteAccess, compose_message,
+    OutgoingAttachment, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet,
+    Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
+    WriteAccess, compose_message, compose_message_with_attachments,
 };
 
 #[test]
@@ -23,6 +23,56 @@ fn compose_message_builds_headers_and_encodes_a_non_ascii_subject() {
     assert!(message.contains("Subject: =?UTF-8?B?"), "{message}");
     // The body's bare newline became CRLF.
     assert!(message.contains("\r\nZeile eins\r\nZeile zwei\r\n"), "{message}");
+}
+
+#[test]
+fn compose_message_builds_a_multipart_attachment() {
+    let attachment = OutgoingAttachment::new(
+        "Prüfung #2.pdf",
+        "application/pdf",
+        vec![0, 1, 2, 255],
+    );
+    let message = compose_message_with_attachments(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Dokument",
+        "Anbei.",
+        &[attachment],
+    );
+
+    assert!(message.contains("Content-Type: multipart/mixed; boundary=\"=_TorroMail_mixed_1\""));
+    assert!(message.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+    assert!(message.contains("Content-Type: application/pdf; name*=UTF-8''Pr%C3%BCfung%20#2.pdf\r\n"));
+    assert!(message.contains(
+        "Content-Disposition: attachment; filename*=UTF-8''Pr%C3%BCfung%20#2.pdf\r\n"
+    ));
+    assert!(message.contains("Content-Transfer-Encoding: base64\r\n\r\nAAEC/w==\r\n"));
+    assert!(message.ends_with("--=_TorroMail_mixed_1--\r\n"));
+}
+
+#[test]
+fn attachment_base64_is_wrapped_and_the_boundary_cannot_collide_with_the_body() {
+    let attachment = OutgoingAttachment::new("bytes.bin", "application/octet-stream", vec![7; 60]);
+    let message = compose_message_with_attachments(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Bytes",
+        "A deliberate --=_TorroMail_mixed_1 collision.",
+        &[attachment],
+    );
+
+    assert!(message.contains("boundary=\"=_TorroMail_mixed_2\""));
+    let encoded = message
+        .split("Content-Transfer-Encoding: base64\r\n\r\n")
+        .nth(1)
+        .expect("attachment body")
+        .split("--=_TorroMail_mixed_2--")
+        .next()
+        .expect("closing boundary");
+    let lines = encoded.trim().split("\r\n").collect::<Vec<_>>();
+    assert_eq!(lines.iter().map(|line| line.len()).collect::<Vec<_>>(), [76, 4]);
 }
 
 #[test]
