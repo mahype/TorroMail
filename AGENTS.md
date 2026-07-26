@@ -150,16 +150,25 @@ assistant can relay. A document *without* a `clients` key (pre-pairing or
 hand-managed) enforces nothing; the app always publishes one. `--check-account`
 sits behind the same gate — the app presents its own key (`torromail-app`).
 
-Keychain items are scoped to the signing Team ID, and an existing item is
-refreshed in place, which leaves its access list alone. A key an older build
-wrote therefore stays unreadable forever, and `pairings()` leaves an unreadable
-key off the allowlist — so the client is locked out and reconnecting cannot help
-it. Because a client key is regenerable (unlike a mail password), connecting and
-renewing delete the item and write a fresh one rather than overwriting it; the
-new key goes straight into the client's config. Every key change needs the
-client to restart, since it reads `TORROMAIL_TOKEN` once at spawn — the app says
-so where it cannot be missed, and stops saying it once that client connects
-again.
+Keychain items are scoped to the signing Team ID when they are created, and an
+existing item is refreshed in place, which leaves its access list alone. An item
+an older build wrote therefore stays unreadable, and the process disables the
+keychain's consent dialog, so the read fails silently rather than asking. That
+hits both secrets the app stores, and in both cases the repair is the same:
+replace the item instead of updating it, because only a fresh add attaches a
+current access list.
+
+- Client keys are regenerable, so connecting or renewing mints a new one and
+  writes it straight into the client's config. `pairings()` leaves an unreadable
+  key off the allowlist, which is what locks the client out until then.
+- Mail passwords are not regenerable, so `savePassword` replaces the item only
+  when it cannot read what is there — the stored secret is unreachable anyway,
+  and the caller is holding the value that takes its place. Re-entering the
+  password in the app is therefore a real repair.
+
+Every key change needs the client to restart, since it reads `TORROMAIL_TOKEN`
+once at spawn — the app says so where it cannot be missed, and stops saying it
+once that client connects again.
 
 Reading mail has no browsing tool by design. "What came in lately?" is
 `mail_search` with an empty query: no filter, newest first, INBOX unless a

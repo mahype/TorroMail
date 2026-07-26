@@ -96,44 +96,94 @@ public enum KeychainStore {
         SecKeychainSetUserInteractionAllowed(false)
     }
 
+    /// The four item operations `savePassword` needs. Injectable so the repair
+    /// path below — an item that is there but cannot be read — can be checked
+    /// without a real keychain, which no test may write to.
+    public struct ItemStore: Sendable {
+        /// Creates the item with a current access list. False when one is
+        /// already there; the caller then decides whether to refresh or
+        /// replace it.
+        public var add: @Sendable (_ account: String, _ secret: String) throws -> Bool
+        public var read: @Sendable (_ account: String) -> String?
+        public var update: @Sendable (_ account: String, _ secret: String) throws -> Void
+        public var delete: @Sendable (_ account: String) -> Void
+
+        public init(
+            add: @escaping @Sendable (_ account: String, _ secret: String) throws -> Bool,
+            read: @escaping @Sendable (_ account: String) -> String?,
+            update: @escaping @Sendable (_ account: String, _ secret: String) throws -> Void,
+            delete: @escaping @Sendable (_ account: String) -> Void
+        ) {
+            self.add = add
+            self.read = read
+            self.update = update
+            self.delete = delete
+        }
+
+        public static let keychain = ItemStore(
+            add: { account, secret in
+                var attributes = KeychainStore.itemQuery(forAccount: account)
+                attributes[kSecValueData as String] = Data(secret.utf8)
+                // A fresh item is scoped to the signing Team ID, so the app and
+                // the bundled server both read it without a dialog. An unsigned
+                // local build has no team to scope to and stores it with the
+                // keychain's default.
+                if let access = KeychainStore.teamScopedAccess() {
+                    attributes[kSecAttrAccess as String] = access
+                }
+                let status = SecItemAdd(attributes as CFDictionary, nil)
+                if status == errSecSuccess { return true }
+                guard status == errSecDuplicateItem else { throw Failure(status: status) }
+                return false
+            },
+            read: { KeychainStore.readPassword(forAccount: $0) },
+            update: { account, secret in
+                let status = SecItemUpdate(
+                    KeychainStore.itemQuery(forAccount: account) as CFDictionary,
+                    [kSecValueData as String: Data(secret.utf8)] as CFDictionary
+                )
+                guard status == errSecSuccess else { throw Failure(status: status) }
+            },
+            delete: { KeychainStore.deletePassword(forAccount: $0) }
+        )
+    }
+
     public static func savePassword(
         _ password: String,
-        forAccount accountID: String
+        forAccount accountID: String,
+        store: ItemStore = .keychain
     ) throws {
-        let query: [String: Any] = [
+        if try store.add(accountID, password) {
+            return
+        }
+        // The item is already there. While this build can still read it, the
+        // value is refreshed in place and the item's access list is left
+        // alone: that list is what lets the bundled server in, and rewriting
+        // it buys nothing.
+        //
+        // An item it cannot read is a different animal — a legacy one, whose
+        // list names a build that no longer exists. Its secret is unreachable
+        // for good, which is exactly why replacing it loses nothing: there is
+        // no value left to protect, and the caller is holding the one that
+        // takes its place. Only a fresh add attaches a current list, so
+        // without this the account could never be repaired from inside the
+        // app, however often the password was typed in again.
+        if store.read(accountID) == nil {
+            store.delete(accountID)
+            guard try store.add(accountID, password) else {
+                throw Failure(status: errSecDuplicateItem)
+            }
+            return
+        }
+        try store.update(accountID, password)
+    }
+
+    fileprivate static func itemQuery(forAccount accountID: String) -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: accountID
         ]
-        let secret = Data(password.utf8)
-
-        // Add first, update on duplicate — never delete then re-add. A delete
-        // that succeeds followed by an add that fails would drop the secret
-        // entirely, which is how a rebuilt binary could wipe a stored key.
-        var attributes = query
-        attributes[kSecValueData as String] = secret
-        // A fresh item is scoped to the signing Team ID, so the app and the
-        // bundled server both read it without a dialog. An unsigned local build
-        // has no team to scope to and stores it with the keychain's default.
-        if let access = teamScopedAccess() {
-            attributes[kSecAttrAccess as String] = access
-        }
-        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
-        if addStatus == errSecSuccess {
-            return
-        }
-        guard addStatus == errSecDuplicateItem else {
-            throw Failure(status: addStatus)
-        }
-        // The item is already there: refresh its value in place. Its existing
-        // access list is left untouched — a fresh account is written team-scoped
-        // from the start, so only a legacy item keeps an older list, and it does
-        // so without ever risking the secret.
-        let update: [String: Any] = [kSecValueData as String: secret]
-        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        guard updateStatus == errSecSuccess else {
-            throw Failure(status: updateStatus)
-        }
     }
 
     /// The stored secret, or nil when it is missing or this process may not

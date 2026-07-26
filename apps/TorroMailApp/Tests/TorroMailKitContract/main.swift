@@ -370,6 +370,83 @@ require(
     !MCPClientKeyStore.restartPending(keyChangedAt: nil, lastConnected: nil),
     "an untouched key asks nothing of the user"
 )
+
+// The same trap one layer down, and this one holds the mail passwords. An
+// item an older build wrote cannot be read by this one, and refreshing it in
+// place keeps that access list — so re-entering the password would fail
+// exactly as silently as reconnecting did. Storing a value the caller is
+// already holding can replace such an item outright: what it protects is
+// unreachable anyway.
+final class ItemStoreProbe: @unchecked Sendable {
+    var stored: [String: String] = [:]
+    var unreadable: Set<String> = []
+    var operations: [String] = []
+}
+
+func probeItemStore(_ probe: ItemStoreProbe) -> KeychainStore.ItemStore {
+    KeychainStore.ItemStore(
+        add: { account, secret in
+            probe.operations.append("add")
+            if probe.stored[account] != nil { return false }
+            probe.stored[account] = secret
+            return true
+        },
+        read: { account in
+            probe.unreadable.contains(account) ? nil : probe.stored[account]
+        },
+        update: { account, secret in
+            probe.operations.append("update")
+            probe.stored[account] = secret
+        },
+        delete: { account in
+            probe.operations.append("delete")
+            probe.stored[account] = nil
+            probe.unreadable.remove(account)
+        }
+    )
+}
+
+let legacySecret = ItemStoreProbe()
+legacySecret.stored["account-1"] = "unreachable"
+legacySecret.unreadable.insert("account-1")
+try? KeychainStore.savePassword(
+    "freshly typed",
+    forAccount: "account-1",
+    store: probeItemStore(legacySecret)
+)
+require(
+    legacySecret.operations == ["add", "delete", "add"],
+    "an unreadable item is replaced, so re-entering the password repairs the account"
+)
+require(
+    legacySecret.stored["account-1"] == "freshly typed",
+    "the replacement carries the value the caller just supplied"
+)
+
+// A readable item keeps its access list: it is what lets the bundled server
+// in, and rewriting it buys nothing.
+let liveSecret = ItemStoreProbe()
+liveSecret.stored["account-2"] = "current"
+try? KeychainStore.savePassword(
+    "rotated",
+    forAccount: "account-2",
+    store: probeItemStore(liveSecret)
+)
+require(
+    liveSecret.operations == ["add", "update"],
+    "a readable item is refreshed in place, never dropped"
+)
+
+let firstSecret = ItemStoreProbe()
+try? KeychainStore.savePassword(
+    "brand new",
+    forAccount: "account-3",
+    store: probeItemStore(firstSecret)
+)
+require(
+    firstSecret.operations == ["add"] && firstSecret.stored["account-3"] == "brand new",
+    "a first write is a plain add"
+)
 let workPolicy = policyAccounts.first { ($0["id"] as? String) == "work" } ?? [:]
 require(
     workPolicy["read"] as? String == "with_attachments",
