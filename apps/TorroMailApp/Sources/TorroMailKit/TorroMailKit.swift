@@ -105,17 +105,23 @@ public enum KeychainStore {
         /// replace it.
         public var add: @Sendable (_ account: String, _ secret: String) throws -> Bool
         public var read: @Sendable (_ account: String) -> String?
+        /// Whether an item is there at all, asked by attributes alone. The
+        /// access list gates the value, not the attributes, so this still
+        /// answers for an item nothing can decrypt any more.
+        public var exists: @Sendable (_ account: String) -> Bool
         public var update: @Sendable (_ account: String, _ secret: String) throws -> Void
         public var delete: @Sendable (_ account: String) -> Void
 
         public init(
             add: @escaping @Sendable (_ account: String, _ secret: String) throws -> Bool,
             read: @escaping @Sendable (_ account: String) -> String?,
+            exists: @escaping @Sendable (_ account: String) -> Bool,
             update: @escaping @Sendable (_ account: String, _ secret: String) throws -> Void,
             delete: @escaping @Sendable (_ account: String) -> Void
         ) {
             self.add = add
             self.read = read
+            self.exists = exists
             self.update = update
             self.delete = delete
         }
@@ -137,6 +143,12 @@ public enum KeychainStore {
                 return false
             },
             read: { KeychainStore.readPassword(forAccount: $0) },
+            exists: {
+                var query = KeychainStore.itemQuery(forAccount: $0)
+                query[kSecReturnAttributes as String] = true
+                var result: CFTypeRef?
+                return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+            },
             update: { account, secret in
                 let status = SecItemUpdate(
                     KeychainStore.itemQuery(forAccount: account) as CFDictionary,
@@ -176,6 +188,18 @@ public enum KeychainStore {
             return
         }
         try store.update(accountID, password)
+    }
+
+    /// Whether this account has a password on file. Deliberately not "can it
+    /// be read": a legacy item holds one that nothing can decrypt any more,
+    /// and those are precisely the accounts waiting to be repaired. Telling
+    /// their owner the field is empty would read as TorroMail having thrown
+    /// the password away.
+    public static func hasPassword(
+        forAccount accountID: String,
+        store: ItemStore = .keychain
+    ) -> Bool {
+        store.exists(accountID)
     }
 
     fileprivate static func itemQuery(forAccount accountID: String) -> [String: Any] {

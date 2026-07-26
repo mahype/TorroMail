@@ -1263,6 +1263,12 @@ private struct AccountDetailView: View {
     @Binding var account: MailAccount
     // Held only for the moment of saving; the keychain is the home.
     @State private var password = ""
+    /// Whether a password is on file for this account. An empty secure field
+    /// is ambiguous — nothing stored, or stored and simply not shown — and the
+    /// field is cleared the moment it is saved, so without this the save looks
+    /// like a deletion. Asked by the item's existence, so it stays true for an
+    /// account whose stored password can no longer be read.
+    @State private var hasStoredPassword = false
     @State private var isCheckingConnection = false
     @State private var confirmRemoval = false
     // Remembered so switching a group off and on again restores the last
@@ -1289,6 +1295,9 @@ private struct AccountDetailView: View {
         .formStyle(.grouped)
         .navigationTitle(account.name)
         .navigationSubtitle(account.email)
+        .onAppear {
+            hasStoredPassword = KeychainStore.hasPassword(forAccount: account.id)
+        }
         .confirmationDialog(
             String(format: L("Remove “%@”?"), account.name),
             isPresented: $confirmRemoval,
@@ -1346,7 +1355,17 @@ private struct AccountDetailView: View {
                     security: $account.smtpSecurity
                 )
                 TextField(L("Username"), text: $account.username)
-                SecureField(L("Password"), text: $password)
+                // The dots are the whole point: they say a password is on
+                // file without pretending to show it, so leaving the screen
+                // or saving does not read as having wiped it. Typing replaces
+                // them, which is the only thing that ever changes it.
+                SecureField(
+                    L("Password"),
+                    text: $password,
+                    prompt: hasStoredPassword
+                        ? Text(verbatim: "••••••••••••")
+                        : Text(L("Not stored yet"))
+                )
             }
 
             HStack {
@@ -1373,6 +1392,7 @@ private struct AccountDetailView: View {
             do {
                 try KeychainStore.savePassword(password, forAccount: account.id)
                 password = ""
+                hasStoredPassword = true
             } catch {
                 account.connectionState = .failed(L("Could not save the password to the keychain."))
                 return

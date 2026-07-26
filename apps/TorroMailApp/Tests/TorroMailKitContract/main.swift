@@ -394,6 +394,7 @@ func probeItemStore(_ probe: ItemStoreProbe) -> KeychainStore.ItemStore {
         read: { account in
             probe.unreadable.contains(account) ? nil : probe.stored[account]
         },
+        exists: { account in probe.stored[account] != nil },
         update: { account, secret in
             probe.operations.append("update")
             probe.stored[account] = secret
@@ -446,6 +447,22 @@ try? KeychainStore.savePassword(
 require(
     firstSecret.operations == ["add"] && firstSecret.stored["account-3"] == "brand new",
     "a first write is a plain add"
+)
+
+// Whether a password is stored is answered from the item's existence, not
+// from its value — an unreadable item still holds one. Those are exactly the
+// accounts waiting to be repaired, and a field that looks empty there reads
+// as "TorroMail threw my password away".
+let unreadableItem = ItemStoreProbe()
+unreadableItem.stored["account-4"] = "unreachable"
+unreadableItem.unreadable.insert("account-4")
+require(
+    KeychainStore.hasPassword(forAccount: "account-4", store: probeItemStore(unreadableItem)),
+    "a stored password is reported even when its value cannot be read"
+)
+require(
+    !KeychainStore.hasPassword(forAccount: "account-4", store: probeItemStore(ItemStoreProbe())),
+    "an account without an item has nothing to show"
 )
 let workPolicy = policyAccounts.first { ($0["id"] as? String) == "work" } ?? [:]
 require(

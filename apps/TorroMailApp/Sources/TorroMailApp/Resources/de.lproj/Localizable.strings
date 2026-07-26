@@ -43,6 +43,7 @@
 "Provider" = "Anbieter";
 "Login" = "Anmeldung";
 "Password" = "Passwort";
+"Not stored yet" = "Noch nicht gespeichert";
 "OAuth" = "OAuth";
 "IMAP Server" = "IMAP-Server";
 "IMAP Port" = "IMAP-Port";
