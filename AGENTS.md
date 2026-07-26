@@ -150,6 +150,17 @@ assistant can relay. A document *without* a `clients` key (pre-pairing or
 hand-managed) enforces nothing; the app always publishes one. `--check-account`
 sits behind the same gate — the app presents its own key (`torromail-app`).
 
+Keychain items are scoped to the signing Team ID, and an existing item is
+refreshed in place, which leaves its access list alone. A key an older build
+wrote therefore stays unreadable forever, and `pairings()` leaves an unreadable
+key off the allowlist — so the client is locked out and reconnecting cannot help
+it. Because a client key is regenerable (unlike a mail password), connecting and
+renewing delete the item and write a fresh one rather than overwriting it; the
+new key goes straight into the client's config. Every key change needs the
+client to restart, since it reads `TORROMAIL_TOKEN` once at spawn — the app says
+so where it cannot be missed, and stops saying it once that client connects
+again.
+
 Reading mail has no browsing tool by design. "What came in lately?" is
 `mail_search` with an empty query: no filter, newest first, INBOX unless a
 mailbox is named. Ordering follows IMAP UIDs — arrival at the server — not the

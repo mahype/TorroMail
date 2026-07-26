@@ -267,43 +267,104 @@ public enum MCPClientKeyStore {
         }
     }
 
-    /// The stored key for a client, or nil when it was never connected.
-    public static func token(forClient clientID: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainStore.service,
-            kSecAttrAccount as String: accountPrefix + clientID,
-            kSecReturnData as String: true
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else {
-            return nil
+    /// The three keychain operations a client key needs. Injectable so the
+    /// heal path below — an item that is there but cannot be read — can be
+    /// exercised without a real keychain, which no test may write to.
+    public struct Storage: Sendable {
+        public var read: @Sendable (_ account: String) -> String?
+        public var write: @Sendable (_ password: String, _ account: String) throws -> Void
+        public var delete: @Sendable (_ account: String) -> Void
+
+        public init(
+            read: @escaping @Sendable (_ account: String) -> String?,
+            write: @escaping @Sendable (_ password: String, _ account: String) throws -> Void,
+            delete: @escaping @Sendable (_ account: String) -> Void
+        ) {
+            self.read = read
+            self.write = write
+            self.delete = delete
         }
-        return String(data: data, encoding: .utf8)
+
+        public static let keychain = Storage(
+            read: { KeychainStore.readPassword(forAccount: $0) },
+            write: { try KeychainStore.savePassword($0, forAccount: $1) },
+            delete: { KeychainStore.deletePassword(forAccount: $0) }
+        )
     }
 
-    /// The client's key, minting one on first use. Reconnecting keeps the
-    /// key stable — rotation is an explicit renewal, never a side effect.
-    public static func tokenCreatingIfNeeded(forClient clientID: String) throws -> String {
-        if let existing = token(forClient: clientID) {
+    /// The stored key for a client, or nil when it was never connected — or
+    /// when this build may not read it.
+    public static func token(
+        forClient clientID: String,
+        storage: Storage = .keychain
+    ) -> String? {
+        storage.read(accountPrefix + clientID)
+    }
+
+    /// The client's key, minting one on first use — and on an item this build
+    /// cannot read. Reconnecting keeps a working key stable, because the
+    /// client's config still carries it; rotation is otherwise an explicit
+    /// renewal, never a side effect.
+    ///
+    /// The unreadable case is a legacy item: one an older build wrote with an
+    /// access list naming that binary rather than the signing team. Its value
+    /// is gone for good, and `savePassword` refreshes an existing item in
+    /// place — which would keep that list, and with it the lockout. So the
+    /// item is dropped and written fresh. That is safe here in a way it never
+    /// is for a mail password: a client key is regenerable, and every caller
+    /// writes the replacement straight into the client's own config.
+    public static func tokenCreatingIfNeeded(
+        forClient clientID: String,
+        storage: Storage = .keychain
+    ) throws -> String {
+        if let existing = token(forClient: clientID, storage: storage) {
             return existing
         }
+        storage.delete(accountPrefix + clientID)
+        return try mintAndStore(forClient: clientID, storage: storage)
+    }
+
+    /// Renewal: the old key dies with its keychain item, the new one only
+    /// starts working once the caller republishes the policy document. The
+    /// item is deleted rather than overwritten, so the replacement takes the
+    /// add path — the only one that attaches a current access list.
+    public static func renewToken(
+        forClient clientID: String,
+        storage: Storage = .keychain
+    ) throws -> String {
+        storage.delete(accountPrefix + clientID)
+        return try mintAndStore(forClient: clientID, storage: storage)
+    }
+
+    public static func revokeToken(
+        forClient clientID: String,
+        storage: Storage = .keychain
+    ) {
+        storage.delete(accountPrefix + clientID)
+    }
+
+    private static func mintAndStore(
+        forClient clientID: String,
+        storage: Storage
+    ) throws -> String {
         let minted = mintToken(forClient: clientID)
-        try KeychainStore.savePassword(minted, forAccount: accountPrefix + clientID)
+        try storage.write(minted, accountPrefix + clientID)
         return minted
     }
 
-    /// Renewal: the old key dies with the keychain entry, the new one only
-    /// starts working once the caller republishes the policy document.
-    public static func renewToken(forClient clientID: String) throws -> String {
-        let minted = mintToken(forClient: clientID)
-        try KeychainStore.savePassword(minted, forAccount: accountPrefix + clientID)
-        return minted
-    }
-
-    public static func revokeToken(forClient clientID: String) {
-        KeychainStore.deletePassword(forAccount: accountPrefix + clientID)
+    /// Whether the client still has to be restarted before the key TorroMail
+    /// wrote takes effect. An assistant reads `TORROMAIL_TOKEN` once, when it
+    /// spawns the server, so a session that started before the change keeps
+    /// presenting the old key and every tool call it makes fails — with an
+    /// error that reads like a setup problem, which by then it no longer is.
+    ///
+    /// A connection older than the change proves nothing; one after it is the
+    /// proof, which is why this clears itself instead of asking to be
+    /// dismissed.
+    public static func restartPending(keyChangedAt: Date?, lastConnected: Date?) -> Bool {
+        guard let keyChangedAt else { return false }
+        guard let lastConnected else { return true }
+        return lastConnected < keyChangedAt
     }
 
     /// Every paired client, hashes freshly computed from the stored keys —

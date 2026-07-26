@@ -184,6 +184,8 @@
 "Not connected" = "Nicht verbunden";
 "Disconnect" = "Trennen";
 "Reconnect" = "Neu verbinden";
+"Restart %@ now" = "Starte %@ jetzt neu";
+"%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail." = "%@ hat seinen Zugriffsschlüssel beim Start gelesen und verwendet weiterhin den alten. Bis du es beendest und neu öffnest, schlägt jede Mail-Anfrage fehl.";
 "%@ is not installed on this Mac. Install it, or set it up by hand with the snippet below." = "%@ ist auf diesem Mac nicht installiert. Installiere es oder richte es von Hand mit dem Ausschnitt unten ein.";
 "Check again" = "Erneut prüfen";
 "Written into %@’s configuration" = "In die Konfiguration von %@ eingetragen";

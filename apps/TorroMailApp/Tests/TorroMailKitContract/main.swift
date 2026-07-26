@@ -269,6 +269,107 @@ require(
         && MCPClientKeyStore.maskedToken(forClient: "hermes").hasSuffix("••••••••••••"),
     "the masked key keeps the recognizable prefix and none of the secret"
 )
+
+// A key an older build wrote carries that build's access list, so the current
+// app cannot read it — and an item that exists is refreshed in place, which
+// leaves the stale list alone. Reconnecting has to drop it and mint a fresh
+// one, or the client stays locked out no matter how often it reconnects.
+final class KeyStorageProbe: @unchecked Sendable {
+    var stored: [String: String] = [:]
+    var unreadable: Set<String> = []
+    var deleted: [String] = []
+}
+
+func probeStorage(_ probe: KeyStorageProbe) -> MCPClientKeyStore.Storage {
+    MCPClientKeyStore.Storage(
+        read: { account in
+            probe.unreadable.contains(account) ? nil : probe.stored[account]
+        },
+        write: { password, account in
+            probe.stored[account] = password
+            probe.unreadable.remove(account)
+        },
+        delete: { account in
+            probe.stored[account] = nil
+            probe.unreadable.remove(account)
+            probe.deleted.append(account)
+        }
+    )
+}
+
+let legacyProbe = KeyStorageProbe()
+legacyProbe.stored["client-key-legacy"] = "torro_legacy_unreachable"
+legacyProbe.unreadable.insert("client-key-legacy")
+let healedKey = try? MCPClientKeyStore.tokenCreatingIfNeeded(
+    forClient: "legacy",
+    storage: probeStorage(legacyProbe)
+)
+require(
+    healedKey?.hasPrefix("torro_legacy_") == true && healedKey != "torro_legacy_unreachable",
+    "an unreadable key is replaced, so reconnecting actually re-pairs the client"
+)
+require(
+    legacyProbe.deleted == ["client-key-legacy"],
+    "the stale item is dropped first — only a fresh add carries the current access list"
+)
+
+// The other half of the same rule: a key that works is never rotated behind
+// the user's back, because the client's config still carries it.
+let healthyProbe = KeyStorageProbe()
+healthyProbe.stored["client-key-steady"] = "torro_steady_intact"
+let steadyKey = try? MCPClientKeyStore.tokenCreatingIfNeeded(
+    forClient: "steady",
+    storage: probeStorage(healthyProbe)
+)
+require(
+    steadyKey == "torro_steady_intact" && healthyProbe.deleted.isEmpty,
+    "reconnecting keeps a readable key stable"
+)
+
+// Renewal replaces the item outright: an in-place refresh would keep a legacy
+// access list alive, which is the failure this whole path exists to end.
+let renewProbe = KeyStorageProbe()
+renewProbe.stored["client-key-rotate"] = "torro_rotate_old"
+let renewedKey = try? MCPClientKeyStore.renewToken(
+    forClient: "rotate",
+    storage: probeStorage(renewProbe)
+)
+require(
+    renewedKey?.hasPrefix("torro_rotate_") == true && renewedKey != "torro_rotate_old",
+    "renewal mints a different key"
+)
+require(
+    renewProbe.deleted == ["client-key-rotate"],
+    "renewal drops the old item instead of refreshing it in place"
+)
+
+// A client reads TORROMAIL_TOKEN once, when it spawns the server, so a
+// session that started before the key changed keeps presenting the old one
+// and every tool call it makes fails. Saying so is the whole point: the user
+// has to restart the assistant, and nothing else will fix it.
+let keyChange = Date(timeIntervalSince1970: 1_000)
+require(
+    MCPClientKeyStore.restartPending(keyChangedAt: keyChange, lastConnected: nil),
+    "a client that never connected has to start before its key can take effect"
+)
+require(
+    MCPClientKeyStore.restartPending(
+        keyChangedAt: keyChange,
+        lastConnected: keyChange.addingTimeInterval(-60)
+    ),
+    "a session older than the key change is still carrying the old key"
+)
+require(
+    !MCPClientKeyStore.restartPending(
+        keyChangedAt: keyChange,
+        lastConnected: keyChange.addingTimeInterval(60)
+    ),
+    "a client that connected after the change has already loaded the new key"
+)
+require(
+    !MCPClientKeyStore.restartPending(keyChangedAt: nil, lastConnected: nil),
+    "an untouched key asks nothing of the user"
+)
 let workPolicy = policyAccounts.first { ($0["id"] as? String) == "work" } ?? [:]
 require(
     workPolicy["read"] as? String == "with_attachments",

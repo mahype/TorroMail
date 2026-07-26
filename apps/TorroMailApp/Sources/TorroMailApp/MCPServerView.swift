@@ -252,9 +252,14 @@ struct MCPClientDetailView: View {
     /// what you paste.
     @State private var maskedSnippet: String?
     @State private var revealKey = false
+    /// When this client's access key last changed in this sitting. The client
+    /// carries the old one until it restarts, so this is what the restart
+    /// notice is measured against — see `MCPClientKeyStore.restartPending`.
+    @State private var keyChangedAt: Date?
 
     var body: some View {
         Form {
+            restartSection
             switch descriptor.kind {
             case .automatic:
                 connectionSection
@@ -273,6 +278,47 @@ struct MCPClientDetailView: View {
             refresh(runServerTest: false)
             loadSnippet()
         }
+    }
+
+    /// The one thing TorroMail cannot do for the user, said where it cannot be
+    /// missed: a new key only reaches the assistant when the assistant starts
+    /// again. It leads the screen because until it is done, everything below
+    /// it — green dots included — describes a client that is still failing
+    /// every call. It clears itself the moment the client connects again, so
+    /// it never becomes a banner people learn to ignore.
+    @ViewBuilder
+    private var restartSection: some View {
+        if mustRestart {
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.torroRed)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(String(format: L("Restart %@ now"), L(descriptor.displayName)))
+                            .font(.headline)
+                        Text(String(
+                            format: L("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail."),
+                            L(descriptor.displayName)
+                        ))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    /// True while this client still carries a key TorroMail has replaced.
+    private var mustRestart: Bool {
+        MCPClientKeyStore.restartPending(
+            keyChangedAt: keyChangedAt,
+            lastConnected: model.clientConnections[descriptor.id]?.lastConnected
+        )
     }
 
     /// The lead section for a manual client: it says plainly there is no
@@ -621,9 +667,18 @@ struct MCPClientDetailView: View {
             // Key first, config second, allowlist last: the moment the
             // client restarts and presents the key, the document already
             // admits it.
+            let previousKey = MCPClientKeyStore.token(forClient: descriptor.id)
             let token = try MCPClientKeyStore.tokenCreatingIfNeeded(forClient: descriptor.id)
             try MCPClientSetup.add(to: client, commandPath: commandPath, token: token)
             publishPolicyDocument(for: model.accounts)
+            // A key that changed — freshly minted, or healed from an item this
+            // build could not read — is one a running client has never seen,
+            // and so is a client that never connected at all. Both have to
+            // start again before anything works, which the notice up top says
+            // in the one place nobody scrolls past.
+            if previousKey != token || model.clientConnections[descriptor.id] == nil {
+                keyChangedAt = Date()
+            }
             note = String(format: L("Connected. Restart %@ to load it."), descriptor.displayName)
         } catch let failure as MCPClientSetup.Failure {
             note = L(failure.reason)
@@ -644,6 +699,11 @@ struct MCPClientDetailView: View {
             // this bites even mid-session.
             MCPClientKeyStore.revokeToken(forClient: descriptor.id)
             publishPolicyDocument(for: model.accounts)
+            // Nothing to restart for: the server re-reads the allowlist per
+            // call, so the revocation already bit. Asking for a restart here
+            // would be the kind of instruction that teaches people to ignore
+            // the one that matters.
+            keyChangedAt = nil
             note = String(format: L("Removed from %@. Its access key no longer works."), descriptor.displayName)
         } catch let failure as MCPClientSetup.Failure {
             note = L(failure.reason)
@@ -662,6 +722,7 @@ struct MCPClientDetailView: View {
         do {
             _ = try MCPClientKeyStore.renewToken(forClient: descriptor.id)
             publishPolicyDocument(for: model.accounts)
+            keyChangedAt = Date()
             revealKey = false
             snippetCopied = false
             loadSnippet()
