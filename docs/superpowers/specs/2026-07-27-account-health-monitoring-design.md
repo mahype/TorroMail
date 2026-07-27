@@ -142,6 +142,17 @@ password required: …"); and on the login path the secret is redacted from the
 text before it goes anywhere, since a server that echoes the offending command
 in a `BAD` would otherwise write the password into `health.jsonl`.
 
+One failure outside IMAP belongs in the accusing bucket too: a stored password
+the process cannot read. `AGENTS.md` already records that an item written by an
+older build stays unreadable and that re-entering the password is the real
+repair — permanent, and fixed by exactly the action the accusing bucket asks
+for. Filed as unreachable it would instead wait out the grace period and then
+blame the server, sending the user to the one thing that is not broken. The
+message leads with the repair and parks the operating system's own sentence at
+the end, where it cannot be mistaken for the instruction. A keychain *write*
+failure stays `ProviderFailure`: it only happens during OAuth renewal, after
+the same item was read successfully, so the credentials are demonstrably fine.
+
 `check_account` maps its result accordingly, and reports the outcome rather
 than a bare `Result<String, String>`:
 
@@ -162,7 +173,7 @@ message, so that split is the one change on the Swift side.
 | --- | --- | --- |
 | Every 15 minutes | App | `AccountHealthMonitor`, a `DispatchSourceTimer` on a utility queue, modelled on `AuditWatcher`. Accounts are checked serially, not in parallel — a handful of logins should not arrive as a burst. |
 | App launch, and wake from sleep | App | Same monitor, immediate run. Wake is `NSWorkspace.shared.notificationCenter` observing `didWakeNotification`. |
-| MCP server start | Server | One check per configured account as the server comes up, **debounced**: an account with a `health.jsonl` record younger than 5 minutes is skipped. Without this, five paired clients each spawning a server means five logins per account per launch. |
+| MCP server start | Server | One check per configured account as the server comes up, **debounced**: an account with a `health.jsonl` record younger than 5 minutes is skipped. Without this, five paired clients each spawning a server means five logins per account per launch. Runs on a detached thread — `TcpStream::connect` has no timeout, so an unroutable host costs the full OS connect timeout per account, and a blocking sweep would hold the client's `initialize` answer for minutes. |
 | Any tool call | Server | `record_health`, a sibling of `record_audit`. `CredentialRejected` → `rejected`; a provider failure while connecting → `unreachable`; a successful call → `ok`. Costs no extra login. |
 
 The interval is fixed at 15 minutes. It is not a setting: the user cannot make
@@ -171,7 +182,28 @@ not a decision does not belong in the UI.
 
 `AccountCheck.run` currently waits on the subprocess forever. It gets a
 30-second timeout; passing it terminates the process and counts as
-`unreachable`.
+`unreachable`. Its stderr is drained on a background queue while the child
+runs, and `standardOutput` goes to the null device — read only after exit, a
+child that fills a pipe buffer would deadlock, and the timeout would report
+that hang as a recurring unreachable.
+
+**Two accounts must never be asked about.** An account whose setup is
+unfinished has no connection facts, and the wire has only three words — there
+is no way for `--check-account` to answer "nothing to report", so it says
+`unreachable`. Three of those elapse the grace period and the app raises an
+alarm about an account the user has not finished creating. The server refuses
+the unconfigured case before any recording site and the startup sweep skips it;
+on the app side the monitor is handed only accounts that would reach the policy
+document. The same reasoning applies to the sweep's pairing gate: an unpaired
+client's server would fail every account on the gate, which says nothing about
+any mailbox, so the gate is judged once before the sweep rather than per
+account.
+
+Repeated identical outcomes are throttled to one record a minute, per account,
+held in memory rather than derived from the log — reading the log on the tool
+call path cost 65 ms once it reached 100 000 lines, and grew. A *change* of
+outcome is never throttled: the first failure must reach the app on the call it
+happened.
 
 ### Deriving the dot
 
@@ -196,13 +228,36 @@ not in the UI, so no new visible state is introduced.
 
 ### Notifications
 
-`UNUserNotificationCenter`, authorization requested once on the monitor's first
-run. Notifications fire on transition only:
+`UNUserNotificationCenter`, authorization requested once on the first crossing
+there is something to say about — not at launch, where a permission sheet would
+greet someone who has done nothing yet. Notifications fire on transition only:
 
-- `.connected` → `.failed`: title is the account name, body is the detail
-  (`"Der Server hat die Zugangsdaten abgelehnt."`, `"Seit 45 Minuten nicht
-  erreichbar."`). Activating it opens that account's detail view.
+- `.connected` → `.failed`: title is the account name, body leads with a
+  written sentence and puts the server's own words on a second line.
+  Notification bodies truncate from the end, so leading with
+  `credentials rejected: NO [AUTHENTICATIONFAILED] …` would show half a
+  protocol trace and no statement of what happened. The server's words are
+  relegated, not dropped — Gmail's "Application-specific password required: …"
+  is often the only actionable thing there is.
 - `.failed` → `.connected`: one quiet all-clear.
+
+Activating either opens that account's detail view, which is where the reason
+and the repair are. A notification that only announces a problem and leaves the
+user to find it is a worse version of no notification.
+
+The baseline a crossing is measured against is taken **after** the first
+derivation from the log, not from the restored accounts. `MailAccount` persists
+its state as a single `isVerified` bit, so a `.failed` account comes back from
+disk as `.needsTest` — seeding from the restored state would read every
+standing problem as a fresh break, at every launch. Measured on this codebase,
+`.onChange(initial: true)` also fires about 115 ms *before* `.task`, so the
+notifier stays silent until it has been seeded rather than depending on
+SwiftUI's ordering.
+
+A delegate returns `[.banner, .sound]` from `willPresent`: macOS suppresses
+banners for the frontmost app by default, and the window someone opened
+*because* something looked wrong is exactly where a break must not go
+unmentioned.
 
 A persistently broken account does not re-notify. It stays red in the app,
 which is where a standing problem belongs.
