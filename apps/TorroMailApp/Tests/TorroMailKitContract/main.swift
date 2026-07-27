@@ -1191,4 +1191,98 @@ require(
     "a pass with nothing it could check still schedules the next one"
 )
 
+// MARK: - What the monitor is allowed to ask about
+
+// An account the wizard never finished is a setup gap, not a health problem.
+// The wire has three words — `ok`, `rejected`, `unreachable` — and none of them
+// means "nothing to report", so `--check-account` answers `unreachable` with
+// "has no connection configured". Asked every fifteen minutes, three of those
+// elapse the grace period and the app raises an alarm about an account the user
+// has simply not finished creating: the disease this whole feature exists to
+// cure, coming back through the one route the server cannot close. Not asking
+// is the only cure, so it is pinned here.
+let unfinishedAccount = MailAccount(
+    id: "unfinished",
+    name: "Unfinished",
+    email: "unfinished@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password
+)
+let hostOnlyAccount = MailAccount(
+    id: "host-only",
+    name: "Host only",
+    email: "host@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    imapHost: "imap.example.com"
+)
+let checkableAccount = MailAccount(
+    id: "checkable",
+    name: "Checkable",
+    email: "checkable@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    imapHost: "imap.example.com",
+    username: "checkable@example.com",
+    connectionState: .connected
+)
+let checkableModel = TorroMailModel(
+    accounts: [unfinishedAccount, hostOnlyAccount, checkableAccount],
+    selectedSidebarItem: .dashboard,
+    generalSettings: GeneralSettings(),
+    audit: []
+)
+require(
+    checkableModel.checkableAccountIDs == ["checkable"],
+    "only an account the server has connection facts for is ever checked"
+)
+// The line is the policy document's, not a second rule invented here: half a
+// connection is no connection to the server, so half a connection must not be
+// asked about either.
+require(
+    !unfinishedAccount.hasIMAPConnection && !hostOnlyAccount.hasIMAPConnection,
+    "an empty shell and a half-filled one are both unconfigured"
+)
+require(
+    checkableAccount.hasIMAPConnection,
+    "host and username together are what the server can open"
+)
+
+// MARK: - The model follows the log
+
+// The wire the whole feature hangs from: what the log says has to reach the
+// dots, and what it does not say has to leave them alone.
+let followLog = contractLog("torromail-contract-follow.jsonl")
+let followModel = TorroMailModel(
+    accounts: [checkableAccount],
+    selectedSidebarItem: .dashboard,
+    generalSettings: GeneralSettings(),
+    audit: []
+)
+followModel.applyHealth(from: followLog)
+require(
+    followModel.accounts[0].connectionState == .connected
+        && followModel.lastHealthCheck.isEmpty,
+    "an empty log changes no dot and claims no check"
+)
+HealthLog.append(
+    HealthRecord(
+        accountID: "checkable",
+        at: Date(timeIntervalSince1970: 1_000),
+        outcome: .rejected,
+        source: "periodic",
+        detail: "credentials rejected: NO"
+    ),
+    to: followLog
+)
+followModel.applyHealth(from: followLog)
+require(
+    followModel.accounts[0].connectionState == .failed("credentials rejected: NO"),
+    "a rejection in the log turns the stored green dot red, reason and all"
+)
+require(
+    followModel.lastHealthCheck["checkable"] == Date(timeIntervalSince1970: 1_000),
+    "and the account detail can say when that was"
+)
+
 print("TorroMailKit control-surface contract passed")

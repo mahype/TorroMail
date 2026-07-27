@@ -453,6 +453,11 @@ struct TorroMailApp: App {
     /// appends there on every client handshake, so watching it keeps each
     /// client's "last connected" live rather than frozen at launch.
     @State private var connectionWatcher = AuditWatcher(url: try? ClientConnectionLog.defaultURL())
+    /// The same file watcher again, pointed at `health.jsonl` — the server, a
+    /// tool call and the monitor all append there, and this is what turns any
+    /// of them into a status dot.
+    @State private var healthWatcher = AuditWatcher(url: try? HealthLog.defaultURL())
+    @State private var healthMonitor = AccountHealthMonitor()
 
     init() {
         // Before any keychain access: the app never shows the consent dialog.
@@ -493,6 +498,25 @@ struct TorroMailApp: App {
                     connectionWatcher.start {
                         Task { @MainActor in model.reloadClientConnections() }
                     }
+                    // Watch first, read second — the opposite of the two above,
+                    // and deliberately: `start` takes its baseline
+                    // synchronously, and a record landing between the read and
+                    // the baseline would be inside the baseline and so never
+                    // reported. This way that record moves the signature
+                    // instead, and the worst case is one redundant re-read
+                    // rather than a stale dot until the next pass. The server
+                    // starting alongside the app writes exactly such a burst.
+                    healthWatcher.start {
+                        Task { @MainActor in model.applyHealth() }
+                    }
+                    // Whatever the log already says wins over the state file:
+                    // the dots must be current before the first check lands.
+                    model.applyHealth()
+                    healthMonitor.update(
+                        accountIDs: model.checkableAccountIDs,
+                        executableName: model.generalSettings.mcpExecutable
+                    )
+                    healthMonitor.start()
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show
@@ -506,6 +530,15 @@ struct TorroMailApp: App {
                     // A renamed or removed account changes how the log reads —
                     // re-map its entries against the current names.
                     model.reloadAudit()
+                    // An account added, removed or finally configured changes
+                    // what the next pass may ask about. Kept here rather than
+                    // read from the model by the monitor: the monitor checks
+                    // from a background queue, where main-actor state is a
+                    // trap, so the snapshot has to be pushed to it.
+                    healthMonitor.update(
+                        accountIDs: model.checkableAccountIDs,
+                        executableName: model.generalSettings.mcpExecutable
+                    )
                 }
                 .onChange(of: model.generalSettings) { _, settings in
                     persistState(accounts: model.accounts, settings: settings)

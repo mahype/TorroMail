@@ -1723,7 +1723,7 @@ public enum PolicyDocument {
         // login method — the secret itself stays in the keychain, only the
         // reference moves. An account without this block has no mail to give:
         // the server refuses it rather than inventing any.
-        if !account.imapHost.isEmpty, !account.username.isEmpty {
+        if account.hasIMAPConnection {
             var imap: [String: Any] = [
                 "host": account.imapHost,
                 "port": account.imapPort,
@@ -2367,6 +2367,19 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
     public var needsAttention: Bool {
         connectionState.needsAttention || !pendingActions.isEmpty
     }
+
+    /// Whether this account carries the facts a mailbox can be opened from —
+    /// the exact test `PolicyDocument` applies before it writes the `imap`
+    /// block, and therefore the line between an account the server can serve
+    /// and one it refuses as unconfigured.
+    ///
+    /// Named rather than repeated because a second copy of the rule drifting
+    /// from this one is not a cosmetic problem: the health monitor asks about
+    /// what this says is connectable, and an account the server has no
+    /// connection facts for answers `unreachable` every time it is asked.
+    public var hasIMAPConnection: Bool {
+        !imapHost.isEmpty && !username.isEmpty
+    }
 }
 
 /// What survives a launch, stated explicitly. The password is not here — it
@@ -2709,6 +2722,10 @@ public final class TorroMailModel: ObservableObject {
     /// `connections.jsonl`, so a client restarting to connect turns the screen
     /// green without a reload.
     @Published public var clientConnections: [String: ClientConnection]
+    /// When each account was last checked, for the account detail's "last
+    /// checked …" line. Not persisted: it is a fact about the log, and the log
+    /// is on disk.
+    @Published public var lastHealthCheck: [String: Date] = [:]
     @Published public var news: [NewsItem]
 
     public init(
@@ -2751,6 +2768,22 @@ public final class TorroMailModel: ObservableObject {
 
     public func accountName(id: String) -> String? {
         accounts.first { $0.id == id }?.name
+    }
+
+    /// The accounts the health monitor may check. An account whose setup is
+    /// unfinished is deliberately absent: `--check-account` has no way to say
+    /// "nothing to report", so it would answer `unreachable`, three of those
+    /// would elapse the grace period, and the app would raise an alarm about
+    /// an account the user has not finished creating.
+    ///
+    /// `hasIMAPConnection` rather than a rule of its own, because the question
+    /// is not "does this look configured" but "does the policy document give
+    /// the server anything to open" — and that document is written from the
+    /// same property. It is the stricter half of what `restoredState` asks:
+    /// a host without a username still deserves the wizard's "needs test", but
+    /// there is nothing there to test it against yet.
+    public var checkableAccountIDs: [String] {
+        accounts.filter(\.hasIMAPConnection).map(\.id)
     }
 
     /// Total approvals waiting across all accounts — the badge on the
@@ -2818,6 +2851,38 @@ extension TorroMailModel {
     /// account names it resolves against may have changed.
     public func reloadAudit() {
         audit = AuditLog.load(accountNames: TorroMailModel.accountNames(accounts))
+    }
+
+    /// Re-derive every account's connection state from `health.jsonl` — after
+    /// the watcher reports the file grew, or at launch.
+    ///
+    /// The whole list is derived into a copy and assigned only if the copy
+    /// differs. `accounts` is observed: every assignment republishes the policy
+    /// document and rewrites the state file, and this runs on every quiet
+    /// check, four times an hour, forever. Deriving into a copy also makes the
+    /// publish atomic — one change notification per call, whatever the log had
+    /// to say about how many accounts.
+    ///
+    /// An unreadable or empty log deliberately has no guard of its own: it
+    /// yields no records, `derive` hands every account back its own state as
+    /// the fallback, and the copy compares equal. A log the app cannot read is
+    /// thereby unable to move a single dot — which is the property worth
+    /// having, and it costs nothing to get it this way. `lastHealthCheck` does
+    /// clear, and should: nothing has been checked that we can still see.
+    public func applyHealth(from url: URL? = nil) {
+        let records = HealthLog.load(from: url)
+        var derived = accounts
+        for index in derived.indices {
+            derived[index].connectionState = HealthLog.derive(
+                records: records,
+                accountID: derived[index].id,
+                fallback: derived[index].connectionState
+            )
+        }
+        if derived != accounts {
+            accounts = derived
+        }
+        lastHealthCheck = HealthLog.lastChecked(records: records)
     }
 
     /// Re-read the connection log — after its watcher reports the file grew, so
