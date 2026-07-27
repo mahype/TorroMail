@@ -21,6 +21,8 @@ use torromail_core::{
 };
 use torromail_oauth::TokenSet;
 
+// `health` itself is this file's own module, already in scope.
+use crate::health::HealthOutcome;
 use crate::policy_document::{
     DocumentAccount, DocumentClient, OAuthFacts, ParsedDocument, parse_policy_document,
 };
@@ -373,6 +375,11 @@ pub struct LineMcpServer {
     /// actually connected — not merely that its config points here. `None` in
     /// fixture mode, for the same reason as `audit_path`.
     connections_path: Option<PathBuf>,
+    /// Sibling of the policy file: every tool call that touches a mailbox
+    /// appends one JSONL line here, so the app's status dot reflects what
+    /// actually happens rather than what happened once at setup. `None` in
+    /// fixture mode, for the same reason as `audit_path`.
+    health_path: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -391,6 +398,7 @@ impl LineMcpServer {
             connect_override: None,
             audit_path: None,
             connections_path: None,
+            health_path: None,
         }
     }
 
@@ -411,10 +419,12 @@ impl LineMcpServer {
         // support folder — the one place both the server and the app agree on.
         let audit_path = path.parent().map(|dir| dir.join("audit.jsonl"));
         let connections_path = path.parent().map(|dir| dir.join("connections.jsonl"));
+        let health_path = path.parent().map(|dir| dir.join("health.jsonl"));
         Self {
             policy_path: Some(path),
             audit_path,
             connections_path,
+            health_path,
             ..Self::fixture()
         }
     }
@@ -641,6 +651,29 @@ impl LineMcpServer {
         }
     }
 
+    /// Append one health record for `account_id`. Best-effort like the audit
+    /// log — a mail action must never fail because its health line could not
+    /// be written.
+    ///
+    /// Repeated successes are dropped: `audit.jsonl` already holds the
+    /// transcript of every call, and a second "still fine" line thirty seconds
+    /// after the first says nothing while crowding other accounts out of the
+    /// log. Failures always land.
+    fn record_health(&self, account_id: &AccountId, outcome: HealthOutcome, detail: &str) {
+        let Some(path) = &self.health_path else {
+            return;
+        };
+        let account = account_id.as_str();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        if !health::is_worth_recording(&health::load(path), account, outcome, now) {
+            return;
+        }
+        health::append(path, account, outcome, "tool-call", detail);
+    }
+
     /// Append one line noting that a paired client completed the `initialize`
     /// handshake — the "last connected" the app cannot learn any other way, and
     /// the half of "is it set up?" that only the client itself can prove.
@@ -740,7 +773,12 @@ impl LineMcpServer {
             if stale {
                 let provider = match self.open_connection(account_id, facts) {
                     Ok(provider) => provider,
-                    Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+                    Err(error) => {
+                        if let Some(outcome) = HealthOutcome::from_error(&error) {
+                            self.record_health(account_id, outcome, &error.to_string());
+                        }
+                        return json_rpc_error(id, -32000, &error.to_string());
+                    }
                 };
                 pool.insert(account_id.clone(), PooledConnection { identity, provider });
             }
@@ -749,14 +787,26 @@ impl LineMcpServer {
                 .expect("a connection was just ensured");
 
             match run(connection.provider.as_mut(), engine) {
-                Ok(payload) => return json_rpc_text_result(id, &payload),
+                Ok(payload) => {
+                    // A call that worked is the cheapest possible proof the
+                    // account is healthy — no extra login needed.
+                    self.record_health(account_id, HealthOutcome::Ok, "");
+                    return json_rpc_text_result(id, &payload);
+                }
                 Err(failure) if failure.is_connection() && !rebuilt => {
                     // The session is suspect: drop it so the retry opens a
-                    // fresh one, and do not loop forever.
+                    // fresh one, and do not loop forever. No record yet — the
+                    // retry decides whether this was a stale socket or a real
+                    // problem.
                     pool.remove(account_id);
                     rebuilt = true;
                 }
-                Err(failure) => return failure.into_response(id),
+                Err(failure) => {
+                    if let Some(outcome) = failure.health_outcome() {
+                        self.record_health(account_id, outcome, &failure.message());
+                    }
+                    return failure.into_response(id);
+                }
             }
         }
     }
@@ -1459,6 +1509,24 @@ impl ToolFailure {
     /// connection reported faithfully.
     fn is_connection(&self) -> bool {
         matches!(self, Self::Core(CoreError::ProviderFailure(_)))
+    }
+
+    /// What this failure says about the account's health, if anything. A
+    /// malformed request or a policy denial says nothing — the connection was
+    /// fine, the answer was simply no.
+    fn health_outcome(&self) -> Option<HealthOutcome> {
+        match self {
+            Self::Core(error) => HealthOutcome::from_error(error),
+            Self::InvalidParams(_) => None,
+        }
+    }
+
+    /// The human-readable reason, readable without consuming the failure.
+    fn message(&self) -> String {
+        match self {
+            Self::InvalidParams(message) => message.clone(),
+            Self::Core(error) => error.to_string(),
+        }
     }
 
     fn into_response(self, id: &Value) -> String {

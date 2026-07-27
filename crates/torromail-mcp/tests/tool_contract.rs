@@ -1554,8 +1554,9 @@ fn check_account_sits_behind_the_pairing_gate() {
 // app's activity view and log have something real to show. These pin the
 // shape and the client attribution.
 
-/// A policy path inside a fresh directory, so the `audit.jsonl` the server
-/// writes as a sibling is isolated from every other test's calls.
+/// A policy path inside a fresh directory, so the logs the server writes as
+/// siblings — `audit.jsonl`, `health.jsonl` — are isolated from every other
+/// test's calls.
 fn temp_audit_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("torromail-audit-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("audit test directory");
@@ -1787,4 +1788,174 @@ fn audit_detail_follows_a_move_from_intent_to_execution() {
     assert_eq!(lines[1]["detail"], "moved 1 → Archive");
     assert_eq!(lines[1]["result"], "ok");
     assert_eq!(lines[1]["client"], "Test Client");
+}
+
+// --- Health log -----------------------------------------------------------
+//
+// A real tool call already proves whether an account works, so its outcome is
+// recorded beside the audit log at no extra login. These pin what counts as a
+// health signal and — just as important — what does not.
+
+/// The health records the server wrote beside the policy document, for the
+/// account under test.
+fn health_records(dir: &std::path::Path, account: &str) -> Vec<torromail_mcp::health::HealthRecord> {
+    torromail_mcp::health::load(&dir.join("health.jsonl"))
+        .into_iter()
+        .filter(|record| record.account == account)
+        .collect()
+}
+
+#[test]
+fn a_refused_login_during_a_tool_call_is_recorded_as_rejected() {
+    let dir = temp_audit_dir("health-rejected");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Err(CoreError::CredentialRejected(
+            "IMAP rejected the password: AUTHENTICATIONFAILED".to_owned(),
+        ))
+    });
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    assert_eq!(records.len(), 1, "one call, one record: {records:?}");
+    // Rejected, not merely unreachable: the app turns this account red at
+    // once rather than granting it three strikes of grace.
+    assert_eq!(records[0].outcome, torromail_mcp::health::HealthOutcome::Rejected);
+    assert_eq!(records[0].source, "tool-call");
+    assert!(
+        records[0].detail.contains("AUTHENTICATIONFAILED"),
+        "the reason travels with the record: {records:?}"
+    );
+}
+
+#[test]
+fn a_login_that_could_not_be_reached_is_recorded_as_unreachable() {
+    let dir = temp_audit_dir("health-unreachable");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Err(CoreError::ProviderFailure(
+            "connection refused: imap.example.com:993".to_owned(),
+        ))
+    });
+    server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(records.len(), 1, "one call, one record: {records:?}");
+    // A server we never reached says nothing about the credentials — this
+    // must not accuse them.
+    assert_eq!(
+        records[0].outcome,
+        torromail_mcp::health::HealthOutcome::Unreachable
+    );
+    assert_eq!(records[0].source, "tool-call");
+}
+
+#[test]
+fn a_tool_call_that_worked_records_the_account_as_healthy() {
+    let dir = temp_audit_dir("health-ok");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Ok(Box::new(one_message_mailbox()) as Box<dyn MailProvider>)
+    });
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(response.contains("INBOX"), "got: {response}");
+    assert_eq!(records.len(), 1, "one call, one record: {records:?}");
+    assert_eq!(records[0].outcome, torromail_mcp::health::HealthOutcome::Ok);
+    assert_eq!(records[0].source, "tool-call");
+}
+
+#[test]
+fn a_policy_denial_leaves_the_health_log_untouched() {
+    let dir = temp_audit_dir("health-denied");
+    let policy = dir.join("policy.json");
+    // Reading is granted, marking is not: the connection is fine, the answer
+    // is simply no.
+    fixture_account_document(&policy);
+
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Ok(Box::new(one_message_mailbox()) as Box<dyn MailProvider>)
+    });
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"mail_mark","arguments":{"account_id":"work","message_ids":["m1"],"mark":"seen"}}}"#,
+        )
+        .expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    // Recording a refusal as ill health would turn every permission the user
+    // withheld into an alarm about their account.
+    assert!(records.is_empty(), "a denial is not a health signal: {records:?}");
+}
+
+#[test]
+fn a_stale_session_that_the_retry_repairs_records_only_the_success() {
+    let dir = temp_audit_dir("health-retry-recovered");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    let opened = Rc::new(Cell::new(0usize));
+    let counter = opened.clone();
+    let server = LineMcpServer::with_connect_override(policy, true, move |_account_id| {
+        let seen = counter.get();
+        counter.set(seen + 1);
+        if seen == 0 {
+            Ok(Box::new(FailingOnce::new(one_message_mailbox())) as Box<dyn MailProvider>)
+        } else {
+            Ok(Box::new(one_message_mailbox()) as Box<dyn MailProvider>)
+        }
+    });
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(response.contains("INBOX"), "got: {response}");
+    assert_eq!(opened.get(), 2, "the stale session was rebuilt once");
+    // A dropped socket the retry repaired is not an outage: the first
+    // failure must leave no mark, or every idle assistant would look sick.
+    assert_eq!(records.len(), 1, "only the outcome that stood: {records:?}");
+    assert_eq!(records[0].outcome, torromail_mcp::health::HealthOutcome::Ok);
+}
+
+#[test]
+fn a_session_that_stays_broken_records_one_failure_not_one_per_attempt() {
+    let dir = temp_audit_dir("health-retry-failed");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    // Every session fails its first list, so the rebuild cannot save the call.
+    let server = LineMcpServer::with_connect_override(policy, true, |_account_id| {
+        Ok(Box::new(FailingOnce::new(one_message_mailbox())) as Box<dyn MailProvider>)
+    });
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(response.contains(r#""code":-32000"#), "got: {response}");
+    // Two attempts, one verdict — the retry decides, the first try does not
+    // get its own vote in the app's three-strikes window.
+    assert_eq!(records.len(), 1, "one call, one record: {records:?}");
+    assert_eq!(
+        records[0].outcome,
+        torromail_mcp::health::HealthOutcome::Unreachable
+    );
 }
