@@ -299,3 +299,10 @@
 /* Account health */
 "TorroMail can no longer reach this account." = "TorroMail erreicht dieses Konto nicht mehr.";
 "Reachable again." = "Wieder erreichbar.";
+"Needs your attention" = "Braucht deine Aufmerksamkeit";
+"Assistants cannot use these accounts until this is fixed." = "Assistenten können diese Konten nicht nutzen, bis das behoben ist.";
+/* The %@ is a relative time from the system („vor 5 Min.“), so it is already
+   German — only the sentence around it belongs here. The failure reasons next
+   to it are not: they come from the mail server or from the Rust side and are
+   shown in their own words. */
+"Last checked %@" = "Zuletzt geprüft %@";

@@ -82,6 +82,22 @@ localization.
 - `apps/TorroMailApp`: SwiftUI macOS configuration/control app.
 - `docs`: architecture notes, product decisions, and implementation plans.
 
+Server and app share `~/Library/Application Support/TorroMail/`: the policy
+document the server reads, `audit.jsonl` for what assistants did, and
+`health.jsonl` for whether each account still works. Four writers append to the
+health log — the MCP server on every mailbox tool call and once at startup, the
+app's Test Connection button, and a 15-minute background monitor — and an
+account's status dot is *derived* from that log's tail, never stored. That is
+the whole point of the file: the dot used to be a persisted verification bit,
+so an account that connected once during setup stayed green until a human
+noticed otherwise. Reads never throw and appends are a single `O_APPEND` write,
+because several processes write this file concurrently and neither a torn line
+nor a missing one may take the window down. Deriving is in `HealthLog.derive`
+and is the only place the rule lives: a transport failure needs three
+consecutive strikes to turn the dot red, a refused credential turns it at once
+— a flaky network is not a wrong password, and a false red teaches people to
+ignore the dot.
+
 Core rule: account setup, secret changes, OAuth setup, and permission edits stay
 outside MCP tools. MCP clients can search and read within policy, prepare risky
 actions, and inspect read-only admin state.

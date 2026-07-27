@@ -789,6 +789,7 @@ private struct DashboardView: View {
                     GettingStartedCard()
                 } else {
                     ServiceStatusCard()
+                    BrokenAccountsCard()
                     if !model.pendingActions.isEmpty {
                         PendingApprovalsCard()
                     }
@@ -984,6 +985,77 @@ private struct PendingApprovalsCard: View {
     private func sentence(for action: PendingAction) -> String {
         let account = model.accountName(id: action.accountID) ?? action.accountID
         return String(format: L("Send to %@ · from %@"), action.recipient, account)
+    }
+}
+
+/// The accounts that stopped working, and what the server said about each.
+///
+/// Absent whenever everything is fine — deliberately, and this is the whole
+/// design: a card that is always on screen saying "all good" gets skimmed
+/// past, and then it goes unread on the one morning it says something else.
+/// Its appearing *is* the message, which is also why it carries no green or
+/// "last checked" state of its own; that lives one click away in the detail.
+///
+/// Rows lead to the account detail, because that is where the repair is —
+/// re-entering a password, correcting a host. It is the same destination a
+/// health notification opens, so both routes land on the same screen.
+private struct BrokenAccountsCard: View {
+    @EnvironmentObject private var model: TorroMailModel
+
+    var body: some View {
+        let broken = model.accounts.filter(\.connectionState.isBroken)
+        if !broken.isEmpty {
+            DashboardCard(
+                title: L("Needs your attention"),
+                footer: L("Assistants cannot use these accounts until this is fixed.")
+            ) {
+                VStack(spacing: 0) {
+                    ForEach(Array(broken.enumerated()), id: \.element.id) { index, account in
+                        if index > 0 { Divider().padding(.leading, 38) }
+                        Button {
+                            model.openAccount(id: account.id)
+                        } label: {
+                            // Top-aligned: the reason is the server's own
+                            // sentence and can run to two or three lines, and
+                            // the badge and chevron belong beside its first
+                            // one rather than floating in the middle.
+                            HStack(alignment: .top, spacing: 10) {
+                                MailBadge(size: 26)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(account.name).font(.body)
+                                    Text(reason(for: account))
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        // Full sentence or nothing: the tail of
+                                        // these messages is the half that says
+                                        // what to do about it, so it must not
+                                        // be what gets dropped when the row
+                                        // runs short of width.
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 4)
+                            }
+                            .contentShape(.rect)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    /// No dot and no "failed" label on these rows: every account in this card
+    /// is broken by definition, so the only thing left worth the space is why.
+    private func reason(for account: MailAccount) -> String {
+        guard case let .failed(message) = account.connectionState, !message.isEmpty else {
+            return L("TorroMail can no longer reach this account.")
+        }
+        return message
     }
 }
 
@@ -1452,9 +1524,19 @@ private struct AccountDetailView: View {
                 )
             }
 
-            HStack {
-                ConnectionStatusBadge(state: account.connectionState)
-                Spacer()
+            // Top-aligned so the buttons stay level with the badge's first
+            // line: a rejected credential brings the server's own sentence
+            // with it, which wraps to two or three lines here.
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    ConnectionStatusBadge(state: account.connectionState)
+                    if let lastChecked {
+                        Text(lastChecked)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer(minLength: 12)
                 if account.loginMethod == .oauth {
                     Button(L("Sign In…")) {}
                         .torroButton()
@@ -1466,6 +1548,22 @@ private struct AccountDetailView: View {
                 .disabled(isCheckingConnection)
             }
         }
+    }
+
+    /// "Last checked 5 min. ago" — shown for a healthy account too, which is
+    /// the one place this app volunteers status without an exception to
+    /// report. It earns it: a green dot that nothing ever re-checked was the
+    /// original bug, and "is this current?" is the question a dot alone cannot
+    /// answer. Kept in caption/tertiary so it reads as a footnote to the
+    /// badge rather than as a second status line.
+    ///
+    /// Nil until the log has seen this account at all — an account nothing has
+    /// ever checked has no timestamp to be honest about.
+    private var lastChecked: String? {
+        guard let when = model.lastHealthCheck[account.id] else { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return String(format: L("Last checked %@"), formatter.localizedString(for: when, relativeTo: Date()))
     }
 
     /// Saves the password to the keychain and runs the real check: the MCP
@@ -1905,13 +2003,24 @@ struct PresetChips: View {
 private struct ConnectionStatusBadge: View {
     var state: ConnectionState
 
+    /// For a failure the badge's text *is* the reason, and those reasons are no
+    /// longer short — a rejected credential arrives as a full sentence from the
+    /// server or from the keychain repair path, three lines of it at this
+    /// width. Centred, the dot then sat halfway down the paragraph with no
+    /// text beside it, reading as a bullet for the middle line; the same
+    /// happened to the buttons across the row. Top alignment with the dot
+    /// nudged onto the first line fixes that. `fixedSize` is belt and braces:
+    /// the text wraps here on its own, but it stops the row's other content
+    /// from ever compressing it into a truncated line.
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 6) {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
+                .padding(.top, 5)
             Text(text)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
