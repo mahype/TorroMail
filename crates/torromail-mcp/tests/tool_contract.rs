@@ -1650,7 +1650,7 @@ fn a_failed_check_writes_the_outcome_word_alone_on_the_first_stderr_line() {
     let mut lines = stderr.lines();
     assert_eq!(
         lines.next(),
-        Some("unreachable"),
+        Some("rejected"),
         "the outcome word stands alone and unpadded — got: {stderr:?}"
     );
     assert!(
@@ -2137,8 +2137,8 @@ fn the_sweep_records_every_account_that_is_due() {
     assert_eq!(records[0].source, "server-start");
     assert_eq!(
         records[0].outcome,
-        torromail_mcp::health::HealthOutcome::Unreachable,
-        "a secret we could not read is not a password the server refused"
+        torromail_mcp::health::HealthOutcome::Rejected,
+        "a secret we could not read never becomes readable, and the repair is the user's"
     );
 }
 

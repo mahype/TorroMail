@@ -4,7 +4,7 @@
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
 pub mod health;
-mod keychain;
+pub mod keychain;
 mod policy_document;
 
 use std::cell::RefCell;

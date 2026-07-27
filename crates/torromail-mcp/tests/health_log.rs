@@ -314,6 +314,36 @@ fn an_error_maps_to_the_outcome_its_handling_requires() {
     );
 }
 
+/// A stored password the process cannot read is on the accusing side of that
+/// line, and the OS error it came from must not be what the user reads first.
+/// Pinned through the classifier rather than through a keychain, because a
+/// keychain that fails on demand is not something a test can arrange — the
+/// ruling is the part that can be wrong.
+#[test]
+fn a_secret_that_cannot_be_read_accuses_the_password_rather_than_the_server() {
+    // The Security framework's own sentence for the real-world case, in the
+    // language it was seen in.
+    let error = torromail_mcp::keychain::unreadable_secret(
+        "Der eingegebene Benutzername oder das Passwort ist ungültig.",
+    );
+
+    assert_eq!(
+        HealthOutcome::from_error(&error),
+        Some(HealthOutcome::Rejected),
+        "an unreadable keychain item never heals on its own, so it must not wait out a grace period"
+    );
+
+    let detail = error.to_string();
+    let ours = detail
+        .find("enter this account's password again in TorroMail")
+        .expect("the repair is in the message");
+    let theirs = detail.find("Benutzername").expect("the cause is kept");
+    assert!(
+        ours < theirs,
+        "the repair must come before the OS sentence it would otherwise be mistaken for: {detail}"
+    );
+}
+
 /// The `None` arm carries as much weight as the other two: an ordinary refusal
 /// is not a health signal, and recording one would turn a policy denial into
 /// an alarm about the user's password.
