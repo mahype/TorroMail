@@ -660,13 +660,28 @@ In `crates/torromail-mcp/src/lib.rs`, next to `record_audit`:
     /// Append one health record for `account_id`. Best-effort like the audit
     /// log — a mail action must never fail because its health line could not
     /// be written.
+    ///
+    /// Repeated successes are dropped: `audit.jsonl` already holds the
+    /// transcript of every call, and a second "still fine" line thirty seconds
+    /// after the first says nothing while crowding other accounts out of the
+    /// log. Failures always land.
     fn record_health(&self, account_id: &AccountId, outcome: HealthOutcome, detail: &str) {
         let Some(path) = &self.health_path else {
             return;
         };
-        health::append(path, account_id.as_str(), outcome, "tool-call", detail);
+        let account = account_id.as_str();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        if !health::is_worth_recording(&health::load(path), account, outcome, now) {
+            return;
+        }
+        health::append(path, account, outcome, "tool-call", detail);
     }
 ```
+
+`is_worth_recording` reads the log before every successful call, which is one small file read per tool call. That is the same order of work `record_audit` already does by opening and appending to `audit.jsonl`, and it buys a log that stays readable under load. If a later measurement shows it matters, cache the last recorded timestamp per account in the server — but do not do that speculatively.
 
 - [ ] **Step 6: Record at the three points where health is knowable**
 
@@ -1117,6 +1132,37 @@ require(
     "an unknown outcome and a broken line are both skipped, and the good line survives"
 )
 
+// Retention is per account. With a global tail, one long session against a
+// busy account crowds a quiet account off the end, that account derives from
+// its stored state, and the stale-green bug is back — only under load, which
+// is the worst way for it to come back.
+let crowdedLog = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-contract-crowded.jsonl")
+try? FileManager.default.removeItem(at: crowdedLog)
+HealthLog.append(
+    HealthRecord(accountID: "quiet", at: Date(timeIntervalSince1970: 1), outcome: .rejected),
+    to: crowdedLog
+)
+for index in 2...200 {
+    HealthLog.append(
+        HealthRecord(
+            accountID: "busy",
+            at: Date(timeIntervalSince1970: TimeInterval(index)),
+            outcome: .ok
+        ),
+        to: crowdedLog
+    )
+}
+let crowded = HealthLog.load(from: crowdedLog)
+require(
+    crowded.contains { $0.accountID == "quiet" },
+    "a quiet account's record survives a busy account's flood"
+)
+require(
+    crowded.filter { $0.accountID == "busy" }.count == 20,
+    "and the busy account is capped at its own per-account retention"
+)
+
 // Notifications follow crossings, not states — otherwise a broken account
 // announces itself every fifteen minutes until the user stops reading.
 let brokenAccount = MailAccount(
@@ -1226,11 +1272,16 @@ public enum HealthLog {
             .appendingPathComponent("health.jsonl")
     }
 
-    /// The tail of the log, oldest first. Reads the last `limit` lines: far
-    /// more than the three the grace rule needs, and cheap enough to do on
-    /// every file change.
+    /// The log, oldest first, keeping the last `perAccount` records **for each
+    /// account** rather than the last N lines of the file.
+    ///
+    /// The distinction is the whole reason this is not a plain `suffix`: with a
+    /// global tail, one long assistant session against a busy account crowds
+    /// every other account's records off the end, and an account with no
+    /// records falls back to the stored state — the stale-green bug this
+    /// feature exists to remove, back again and only under load.
     public static func load(
-        limit: Int = 200,
+        perAccount: Int = 20,
         from url: URL? = nil,
         fileManager: FileManager = .default
     ) -> [HealthRecord] {
@@ -1238,9 +1289,8 @@ public enum HealthLog {
               let text = try? String(contentsOf: target, encoding: .utf8) else {
             return []
         }
-        return text
+        let parsed = text
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .suffix(limit)
             .compactMap { line -> HealthRecord? in
                 guard let data = line.data(using: .utf8),
                       let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1258,6 +1308,18 @@ public enum HealthLog {
                     detail: raw["detail"] as? String ?? ""
                 )
             }
+
+        // Keep the newest `perAccount` for each account, then hand them back
+        // in file order so callers still see a single oldest-first sequence.
+        var keptIndices: Set<Int> = []
+        var seen: [String: Int] = [:]
+        for index in parsed.indices.reversed() {
+            let count = seen[parsed[index].accountID] ?? 0
+            guard count < perAccount else { continue }
+            seen[parsed[index].accountID] = count + 1
+            keptIndices.insert(index)
+        }
+        return parsed.indices.filter { keptIndices.contains($0) }.map { parsed[$0] }
     }
 
     /// Append one record. Best-effort: a missed sample costs at most one

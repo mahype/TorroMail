@@ -65,9 +65,20 @@ absent or unrecognised is skipped the same way; an unrecognised `source` is
 kept, since nothing derives from it.
 
 Nothing trims the file — neither `audit.jsonl` nor `connections.jsonl` is
-trimmed today, and a health record is smaller than an audit line. The
-derivation reads the last 200 lines, which is far more than the three any rule
-needs.
+trimmed today, and a health record is smaller than an audit line.
+
+Readers retain the last 20 records **per account**, not the last N lines of the
+file. The distinction is not academic: with a global tail, one long assistant
+session against a busy account crowds every other account's records off the
+end, and an account with no records falls back to the stored `isVerified` bit —
+which is the stale-green bug this document exists to remove, reappearing only
+under load.
+
+Write volume is held down at the source instead of by a reading trick. A
+success is not recorded if the account's newest record is a success less than a
+minute old: health is a status, and `audit.jsonl` already holds the transcript
+of every call. Failures are never throttled — the first one is the entire point,
+and it must reach the app on the call it happened.
 
 `isVerified` in the stored app state stays on disk and keeps its meaning — the
 state an account had when the app last quit — but it no longer drives the dot
