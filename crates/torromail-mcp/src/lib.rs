@@ -3,6 +3,7 @@
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
+pub mod health;
 mod keychain;
 mod policy_document;
 
