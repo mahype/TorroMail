@@ -15,10 +15,17 @@ use torromail_core::{
 enum Incoming {
     Line(String),
     Bytes(Vec<u8>),
+    /// The connection dying where the script says so, rather than the server
+    /// answering — the one thing a canned list of lines cannot otherwise say.
+    Failure(CoreError),
 }
 
 fn line(text: &str) -> Incoming {
     Incoming::Line(text.to_owned())
+}
+
+fn dropped_connection() -> Incoming {
+    Incoming::Failure(CoreError::ProviderFailure("connection reset".to_owned()))
 }
 
 /// Shared view on everything the client sent, surviving the move of the
@@ -55,6 +62,7 @@ impl ImapTransport for ScriptedTransport {
     fn read_line(&mut self) -> CoreResult<String> {
         match self.incoming.pop_front() {
             Some(Incoming::Line(text)) => Ok(text),
+            Some(Incoming::Failure(error)) => Err(error),
             other => panic!("script expected a line, got {other:?}"),
         }
     }
@@ -812,4 +820,160 @@ fn a_refused_command_after_login_is_not_a_credential_problem() {
         matches!(result, Err(CoreError::ProviderFailure(_))),
         "only the login command can produce a credential rejection"
     );
+}
+
+#[test]
+fn a_login_that_never_gets_an_answer_is_a_transport_failure() {
+    // The seam that matters: LOGIN went out, then the connection died before
+    // the server said anything. Nothing was refused, so nothing may be
+    // blamed on the password.
+    let script = vec![line("* OK IMAP4rev1 server ready"), dropped_connection()];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    match result {
+        Ok(_) => panic!("login must fail"),
+        Err(CoreError::ProviderFailure(message)) => {
+            assert!(message.contains("connection reset"), "got: {message}");
+            assert!(
+                !message.contains("rejected the login"),
+                "a silence is not a refusal: {message}"
+            );
+        }
+        Err(other) => panic!("a dead connection is a transport failure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn a_temporary_backend_failure_is_not_a_wrong_password() {
+    // RFC 5530 has a code for exactly this, and it means "try later" — the
+    // one thing a credential rejection is not allowed to mean.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO [UNAVAILABLE] Temporary authentication failure"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "a server having a bad day must not be reported as a wrong password"
+    );
+}
+
+#[test]
+fn a_refused_plaintext_login_blames_the_connection_not_the_password() {
+    // Dovecot's answer on a connection that never got its TLS. The password
+    // may well be perfect; the security setting is what is wrong.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line(
+            "t1 NO [PRIVACYREQUIRED] Plaintext authentication disallowed on non-secure connections",
+        ),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "a missing TLS upgrade is a connection problem, not a credential one"
+    );
+}
+
+#[test]
+fn a_tagged_bad_never_accuses_the_credentials() {
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 BAD Error in IMAP command LOGIN: Unexpected argument"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "BAD is us speaking nonsense, and says nothing about the password"
+    );
+}
+
+#[test]
+fn a_refusal_with_no_response_code_still_means_a_wrong_password() {
+    // Plenty of servers send no response code at all. A plain NO to LOGIN is
+    // the oldest way there is of saying the credentials are wrong.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO Login failed"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "wrong",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::CredentialRejected(_))),
+        "a bare NO to LOGIN is a refusal of the credentials"
+    );
+}
+
+#[test]
+fn the_actionable_alert_line_travels_with_the_refusal() {
+    // Gmail puts the sentence the user has to act on in an untagged ALERT
+    // ahead of the tagged NO, which on its own says nothing useful.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line(
+            "* NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833",
+        ),
+        line("t1 NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "wrong",
+    );
+
+    match result {
+        Ok(_) => panic!("login must fail"),
+        Err(CoreError::CredentialRejected(message)) => {
+            assert!(
+                message.contains("Application-specific password required"),
+                "the fix the user needs must survive: {message}"
+            );
+        }
+        Err(other) => panic!("a refused login must be CredentialRejected, got: {other:?}"),
+    }
+}
+
+#[test]
+fn a_server_that_echoes_the_login_does_not_get_the_password_into_the_error() {
+    // This text ends up in a log file on disk, and LOGIN is the one command
+    // whose arguments are the secret itself.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 BAD Error in IMAP command LOGIN \"work@example.com\" \"hunter2\""),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "hunter2",
+    );
+
+    let message = match result {
+        Ok(_) => panic!("login must fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(!message.contains("hunter2"), "secret leaked: {message}");
+    assert!(message.contains("***"), "got: {message}");
 }

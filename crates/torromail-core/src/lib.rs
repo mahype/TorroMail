@@ -23,6 +23,9 @@ pub enum CoreError {
         capability: Capability,
     },
     MessageNotFound(String),
+    /// The mail provider could not be reached or could not do as it was
+    /// asked. Everything transient lives here — see `CredentialRejected` for
+    /// the one failure that will not fix itself on its own.
     ProviderFailure(String),
     /// The server spoke a refusal to the login command itself: a wrong
     /// password, an expired app password, a rejected OAuth token. Kept apart

@@ -179,6 +179,128 @@ struct ResponseLine {
     literals: Vec<Vec<u8>>,
 }
 
+/// The word the server refused with. `NO` is the command failing on its own
+/// terms, which is the only way a credential problem can be expressed; `BAD`
+/// is the client having spoken nonsense and never says anything about the
+/// credentials. Anything else a server invents is read as `Bad`, the side
+/// that accuses nobody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalKind {
+    No,
+    Bad,
+}
+
+/// A tagged refusal the server actually spoke, parsed far enough that
+/// deciding what it means reads a field instead of hunting through a
+/// sentence.
+#[derive(Debug)]
+struct Refusal {
+    kind: RefusalKind,
+    /// The RFC 5530 response code, uppercased and stripped of its brackets
+    /// and arguments — `AUTHENTICATIONFAILED` out of
+    /// `[AUTHENTICATIONFAILED]`. `None` when the server refused without
+    /// saying why, which is what plenty of servers do to a wrong password.
+    code: Option<String>,
+    /// Everything the server said in refusing, including any untagged
+    /// `[ALERT]` sentence that came ahead of the tagged line. This text
+    /// reaches the user, so it keeps the server's own words.
+    text: String,
+}
+
+impl Refusal {
+    /// Reads the remainder of a tagged answer — everything after `t3 ` — plus
+    /// the untagged `[ALERT]` line that may have preceded it.
+    fn parse(rest: &str, alert: Option<&str>) -> Self {
+        let word = rest.split_whitespace().next().unwrap_or_default();
+        let kind = if word.eq_ignore_ascii_case("NO") {
+            RefusalKind::No
+        } else {
+            RefusalKind::Bad
+        };
+
+        // The response code is only a response code where RFC 3501 puts it:
+        // straight after the `NO`/`BAD`. A `[` later in the sentence is prose.
+        let code = rest
+            .split_once(' ')
+            .and_then(|(_, remainder)| remainder.trim_start().strip_prefix('['))
+            .and_then(|bracketed| bracketed.split_once(']'))
+            .and_then(|(inside, _)| inside.split_whitespace().next())
+            .map(str::to_ascii_uppercase);
+
+        let text = match alert {
+            Some(alert) => format!("{rest} ({alert})"),
+            None => rest.to_owned(),
+        };
+
+        Self { kind, code, text }
+    }
+
+    /// Whether this refusal accuses the credentials — the question the two
+    /// authentication paths ask, answered in one place so they cannot drift.
+    ///
+    /// Only the codes that name an authentication problem count, plus a bare
+    /// `NO`, which is how a server that sends no response code at all says
+    /// "wrong password". Everything else is the server or the connection
+    /// having a problem of its own: `[UNAVAILABLE]` is RFC 5530's *temporary*
+    /// backend failure, `[PRIVACYREQUIRED]` means this connection wants TLS
+    /// first, `[ALERT]` is how Gmail throttles. Reporting those as a wrong
+    /// password is worse than saying nothing, because downstream a credential
+    /// rejection turns the account red on the first occurrence and notifies
+    /// the user, while a provider failure gets three strikes first. So an
+    /// unrecognised code lands on the transport side on purpose.
+    fn accuses_the_credentials(&self) -> bool {
+        if self.kind == RefusalKind::Bad {
+            return false;
+        }
+        match self.code.as_deref() {
+            None => true,
+            Some(code) => matches!(
+                code,
+                "AUTHENTICATIONFAILED" | "AUTHORIZATIONFAILED" | "EXPIRED"
+            ),
+        }
+    }
+
+    /// The same refusal with every occurrence of `secret` blanked out. Only
+    /// the login path needs this, and only because `LOGIN` is the one command
+    /// whose arguments *are* the secret — a server that echoes the command it
+    /// could not parse would otherwise put the password in an error that
+    /// reaches a plaintext log on disk.
+    fn with_secret_redacted(mut self, secret: &str) -> Self {
+        if !secret.is_empty() {
+            self.text = self.text.replace(secret, "***");
+        }
+        self
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+/// Turns a refusal to an authentication command into the error the rest of
+/// the app reasons about. Both authentication paths go through here so that
+/// what counts as a wrong password is decided exactly once.
+fn authentication_error(refusal: &Refusal, what: &str) -> CoreError {
+    let message = format!("IMAP rejected the {what}: {refusal}");
+    if refusal.accuses_the_credentials() {
+        CoreError::CredentialRejected(message)
+    } else {
+        CoreError::ProviderFailure(message)
+    }
+}
+
+/// The actionable sentence out of an untagged `* NO [ALERT] …`, which is
+/// where Gmail and Yahoo put the thing the user has to go and do
+/// ("Application-specific password required: <url>"). The tagged refusal
+/// that follows it is usually far less useful.
+fn untagged_alert(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("* ")?;
+    rest.contains("[ALERT]").then_some(rest)
+}
+
 /// One logged-in IMAP session speaking the smallest useful IMAP4rev1
 /// subset: LIST, SELECT, UID SEARCH, UID FETCH, UID STORE. Bodies are
 /// fetched with PEEK — reading never sets flags; changing flags is what the
@@ -239,13 +361,13 @@ impl<T: ImapTransport> ImapClient<T> {
     fn authenticate(&mut self, username: &str, secret: &str, auth: ImapAuth) -> CoreResult<()> {
         match auth {
             ImapAuth::Password => {
-                self.command_answering(&format!(
+                self.command_or_refusal(&format!(
                     "LOGIN {} {}",
                     imap_quoted(username),
                     imap_quoted(secret)
                 ))?
                 .map_err(|refusal| {
-                    CoreError::CredentialRejected(format!("IMAP rejected the login: {refusal}"))
+                    authentication_error(&refusal.with_secret_redacted(secret), "login")
                 })?;
             }
             ImapAuth::XOAuth2 => self.authenticate_xoauth2(username, secret)?,
@@ -269,6 +391,7 @@ impl<T: ImapTransport> ImapClient<T> {
         self.transport
             .send_line(&format!("{tag} AUTHENTICATE XOAUTH2 {initial}"))?;
 
+        let mut alert = None;
         loop {
             let line = self.transport.read_line()?;
 
@@ -276,9 +399,13 @@ impl<T: ImapTransport> ImapClient<T> {
                 if rest.starts_with("OK") {
                     return Ok(());
                 }
-                return Err(CoreError::CredentialRejected(format!(
-                    "IMAP rejected the access token: {rest}"
-                )));
+                // The same verdict the password path uses. A rejected token is
+                // a credential problem, but `NO [UNAVAILABLE]` on this command
+                // is no more the token's fault than it is a password's.
+                return Err(authentication_error(
+                    &Refusal::parse(rest, alert.as_deref()),
+                    "access token",
+                ));
             }
 
             if line.starts_with('+') {
@@ -288,6 +415,9 @@ impl<T: ImapTransport> ImapClient<T> {
                 // this empty reply.
                 self.transport.send_line("")?;
                 continue;
+            }
+            if alert.is_none() {
+                alert = untagged_alert(&line).map(str::to_owned);
             }
             // Untagged chatter (`* CAPABILITY …`) — not our business.
         }
@@ -533,18 +663,20 @@ impl<T: ImapTransport> ImapClient<T> {
 
     /// Sends `command` and reads until its tagged answer. The two failure
     /// shapes stay apart on purpose: the outer `Err` is transport — the
-    /// connection broke on the way — while the inner `Err` is the server
-    /// speaking a tagged `NO` or `BAD`. Only a refusal the server actually
-    /// spoke can mean the credentials are wrong.
-    fn command_answering(
+    /// connection broke on the way and the server never got to answer —
+    /// while the inner `Err` is the server speaking a tagged `NO` or `BAD`.
+    /// Only a refusal the server actually spoke can mean the credentials are
+    /// wrong.
+    fn command_or_refusal(
         &mut self,
         command: &str,
-    ) -> CoreResult<Result<Vec<ResponseLine>, String>> {
+    ) -> CoreResult<Result<Vec<ResponseLine>, Refusal>> {
         self.next_tag += 1;
         let tag = format!("t{}", self.next_tag);
         self.transport.send_line(&format!("{tag} {command}"))?;
 
         let mut lines = Vec::new();
+        let mut alert = None;
         loop {
             let mut text = self.transport.read_line()?;
             let mut literals = Vec::new();
@@ -559,14 +691,17 @@ impl<T: ImapTransport> ImapClient<T> {
                 if rest.starts_with("OK") {
                     return Ok(Ok(lines));
                 }
-                return Ok(Err(rest.to_owned()));
+                return Ok(Err(Refusal::parse(rest, alert.as_deref())));
+            }
+            if alert.is_none() {
+                alert = untagged_alert(&text).map(str::to_owned);
             }
             lines.push(ResponseLine { text, literals });
         }
     }
 
     fn command(&mut self, command: &str) -> CoreResult<Vec<ResponseLine>> {
-        self.command_answering(command)?.map_err(|refusal| {
+        self.command_or_refusal(command)?.map_err(|refusal| {
             CoreError::ProviderFailure(format!("IMAP command refused: {refusal}"))
         })
     }
