@@ -802,4 +802,211 @@ require(
     "running state should be observable"
 )
 
+// MARK: - Account health
+
+// The whole point of the feature: a green dot must mean "checked recently and
+// fine", not "worked once during setup".
+
+func healthRecord(
+    _ account: String,
+    _ outcome: HealthOutcome,
+    secondsAgo: TimeInterval = 0,
+    detail: String = ""
+) -> HealthRecord {
+    HealthRecord(
+        accountID: account,
+        at: Date().addingTimeInterval(-secondsAgo),
+        outcome: outcome,
+        source: "periodic",
+        detail: detail
+    )
+}
+
+require(
+    HealthLog.derive(records: [], accountID: "work", fallback: .connected) == .connected,
+    "with no records at all the stored state stands"
+)
+require(
+    HealthLog.derive(
+        records: [healthRecord("work", .ok)],
+        accountID: "work",
+        fallback: .needsTest
+    ) == .connected,
+    "a successful check is green whatever the stored state said"
+)
+require(
+    HealthLog.derive(
+        records: [healthRecord("work", .rejected, detail: "credentials rejected: NO")],
+        accountID: "work",
+        fallback: .connected
+    ).isBroken,
+    "refused credentials go red immediately — they will not fix themselves"
+)
+require(
+    HealthLog.derive(
+        records: [
+            healthRecord("work", .ok, secondsAgo: 300),
+            healthRecord("work", .unreachable, secondsAgo: 200),
+            healthRecord("work", .unreachable, secondsAgo: 100)
+        ],
+        accountID: "work",
+        fallback: .needsTest
+    ) == .connected,
+    "two unreachable checks are a flaky network, not a broken account"
+)
+require(
+    HealthLog.derive(
+        records: [
+            healthRecord("work", .ok, secondsAgo: 400),
+            healthRecord("work", .unreachable, secondsAgo: 300),
+            healthRecord("work", .unreachable, secondsAgo: 200),
+            healthRecord("work", .unreachable, secondsAgo: 100)
+        ],
+        accountID: "work",
+        fallback: .needsTest
+    ).isBroken,
+    "three in a row is a problem worth showing"
+)
+require(
+    HealthLog.derive(
+        records: [
+            healthRecord("work", .unreachable, secondsAgo: 500),
+            healthRecord("work", .unreachable, secondsAgo: 400),
+            healthRecord("work", .ok, secondsAgo: 300),
+            healthRecord("work", .unreachable, secondsAgo: 200),
+            healthRecord("work", .unreachable, secondsAgo: 100)
+        ],
+        accountID: "work",
+        fallback: .needsTest
+    ) == .connected,
+    "a success in between resets the count"
+)
+require(
+    HealthLog.derive(
+        records: [healthRecord("other", .rejected)],
+        accountID: "work",
+        fallback: .connected
+    ) == .connected,
+    "another account's trouble is not this account's"
+)
+// Rejected credentials outlive an outage: the server going quiet afterwards is
+// not evidence the password started working again.
+require(
+    HealthLog.derive(
+        records: [
+            healthRecord("work", .rejected, secondsAgo: 300, detail: "credentials rejected: NO"),
+            healthRecord("work", .unreachable, secondsAgo: 200),
+            healthRecord("work", .unreachable, secondsAgo: 100)
+        ],
+        accountID: "work",
+        fallback: .connected
+    ) == .failed("credentials rejected: NO"),
+    "a short outage after a rejection keeps the rejection, reason and all"
+)
+
+// A line whose outcome word we do not know is skipped, not fatal: an older or
+// newer build writing a word this one has never heard of must not take the
+// status display down with it.
+let mixedLog = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-contract-health.jsonl")
+try? FileManager.default.removeItem(at: mixedLog)
+FileManager.default.createFile(
+    atPath: mixedLog.path,
+    contents: Data(
+        """
+        {"ts":1,"account":"work","outcome":"quantum","source":"periodic","detail":""}
+        {"ts":2,"account":"work","outcome":"ok","source":"periodic","detail":""}
+        not json at all
+        """.utf8
+    )
+)
+require(
+    HealthLog.load(from: mixedLog).count == 1,
+    "an unknown outcome and a broken line are both skipped, and the good line survives"
+)
+
+// Retention is per account. With a global tail, one long session against a
+// busy account crowds a quiet account off the end, that account derives from
+// its stored state, and the stale-green bug is back — only under load, which
+// is the worst way for it to come back.
+let crowdedLog = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-contract-crowded.jsonl")
+try? FileManager.default.removeItem(at: crowdedLog)
+HealthLog.append(
+    HealthRecord(accountID: "quiet", at: Date(timeIntervalSince1970: 1), outcome: .rejected),
+    to: crowdedLog
+)
+for index in 2...200 {
+    HealthLog.append(
+        HealthRecord(
+            accountID: "busy",
+            at: Date(timeIntervalSince1970: TimeInterval(index)),
+            outcome: .ok
+        ),
+        to: crowdedLog
+    )
+}
+let crowded = HealthLog.load(from: crowdedLog)
+require(
+    crowded.contains { $0.accountID == "quiet" },
+    "a quiet account's record survives a busy account's flood"
+)
+require(
+    crowded.filter { $0.accountID == "busy" }.count == 20,
+    "and the busy account is capped at its own per-account retention"
+)
+// What was appended is what comes back — a log the app cannot read back is a
+// log that silently stops deciding anything.
+require(
+    HealthLog.derive(records: crowded, accountID: "quiet", fallback: .connected).isBroken,
+    "the quiet account's rejection still derives red after the round trip"
+)
+
+// Notifications follow crossings, not states — otherwise a broken account
+// announces itself every fifteen minutes until the user stops reading.
+let brokenAccount = MailAccount(
+    id: "work",
+    name: "Work",
+    email: "work@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    username: "work@example.com",
+    connectionState: .failed("credentials rejected: NO")
+)
+let healthyAccount = MailAccount(
+    id: "work",
+    name: "Work",
+    email: "work@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    username: "work@example.com",
+    connectionState: .connected
+)
+require(
+    HealthLog.transitions(previous: ["work": false], accounts: [brokenAccount]).count == 1,
+    "going from healthy to broken is worth saying once"
+)
+require(
+    HealthLog.transitions(previous: ["work": true], accounts: [brokenAccount]).isEmpty,
+    "a still-broken account says nothing further"
+)
+require(
+    HealthLog.transitions(previous: ["work": true], accounts: [healthyAccount])
+        == [.recovered(accountID: "work")],
+    "recovery gets its own quiet all-clear"
+)
+require(
+    HealthLog.transitions(previous: [:], accounts: [brokenAccount]).isEmpty,
+    "an account seen for the first time has not crossed anything"
+)
+// The snapshot a later round compares against has to be the shape `previous`
+// takes, or every round reads as "first seen" and nothing ever notifies.
+require(
+    HealthLog.transitions(
+        previous: HealthLog.brokenness(accounts: [healthyAccount]),
+        accounts: [brokenAccount]
+    ) == [.broke(accountID: "work", reason: "credentials rejected: NO")],
+    "brokenness feeds straight back in, reason carried through to the notification"
+)
+
 print("TorroMailKit control-surface contract passed")
