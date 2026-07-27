@@ -772,9 +772,11 @@ impl LineMcpServer {
                 Ok(runtime) => runtime,
                 Err(message) => return json_rpc_error(id, -32000, &message),
             };
-            let identity = match ConnIdentity::from_facts(&facts) {
-                Ok(identity) => identity,
-                Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+            // Refused here, ahead of every recording site below, because an
+            // account with no connection has nothing to say about its own
+            // health — see `unconfigured`.
+            let Some(identity) = ConnIdentity::from_facts(&facts) else {
+                return json_rpc_error(id, -32000, &unconfigured(account_id).to_string());
             };
 
             let mut pool = self.connections.borrow_mut();
@@ -1331,20 +1333,30 @@ enum ConnectionFacts {
 }
 
 impl ConnIdentity {
-    /// The identity a pool entry must still match to be reused. Unconfigured
-    /// accounts have no connection at all, so there is nothing to key.
-    fn from_facts(facts: &ConnectionFacts) -> CoreResult<Self> {
+    /// The identity a pool entry must still match to be reused, or `None` when
+    /// there is no connection to key at all. The caller turns that into the
+    /// refusal: what an unfinished account means is a judgement about the
+    /// account, not about the pool.
+    fn from_facts(facts: &ConnectionFacts) -> Option<Self> {
         match facts {
-            ConnectionFacts::FixtureMode => Ok(Self::Fixture),
-            ConnectionFacts::Configured(config, _) => {
-                Ok(Self::Configured((**config).clone()))
-            }
-            ConnectionFacts::Unconfigured => Err(CoreError::ProviderFailure(
-                "account has no connection configured — finish setting it up in TorroMail"
-                    .to_owned(),
-            )),
+            ConnectionFacts::FixtureMode => Some(Self::Fixture),
+            ConnectionFacts::Configured(config, _) => Some(Self::Configured((**config).clone())),
+            ConnectionFacts::Unconfigured => None,
         }
     }
+}
+
+/// What an account the wizard never finished has instead of a connection: a
+/// sentence the assistant can relay to the person who has to act on it.
+///
+/// Every caller must refuse *before* it would record health. This failure is a
+/// setup gap, not a health signal — it happens on every call by construction,
+/// so three of them in a row would turn the dot red and fire a desktop
+/// notification at a user who has simply not finished the wizard.
+fn unconfigured(account_id: &AccountId) -> CoreError {
+    CoreError::ProviderFailure(format!(
+        "account {account_id} has no connection configured — finish setting it up in TorroMail"
+    ))
 }
 
 /// Opens a real mailbox when the document has connection facts for the
@@ -1362,9 +1374,9 @@ fn open_provider(
             Ok(Box::new(provider))
         }
         ConnectionFacts::FixtureMode => Ok(Box::new(fixture_provider(account_id))),
-        ConnectionFacts::Unconfigured => Err(CoreError::ProviderFailure(format!(
-            "account {account_id} has no connection configured — finish setting it up in TorroMail"
-        ))),
+        // Callers refuse this before they get here; kept honest rather than
+        // assumed away, and it must stay unrecorded wherever it does surface.
+        ConnectionFacts::Unconfigured => Err(unconfigured(account_id)),
     }
 }
 
@@ -1409,56 +1421,174 @@ fn resolve_credential(
 /// The connection check behind the app's "Test Connection" button and the
 /// `--check-account` flag: resolve the secret, log in over TLS, count the
 /// mailboxes. No mail content is touched.
+///
+/// Answers with the verdict as well as the words for it, because the two have
+/// different readers: the message is for whoever asked, and the outcome is
+/// what a status dot is made of — `Rejected` turns it red at once, while
+/// `Unreachable` earns a grace period first.
+///
+/// Writes nothing. What a check means for the log is the caller's call: the
+/// same check serves a user standing at a button and the sweep below, and only
+/// one of them is entitled to speak for the account afterwards.
+#[must_use]
 pub fn check_account(
     account_id: &str,
     policy_path: Option<PathBuf>,
     presented_token: Option<&str>,
-) -> Result<String, String> {
-    let path = policy_path.ok_or("no policy document path available")?;
+) -> (HealthOutcome, String) {
+    match check_account_inner(account_id, policy_path, presented_token) {
+        Ok(summary) => (HealthOutcome::Ok, summary),
+        Err(failure) => failure,
+    }
+}
+
+/// The check proper, split out so every early return names its own outcome and
+/// [`check_account`] does nothing but unwrap it.
+fn check_account_inner(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+) -> Result<String, (HealthOutcome, String)> {
+    let path = policy_path.ok_or_else(|| unreachable("no policy document path available"))?;
     let text = std::fs::read_to_string(&path)
-        .map_err(|error| format!("policy document unreadable: {error}"))?;
-    let document = parse_policy_document(&text)?;
+        .map_err(|error| unreachable(format!("policy document unreadable: {error}")))?;
+    let document = parse_policy_document(&text).map_err(unreachable)?;
 
     // The check logs into the real mailbox, so it sits behind the same
     // pairing gate as the tools. The app passes its own key; a foreign
     // process invoking the flag gets the same refusal a tool call would.
-    if let Some(clients) = &document.clients {
-        match presented_token.map(sha256_hex) {
-            None => return Err(NOT_PAIRED.to_owned()),
-            Some(presented) => {
-                if !is_paired(clients, &presented) {
-                    return Err(KEY_REJECTED.to_owned());
-                }
-            }
-        }
-    }
+    pairing_gate(document.clients.as_deref(), presented_token).map_err(unreachable)?;
 
-    let accounts = document.accounts;
-    let account = accounts
+    // Found by the account's own id, not by whether it has a connection, so an
+    // account whose setup is unfinished is told apart from one nobody has ever
+    // heard of. The caller needs that difference: only one of the two is worth
+    // asking about again.
+    let account = document
+        .accounts
         .iter()
-        .find(|account| {
-            account
-                .imap
-                .as_ref()
-                .is_some_and(|config| config.account_id.as_str() == account_id)
-        })
-        .ok_or(format!("no IMAP configuration for account {account_id}"))?;
+        .find(|account| account.policy.account_id().as_str() == account_id)
+        .ok_or_else(|| {
+            unreachable(CoreError::AccountNotFound(AccountId::new(account_id)).to_string())
+        })?;
     let config = account
         .imap
         .as_ref()
-        .ok_or(format!("no IMAP configuration for account {account_id}"))?;
+        .ok_or_else(|| unreachable(unconfigured(account.policy.account_id()).to_string()))?;
 
     // The same credential path the tools take, token renewal included — so a
-    // green dot in the app means an assistant would get in too.
+    // green dot in the app means an assistant would get in too. From here on
+    // the mailbox itself is answering, so its failures classify.
     let secret =
-        resolve_credential(config, account.oauth.as_ref()).map_err(|error| error.to_string())?;
+        resolve_credential(config, account.oauth.as_ref()).map_err(|error| classify(&error))?;
     let provider =
-        torromail_imap_tls::connect_account(config, &secret).map_err(|error| error.to_string())?;
+        torromail_imap_tls::connect_account(config, &secret).map_err(|error| classify(&error))?;
     let mailboxes = provider
         .list_mailboxes(&config.account_id)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| classify(&error))?;
 
     Ok(format!("login ok, {} mailboxes visible", mailboxes.len()))
+}
+
+/// A failure that happened before the mailbox got a word in: a missing
+/// document, a refused pairing, an account nobody configured. Never
+/// `Rejected` — none of these is the credentials, and the app must not accuse
+/// the password for something the password would not fix.
+fn unreachable(message: impl Into<String>) -> (HealthOutcome, String) {
+    (HealthOutcome::Unreachable, message.into())
+}
+
+/// A failure on the mailbox path, as an outcome and a message. Anything that
+/// is not a spoken refusal counts as unreachable — the safe side, because an
+/// unreachable account gets a grace period and a wrongly-accused password
+/// does not.
+fn classify(error: &CoreError) -> (HealthOutcome, String) {
+    (
+        HealthOutcome::from_error(error).unwrap_or(HealthOutcome::Unreachable),
+        error.to_string(),
+    )
+}
+
+/// Whether the caller may make this server log into a real mailbox. The
+/// document's allowlist is the whole rule, and it is enforced identically for
+/// a tool call, a check and a sweep — see `client_gate` for the same decision
+/// on the stdio path.
+fn pairing_gate(
+    clients: Option<&[DocumentClient]>,
+    presented_token: Option<&str>,
+) -> Result<(), &'static str> {
+    let Some(clients) = clients else {
+        return Ok(());
+    };
+    match presented_token.map(sha256_hex) {
+        None => Err(NOT_PAIRED),
+        Some(presented) if is_paired(clients, &presented) => Ok(()),
+        Some(_) => Err(KEY_REJECTED),
+    }
+}
+
+/// Check every configured account once as the server comes up, skipping any
+/// checked in the last [`health::SERVER_START_WINDOW`] seconds. Without the
+/// debounce, five paired clients each spawning their own server process would
+/// mean five logins per account on every launch.
+///
+/// This is the only thing that proves an account when the app is closed: an
+/// MCP client can start this server on its own, and until the first tool call
+/// touches a mailbox nothing else would ever say whether the login still
+/// works.
+///
+/// Best-effort and silent throughout: a server must start and serve tools
+/// whatever the mailboxes are doing, so nothing here is reported and nothing
+/// here can fail a request.
+///
+/// Slow by nature — a TLS handshake and a login per account, with no timeout
+/// underneath either. The server runs it on a thread of its own for exactly
+/// that reason; see `main.rs`.
+pub fn sweep_account_health(policy_path: Option<PathBuf>, presented_token: Option<&str>) {
+    // No document is fixture mode: no accounts, nothing to prove, and no
+    // folder to write a log into.
+    let Some(path) = policy_path else {
+        return;
+    };
+    let Some(health_path) = path.parent().map(|dir| dir.join("health.jsonl")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(document) = parse_policy_document(&text) else {
+        return;
+    };
+    // Judged once here rather than per account. An unpaired client's server
+    // would otherwise fail every check on the gate — a refusal that says
+    // nothing about any mailbox — and write a log full of `unreachable` that
+    // takes every dot down with it.
+    if pairing_gate(document.clients.as_deref(), presented_token).is_err() {
+        return;
+    }
+
+    let records = health::load(&health_path);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+
+    for account in &document.accounts {
+        // An account the wizard never finished has nothing to check, and
+        // saying "unreachable" about it would be an alarm about unfinished
+        // setup — see `unconfigured`.
+        if account.imap.is_none() {
+            continue;
+        }
+        let id = account.policy.account_id().as_str();
+        if !health::needs_check(&records, id, now, health::SERVER_START_WINDOW) {
+            continue;
+        }
+        // The document is re-read per account rather than threaded through, so
+        // a check is one thing with one definition. It is a small local file
+        // and this runs once per server, off the path of every call.
+        let (outcome, detail) = check_account(id, Some(path.clone()), presented_token);
+        health::append(&health_path, id, outcome, "server-start", &detail);
+    }
 }
 
 /// The product default until the app has published permissions: read and

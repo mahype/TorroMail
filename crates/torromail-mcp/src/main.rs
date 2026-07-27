@@ -52,17 +52,43 @@ fn main() -> io::Result<()> {
             eprintln!("--check-account needs an account id");
             std::process::exit(2);
         };
-        match torromail_mcp::check_account(account_id, policy_path(), presented_token.as_deref()) {
-            Ok(summary) => {
-                println!("{summary}");
-                return Ok(());
-            }
-            Err(message) => {
-                eprintln!("{message}");
-                std::process::exit(1);
-            }
+        let (outcome, message) =
+            torromail_mcp::check_account(account_id, policy_path(), presented_token.as_deref());
+        if outcome == torromail_mcp::health::HealthOutcome::Ok {
+            println!("{message}");
+            return Ok(());
         }
+        // Two-part stderr: the outcome word on its own first line, the reason
+        // after it. The app reads the first line to tell a wrong password from
+        // a dead network without parsing prose, and matches it exactly — so
+        // nothing may pad or precede it. The exit status keeps its older
+        // meaning either way, for callers that only ever read that.
+        eprintln!("{}", outcome.as_str());
+        eprintln!("{message}");
+        std::process::exit(1);
     }
+
+    // Prove the accounts before the first tool call needs them, so the app's
+    // dots are current even when a client — not the app — started us.
+    //
+    // On a thread of its own, because the client that spawned this process is
+    // already waiting for its `initialize` answer and the sweep is a TLS
+    // handshake and a login per account with no timeout beneath either: an
+    // unroutable host costs the whole TCP connect timeout, and a handful of
+    // accounts would hold the handshake past the point where a client gives up
+    // — a health feature that broke mail access.
+    //
+    // Nothing joins it. A process whose client has gone must go with it rather
+    // than linger to finish logging in, so the thread simply dies with the
+    // stdio loop; a sweep cut short leaves those accounts due, and the next
+    // server to start picks them up. Every write it does is a whole short line
+    // appended under `O_APPEND`, so an exit mid-sweep costs at most the record
+    // that was not written yet, never a torn one.
+    let sweep_policy_path = policy_path();
+    let sweep_token = presented_token.clone();
+    std::thread::spawn(move || {
+        torromail_mcp::sweep_account_health(sweep_policy_path, sweep_token.as_deref());
+    });
 
     let server = match policy_path() {
         Some(path) => LineMcpServer::with_policy_path(path),

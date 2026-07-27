@@ -1303,10 +1303,10 @@ fn an_xoauth2_account_is_accepted_and_reaches_the_keychain() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("gmail", Some(path.clone()), None)
-        .expect_err("no token is stored for this account");
+    let (outcome, error) = torromail_mcp::check_account("gmail", Some(path.clone()), None);
     std::fs::remove_file(&path).ok();
 
+    assert_ne!(outcome, torromail_mcp::health::HealthOutcome::Ok);
     assert!(
         error.contains("keychain"),
         "should fail at the secret, not before it — got: {error}"
@@ -1324,8 +1324,7 @@ fn an_xoauth2_account_without_renewal_facts_is_refused() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("gmail", Some(path.clone()), None)
-        .expect_err("an xoauth2 block without a token endpoint must not parse");
+    let (_, error) = torromail_mcp::check_account("gmail", Some(path.clone()), None);
     std::fs::remove_file(&path).ok();
 
     assert!(error.contains("token_endpoint"), "got: {error}");
@@ -1342,8 +1341,7 @@ fn an_unknown_auth_mechanism_is_refused_rather_than_guessed_at() {
     )
     .expect("policy document written");
 
-    let error = torromail_mcp::check_account("work", Some(path.clone()), None)
-        .expect_err("an unknown mechanism must not fall back to a password");
+    let (_, error) = torromail_mcp::check_account("work", Some(path.clone()), None);
     std::fs::remove_file(&path).ok();
 
     assert!(error.contains("ntlm"), "got: {error}");
@@ -1529,23 +1527,138 @@ fn check_account_sits_behind_the_pairing_gate() {
     )
     .expect("policy document written");
 
-    let unpaired = torromail_mcp::check_account("work", Some(path.clone()), None)
-        .expect_err("no key, no login check");
-    let wrong = torromail_mcp::check_account(
+    let (_, unpaired) = torromail_mcp::check_account("work", Some(path.clone()), None);
+    let (_, wrong) = torromail_mcp::check_account(
         "work",
         Some(path.clone()),
         Some("torro_intruder_ffffffffffffffffffffffffffffffff"),
-    )
-    .expect_err("a wrong key must not reach the mailbox");
+    );
     // The right key passes the gate and fails at the (absent) keychain
     // secret — proof the gate, not the account, was what refused above.
-    let through = torromail_mcp::check_account("work", Some(path.clone()), Some(TEST_KEY))
-        .expect_err("no secret is stored for this account");
+    let (_, through) = torromail_mcp::check_account("work", Some(path.clone()), Some(TEST_KEY));
     std::fs::remove_file(&path).ok();
 
     assert!(unpaired.contains("not paired"), "got: {unpaired}");
     assert!(wrong.contains("revoked or is not valid"), "got: {wrong}");
     assert!(through.contains("keychain"), "got: {through}");
+}
+
+// --- What a check reports -------------------------------------------------
+//
+// `check_account` answers with an outcome as well as a message, and the app
+// turns that outcome into a status dot: `rejected` goes red at once, while
+// `unreachable` earns a grace period first. These pin which failures are
+// allowed to accuse the user's password.
+
+/// A document naming `work` with a connection whose secret is not in any
+/// keychain, so a check gets as far as the credential and no further.
+fn checkable_account_document(path: &std::path::Path, clients: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"headers","write":{{}},"send":false,"per_folder":false,"folder_rules":{{}},"imap":{{"host":"imap.example.com","port":993,"username":"w","secret_ref":"keychain://TorroMail/torromail-absent-test-account"}}}}]{clients}}}"#
+        ),
+    )
+    .expect("policy document written");
+}
+
+/// Every way a check can fail before it reaches the mailbox. None of them is
+/// the password, and reporting one as `rejected` would turn the dot red for
+/// good over a document the app is about to rewrite anyway.
+#[test]
+fn a_configuration_problem_is_never_reported_as_a_rejected_password() {
+    use torromail_mcp::health::HealthOutcome;
+
+    let path = temp_policy_path("check-configuration");
+    checkable_account_document(
+        &path,
+        &format!(r#","clients":[{{"id":"test-client","token_sha256":"{TEST_KEY_SHA256}"}}]"#),
+    );
+    let unknown = temp_policy_path("check-absent");
+    std::fs::remove_file(&unknown).ok();
+
+    let cases = [
+        (
+            "no document path",
+            torromail_mcp::check_account("work", None, None),
+        ),
+        (
+            "an unreadable document",
+            torromail_mcp::check_account("work", Some(unknown), None),
+        ),
+        (
+            "a refused pairing",
+            torromail_mcp::check_account("work", Some(path.clone()), None),
+        ),
+        (
+            "an account the document does not name",
+            torromail_mcp::check_account("ghost", Some(path.clone()), Some(TEST_KEY)),
+        ),
+    ];
+    std::fs::remove_file(&path).ok();
+
+    for (what, (outcome, message)) in cases {
+        assert_eq!(
+            outcome,
+            HealthOutcome::Unreachable,
+            "{what} must not accuse the password — said: {message}"
+        );
+    }
+}
+
+/// The whole point of the second return value: the caller needs to know an
+/// account whose setup was never finished from one whose server said no.
+#[test]
+fn an_account_with_no_connection_says_so_rather_than_reporting_it_missing() {
+    let path = temp_policy_path("check-unconfigured");
+    // The same document the fixture tests use: `work` exists, its setup does
+    // not.
+    fixture_account_document(&path);
+
+    let (outcome, message) = torromail_mcp::check_account("work", Some(path.clone()), None);
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(outcome, torromail_mcp::health::HealthOutcome::Unreachable);
+    assert!(
+        message.contains("no connection configured"),
+        "an unfinished account is told apart from an unknown one: {message}"
+    );
+}
+
+/// The contract the app parses `--check-account` by, pinned end to end because
+/// it is a text protocol between two languages and a stray `eprintln!` on the
+/// way out would break it silently. The Swift side matches the first line
+/// against the outcome word exactly: pad it and the classification is lost.
+#[test]
+fn a_failed_check_writes_the_outcome_word_alone_on_the_first_stderr_line() {
+    let path = temp_policy_path("stderr-contract");
+    checkable_account_document(&path, "");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_torromail-mcp"))
+        .args(["--check-account", "work"])
+        .env("TORROMAIL_POLICY_PATH", &path)
+        .env_remove("TORROMAIL_TOKEN")
+        .output()
+        .expect("the check binary runs");
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        !output.status.success(),
+        "a check that could not log in must keep its non-zero exit status"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = stderr.lines();
+    assert_eq!(
+        lines.next(),
+        Some("unreachable"),
+        "the outcome word stands alone and unpadded — got: {stderr:?}"
+    );
+    assert!(
+        lines
+            .next()
+            .is_some_and(|reason| reason.contains("keychain")),
+        "the reason follows on its own lines — got: {stderr:?}"
+    );
 }
 
 // --- Audit log ------------------------------------------------------------
@@ -1935,6 +2048,34 @@ fn a_stale_session_that_the_retry_repairs_records_only_the_success() {
     assert_eq!(records[0].outcome, torromail_mcp::health::HealthOutcome::Ok);
 }
 
+/// A reviewer's find, and the one case where a failure must leave no trace at
+/// all. An account whose setup was never finished fails every call by
+/// construction; three of those in a row would turn the dot red and fire a
+/// desktop notification at a user who has simply not finished the wizard.
+#[test]
+fn an_account_whose_setup_is_unfinished_leaves_the_health_log_untouched() {
+    let dir = temp_audit_dir("health-unconfigured");
+    let policy = dir.join("policy.json");
+    // No `imap` block, and no fixture door either: this is the product's own
+    // reading of an account the wizard never finished.
+    fixture_account_document(&policy);
+
+    let server = LineMcpServer::with_policy_path(policy);
+    let response = server.handle_line(LIST_MAILBOXES).expect("a response");
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        response.contains("no connection configured"),
+        "the call still says what is missing: {response}"
+    );
+    assert!(
+        records.is_empty(),
+        "a setup gap is not a health signal: {records:?}"
+    );
+}
+
 #[test]
 fn a_session_that_stays_broken_records_one_failure_not_one_per_attempt() {
     let dir = temp_audit_dir("health-retry-failed");
@@ -1958,4 +2099,125 @@ fn a_session_that_stays_broken_records_one_failure_not_one_per_attempt() {
         records[0].outcome,
         torromail_mcp::health::HealthOutcome::Unreachable
     );
+}
+
+// --- The server-start sweep -----------------------------------------------
+//
+// An MCP client can start this server with the app closed, and then nothing
+// else would ever prove the accounts. The sweep checks them as the server
+// comes up — once, debounced, and never for an account that has nothing to
+// check.
+
+/// A document with one account whose secret is in no keychain, so a sweep
+/// reaches the credential and fails there — fast, and without a network.
+fn sweepable_document(path: &std::path::Path, clients: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"headers","write":{{}},"send":false,"per_folder":false,"folder_rules":{{}},"imap":{{"host":"imap.example.com","port":993,"username":"w","secret_ref":"keychain://TorroMail/torromail-absent-test-account"}}}}]{clients}}}"#
+        ),
+    )
+    .expect("policy document written");
+}
+
+#[test]
+fn the_sweep_records_every_account_that_is_due() {
+    let dir = temp_audit_dir("sweep-due");
+    let policy = dir.join("policy.json");
+    sweepable_document(&policy, "");
+
+    torromail_mcp::sweep_account_health(Some(policy), None);
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(records.len(), 1, "one account, one check: {records:?}");
+    // Named for who wrote it: the app reads the source to tell a check it
+    // asked for from one a client's server ran on its own.
+    assert_eq!(records[0].source, "server-start");
+    assert_eq!(
+        records[0].outcome,
+        torromail_mcp::health::HealthOutcome::Unreachable,
+        "a secret we could not read is not a password the server refused"
+    );
+}
+
+/// The debounce. Without it, five paired clients each starting their own
+/// server process would mean five logins per account on every launch — and
+/// providers notice.
+#[test]
+fn the_sweep_leaves_an_account_checked_moments_ago_alone() {
+    let dir = temp_audit_dir("sweep-debounced");
+    let policy = dir.join("policy.json");
+    sweepable_document(&policy, "");
+    // As if another process had just checked it.
+    torromail_mcp::health::append(
+        &dir.join("health.jsonl"),
+        "work",
+        torromail_mcp::health::HealthOutcome::Ok,
+        "server-start",
+        "fine",
+    );
+
+    torromail_mcp::sweep_account_health(Some(policy), None);
+
+    let records = health_records(&dir, "work");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(records.len(), 1, "no second check was run: {records:?}");
+    assert_eq!(records[0].outcome, torromail_mcp::health::HealthOutcome::Ok);
+}
+
+/// The same ruling as the tool-call path, one layer up: an account the wizard
+/// never finished has nothing to check, and a record saying so would walk it
+/// to a red dot.
+#[test]
+fn the_sweep_skips_an_account_with_no_connection_configured() {
+    let dir = temp_audit_dir("sweep-unconfigured");
+    let policy = dir.join("policy.json");
+    fixture_account_document(&policy);
+
+    torromail_mcp::sweep_account_health(Some(policy), None);
+
+    let wrote_anything = dir.join("health.jsonl").exists();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        !wrote_anything,
+        "an unfinished account is not swept, and not logged"
+    );
+}
+
+/// An unpaired client's server must sweep nothing. Every account would
+/// otherwise fail its check on the gate — a reason that has nothing to do with
+/// the mailbox — and the log would fill with unreachable records that take
+/// every dot down with them.
+#[test]
+fn an_unpaired_server_sweeps_nothing() {
+    let dir = temp_audit_dir("sweep-unpaired");
+    let policy = dir.join("policy.json");
+    sweepable_document(
+        &policy,
+        &format!(r#","clients":[{{"id":"test-client","token_sha256":"{TEST_KEY_SHA256}"}}]"#),
+    );
+
+    torromail_mcp::sweep_account_health(Some(policy.clone()), None);
+    torromail_mcp::sweep_account_health(
+        Some(policy),
+        Some("torro_intruder_ffffffffffffffffffffffffffffffff"),
+    );
+
+    let wrote_anything = dir.join("health.jsonl").exists();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        !wrote_anything,
+        "a key the document does not name logs nothing"
+    );
+}
+
+#[test]
+fn a_sweep_without_a_policy_document_does_nothing_rather_than_failing() {
+    // The fixture-mode server: no document, no accounts, nothing to prove.
+    torromail_mcp::sweep_account_health(None, None);
 }
