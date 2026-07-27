@@ -6,6 +6,7 @@
 //! mail action must never fail because a health line could not be written,
 //! and a missed sample costs at most one interval.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -65,16 +66,27 @@ pub struct HealthRecord {
     pub detail: String,
 }
 
-/// How many lines from the end are read. Far more than any rule needs — the
-/// app's three-strikes window is three — but cheap, and it keeps a long file
-/// from being parsed in full on every tick.
-const TAIL_LINES: usize = 200;
+/// How many records are kept **per account**. A global cap would let one busy
+/// account's records push another's off the end, and an account with no
+/// records falls back to the stale setup-time flag this log exists to replace
+/// — so a shared cap quietly restores the original bug under load. Twenty is
+/// well clear of the deepest rule downstream: the app looks three back for its
+/// three-strikes window, and further for the most recent non-`unreachable`
+/// record, which can sit a good way back during an outage.
+const RECORDS_PER_ACCOUNT: usize = 20;
 
 /// How recently an account must have been checked for a starting server to
 /// leave it alone. Five minutes: long enough that a burst of client launches
 /// produces one login per account, short enough that the first check after a
 /// quiet period is genuinely current.
 pub const SERVER_START_WINDOW: u64 = 300;
+
+/// How long a success silences further successes for the same account.
+/// Health is a status, not a transcript — `audit.jsonl` already records
+/// every call. Without this, one busy assistant session writes hundreds of
+/// identical "still fine" lines and crowds every other account out of the
+/// log.
+pub const OK_THROTTLE: u64 = 60;
 
 /// Append one record. Every error is swallowed: this is a sample, not a
 /// transaction.
@@ -103,18 +115,22 @@ pub fn append(path: &Path, account: &str, outcome: HealthOutcome, source: &str, 
     }
 }
 
-/// The tail of the log, oldest first. A missing file is no records; a line
-/// that does not parse, or carries an outcome word we do not know, is skipped
-/// rather than taken as fatal.
+/// The log's recent history, oldest first and still in file order, trimmed to
+/// the last [`RECORDS_PER_ACCOUNT`] records of each account. A missing file is
+/// no records; a line that does not parse, or carries an outcome word we do
+/// not know, is skipped rather than taken as fatal.
+///
+/// The whole file is read to get there. That is what the app's `AuditLog`
+/// already does with a busier log, and it is the only way to bound retention
+/// per account rather than per file.
 #[must_use]
 pub fn load(path: &Path) -> Vec<HealthRecord> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
-    let start = lines.len().saturating_sub(TAIL_LINES);
-    lines[start..]
-        .iter()
+    let parsed: Vec<HealthRecord> = text
+        .lines()
+        .filter(|line| !line.is_empty())
         .filter_map(|line| {
             let value: Value = serde_json::from_str(line).ok()?;
             Some(HealthRecord {
@@ -125,7 +141,47 @@ pub fn load(path: &Path) -> Vec<HealthRecord> {
                 detail: value["detail"].as_str().unwrap_or_default().to_owned(),
             })
         })
-        .collect()
+        .collect();
+
+    // Walked newest-first so each account's own last few are the ones kept,
+    // then flipped back: callers read file order, newest of an account last.
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut kept: Vec<HealthRecord> = parsed
+        .iter()
+        .rev()
+        .filter(|record| {
+            let count = seen.entry(record.account.as_str()).or_default();
+            *count += 1;
+            *count <= RECORDS_PER_ACCOUNT
+        })
+        .cloned()
+        .collect();
+    kept.reverse();
+    kept
+}
+
+/// Whether this outcome is worth writing, given what is already logged.
+/// Failures are never throttled: the first one is the entire point of the
+/// feature, and it must reach the app on the call it happened.
+#[must_use]
+pub fn is_worth_recording(
+    records: &[HealthRecord],
+    account: &str,
+    outcome: HealthOutcome,
+    now: u64,
+) -> bool {
+    if outcome != HealthOutcome::Ok {
+        return true;
+    }
+    // Only a success silences a success — throttling against a failure would
+    // delay the recovery that turns the account's dot green again.
+    !records
+        .iter()
+        .rev()
+        .find(|record| record.account == account)
+        .is_some_and(|latest| {
+            latest.outcome == HealthOutcome::Ok && now.saturating_sub(latest.ts) < OK_THROTTLE
+        })
 }
 
 /// Whether `account` is due for a check. Without this, every MCP client that
