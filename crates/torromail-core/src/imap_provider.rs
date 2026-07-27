@@ -196,10 +196,13 @@ enum RefusalKind {
 #[derive(Debug)]
 struct Refusal {
     kind: RefusalKind,
-    /// The RFC 5530 response code, uppercased and stripped of its brackets
-    /// and arguments — `AUTHENTICATIONFAILED` out of
-    /// `[AUTHENTICATIONFAILED]`. `None` when the server refused without
-    /// saying why, which is what plenty of servers do to a wrong password.
+    /// The RFC 5530 response code, as `response_code` reads it — but only
+    /// where it diagnoses something.
+    ///
+    /// `None` when the server refused without giving a *reason* — either it
+    /// sent no response code at all, which is what plenty of servers do to a
+    /// wrong password, or it sent only an alert marker, which says nothing
+    /// about the cause. See `is_human_alert`.
     code: Option<String>,
     /// Everything the server said in refusing, including any untagged
     /// `[ALERT]` sentence that came ahead of the tagged line. This text
@@ -209,7 +212,7 @@ struct Refusal {
 
 impl Refusal {
     /// Reads the remainder of a tagged answer — everything after `t3 ` — plus
-    /// the untagged `[ALERT]` line that may have preceded it.
+    /// the untagged alert line that may have preceded it.
     fn parse(rest: &str, alert: Option<&str>) -> Self {
         let word = rest.split_whitespace().next().unwrap_or_default();
         let kind = if word.eq_ignore_ascii_case("NO") {
@@ -218,14 +221,9 @@ impl Refusal {
             RefusalKind::Bad
         };
 
-        // The response code is only a response code where RFC 3501 puts it:
-        // straight after the `NO`/`BAD`. A `[` later in the sentence is prose.
-        let code = rest
-            .split_once(' ')
-            .and_then(|(_, remainder)| remainder.trim_start().strip_prefix('['))
-            .and_then(|bracketed| bracketed.split_once(']'))
-            .and_then(|(inside, _)| inside.split_whitespace().next())
-            .map(str::to_ascii_uppercase);
+        // An alert marker is not a diagnosis, so it is not kept as one: drop
+        // it and the refusal reads as the bare `NO` it effectively is.
+        let code = response_code(rest).filter(|code| !is_human_alert(code));
 
         let text = match alert {
             Some(alert) => format!("{rest} ({alert})"),
@@ -238,16 +236,29 @@ impl Refusal {
     /// Whether this refusal accuses the credentials — the question the two
     /// authentication paths ask, answered in one place so they cannot drift.
     ///
-    /// Only the codes that name an authentication problem count, plus a bare
-    /// `NO`, which is how a server that sends no response code at all says
-    /// "wrong password". Everything else is the server or the connection
-    /// having a problem of its own: `[UNAVAILABLE]` is RFC 5530's *temporary*
-    /// backend failure, `[PRIVACYREQUIRED]` means this connection wants TLS
-    /// first, `[ALERT]` is how Gmail throttles. Reporting those as a wrong
-    /// password is worse than saying nothing, because downstream a credential
-    /// rejection turns the account red on the first occurrence and notifies
-    /// the user, while a provider failure gets three strikes first. So an
-    /// unrecognised code lands on the transport side on purpose.
+    /// Only the codes that name an authentication problem count, plus a
+    /// refusal that named no reason at all, which is how most servers say
+    /// "wrong password". Any other *diagnosis* code is the server or the
+    /// connection having a problem of its own: `[UNAVAILABLE]` is RFC 5530's
+    /// *temporary* backend failure, `[PRIVACYREQUIRED]` means this connection
+    /// wants TLS first. Reporting those as a wrong password is worse than
+    /// saying nothing, because downstream a credential rejection turns the
+    /// account red on the first occurrence and notifies the user, while a
+    /// provider failure gets three strikes first. So an unrecognised
+    /// diagnosis lands on the transport side on purpose.
+    ///
+    /// `[ALERT]` and `[WEBALERT]` are deliberately *not* treated as
+    /// diagnoses — `Refusal::parse` has already stripped them. RFC 3501
+    /// defines `ALERT` as "show this text to the human", which is a statement
+    /// about presentation and carries no information about why the command
+    /// failed. Reading it as one got Gmail's two permanent, user-must-act
+    /// answers exactly backwards: `NO [ALERT] Application-specific password
+    /// required` and `NO [WEBALERT <url>] Web login required` would have
+    /// collected three transport strikes and then reported an unreachable
+    /// server. The price of stripping them is that Gmail's `NO [ALERT] Too
+    /// many simultaneous connections` throttle goes red on the first strike —
+    /// a wrong answer that the next check corrects, traded against one that
+    /// never corrects itself.
     fn accuses_the_credentials(&self) -> bool {
         if self.kind == RefusalKind::Bad {
             return false;
@@ -261,11 +272,17 @@ impl Refusal {
         }
     }
 
-    /// The same refusal with every occurrence of `secret` blanked out. Only
-    /// the login path needs this, and only because `LOGIN` is the one command
-    /// whose arguments *are* the secret — a server that echoes the command it
-    /// could not parse would otherwise put the password in an error that
-    /// reaches a plaintext log on disk.
+    /// The same refusal with every occurrence of `secret` blanked out. Both
+    /// authentication commands carry their secret in an argument — `LOGIN` in
+    /// the clear, `AUTHENTICATE XOAUTH2` base64-wrapped — and a server that
+    /// echoes back the command it could not parse would otherwise put it in
+    /// an error that reaches a plaintext log on disk. The XOAUTH2 path has to
+    /// blank the blob as well as the raw token, because the blob decodes
+    /// straight back to it.
+    ///
+    /// Called after `parse`, never before: the classification reads `kind`
+    /// and `code`, so a secret that happens to look like a response code
+    /// cannot change the verdict by being redacted out of the text.
     fn with_secret_redacted(mut self, secret: &str) -> Self {
         if !secret.is_empty() {
             self.text = self.text.replace(secret, "***");
@@ -283,22 +300,65 @@ impl fmt::Display for Refusal {
 /// Turns a refusal to an authentication command into the error the rest of
 /// the app reasons about. Both authentication paths go through here so that
 /// what counts as a wrong password is decided exactly once.
+///
+/// The wording follows the verdict, because this string is shown to the user
+/// verbatim. "Rejected" is only said where the credentials really were
+/// rejected — telling someone whose server is merely having a bad day that
+/// their login was rejected invites exactly the conclusion the
+/// classification above exists to prevent.
 fn authentication_error(refusal: &Refusal, what: &str) -> CoreError {
-    let message = format!("IMAP rejected the {what}: {refusal}");
     if refusal.accuses_the_credentials() {
-        CoreError::CredentialRejected(message)
+        CoreError::CredentialRejected(format!("IMAP rejected the {what}: {refusal}"))
     } else {
-        CoreError::ProviderFailure(message)
+        CoreError::ProviderFailure(format!("IMAP could not check the {what}: {refusal}"))
     }
+}
+
+/// The response code of a `NO`/`BAD`/`OK`/`BYE` answer, uppercased and
+/// stripped of its brackets and arguments — `AUTHENTICATIONFAILED` out of
+/// `[AUTHENTICATIONFAILED]`, `WEBALERT` out of `[WEBALERT <url>]`.
+///
+/// Positional on purpose: RFC 3501 puts the code straight after the
+/// condition word, so a `[` anywhere later is prose — a message subject, a
+/// mailbox name — and must not be read as a code.
+fn response_code(rest: &str) -> Option<String> {
+    rest.split_once(' ')
+        .and_then(|(_, remainder)| remainder.trim_start().strip_prefix('['))
+        .and_then(|bracketed| bracketed.split_once(']'))
+        .and_then(|(inside, _)| inside.split_whitespace().next())
+        .map(str::to_ascii_uppercase)
+}
+
+/// Whether `code` only means "show this text to the human". RFC 3501 defines
+/// `ALERT` that way and Gmail's `WEBALERT` follows it; neither says anything
+/// about *why* a command failed. One predicate for both places that care —
+/// the classification, which must not mistake it for a diagnosis, and the
+/// untagged capture below, which wants exactly these lines.
+fn is_human_alert(code: &str) -> bool {
+    matches!(code, "ALERT" | "WEBALERT")
 }
 
 /// The actionable sentence out of an untagged `* NO [ALERT] …`, which is
 /// where Gmail and Yahoo put the thing the user has to go and do
 /// ("Application-specific password required: <url>"). The tagged refusal
 /// that follows it is usually far less useful.
+///
+/// The alert has to sit where a response code goes, after the untagged
+/// condition word; the literal text "[ALERT]" inside a subject line is a
+/// real spam convention and must not be spliced into an unrelated error.
+/// Where a server sends several, the first is kept.
 fn untagged_alert(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("* ")?;
-    rest.contains("[ALERT]").then_some(rest)
+    let word = rest.split_whitespace().next()?;
+    if !matches!(
+        word.to_ascii_uppercase().as_str(),
+        "NO" | "BAD" | "OK" | "BYE"
+    ) {
+        return None;
+    }
+    response_code(rest)
+        .is_some_and(|code| is_human_alert(&code))
+        .then_some(rest)
 }
 
 /// One logged-in IMAP session speaking the smallest useful IMAP4rev1
@@ -401,9 +461,14 @@ impl<T: ImapTransport> ImapClient<T> {
                 }
                 // The same verdict the password path uses. A rejected token is
                 // a credential problem, but `NO [UNAVAILABLE]` on this command
-                // is no more the token's fault than it is a password's.
+                // is no more the token's fault than it is a password's. The
+                // blob is redacted alongside the raw token because a server
+                // echoing the command it could not parse hands back the one
+                // that decodes into the other.
                 return Err(authentication_error(
-                    &Refusal::parse(rest, alert.as_deref()),
+                    &Refusal::parse(rest, alert.as_deref())
+                        .with_secret_redacted(access_token)
+                        .with_secret_redacted(&initial),
                     "access token",
                 ));
             }

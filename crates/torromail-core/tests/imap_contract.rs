@@ -977,3 +977,177 @@ fn a_server_that_echoes_the_login_does_not_get_the_password_into_the_error() {
     assert!(!message.contains("hunter2"), "secret leaked: {message}");
     assert!(message.contains("***"), "got: {message}");
 }
+
+#[test]
+fn gmail_asking_for_an_app_specific_password_is_a_credential_problem() {
+    // 2FA without an app password. Permanent, and only the user can fix it —
+    // the ALERT marker says "show this to a human", not "the server is fine".
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line(
+            "t1 NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833 (Failure)",
+        ),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "plain-password",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::CredentialRejected(_))),
+        "an account that needs an app password will never fix itself"
+    );
+}
+
+#[test]
+fn gmail_demanding_a_web_sign_in_is_a_credential_problem() {
+    // The code carries a URL inside the brackets, so only the code word may
+    // be matched.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO [WEBALERT https://accounts.google.com/signin/continue] Web login required"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "plain-password",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::CredentialRejected(_))),
+        "a demand for a web sign-in is the user's to act on, not the network's"
+    );
+}
+
+#[test]
+fn an_unknown_diagnosis_code_still_lands_on_the_transport_side() {
+    // Stripping the alert markers must not turn into "anything unrecognised
+    // is a wrong password". A code that does diagnose, but not an
+    // authentication problem, keeps its three strikes.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO [INUSE] Mailbox is locked by another session"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "an unrecognised diagnosis must not be read as a wrong password"
+    );
+}
+
+#[test]
+fn a_failure_that_spares_the_credentials_does_not_say_they_were_rejected() {
+    // The app shows this sentence to the user verbatim. Telling someone their
+    // login was rejected is the one reading a temporary backend failure must
+    // not invite.
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO [UNAVAILABLE] Temporary authentication failure"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    let message = match result {
+        Ok(_) => panic!("login must fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        !message.contains("rejected"),
+        "nothing was rejected here: {message}"
+    );
+    assert!(
+        message.contains("Temporary authentication failure"),
+        "got: {message}"
+    );
+}
+
+#[test]
+fn an_alert_in_a_subject_line_is_not_an_alert() {
+    // "[ALERT]" is a real spam-subject convention. Untagged prose that merely
+    // contains it must not be spliced into an unrelated error.
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"[ALERT] Free money inside\""),
+        line("t2 NO LIST failed"),
+    ]);
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds")
+    .list_mailboxes();
+
+    let message = match result {
+        Ok(_) => panic!("the LIST must fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        !message.contains("Free money"),
+        "unrelated prose leaked into the error: {message}"
+    );
+}
+
+#[test]
+fn an_echoed_xoauth2_blob_does_not_carry_the_token_into_the_error() {
+    // The blob is base64 of the token, so echoing it back leaks the token to
+    // anyone who reads the log. This is the exact blob for the user and token
+    // below, as pinned by `xoauth2_sends_the_bearer_blob_and_logs_in`.
+    let blob = "dXNlcj1tZUBnbWFpbC5jb20BYXV0aD1CZWFyZXIgeWEyOS50b2tlbgEB";
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line(&format!(
+            "t1 BAD Error in IMAP command AUTHENTICATE: {blob}"
+        )),
+    ];
+    let result = ImapClient::connect_with(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "ya29.token",
+        ImapAuth::XOAuth2,
+    );
+
+    let message = match result {
+        Ok(_) => panic!("the token must not authenticate"),
+        Err(error) => error.to_string(),
+    };
+    assert!(!message.contains(blob), "the blob leaked: {message}");
+    assert!(
+        !message.contains("ya29.token"),
+        "the token leaked: {message}"
+    );
+    assert!(message.contains("***"), "got: {message}");
+}
+
+#[test]
+fn an_echoed_raw_token_does_not_reach_the_error_either() {
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO Invalid credentials for token ya29.token (Failure)"),
+    ];
+    let result = ImapClient::connect_with(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "ya29.token",
+        ImapAuth::XOAuth2,
+    );
+
+    let message = match result {
+        Ok(_) => panic!("the token must not authenticate"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        !message.contains("ya29.token"),
+        "the token leaked: {message}"
+    );
+    assert!(message.contains("***"), "got: {message}");
+}
