@@ -458,6 +458,9 @@ struct TorroMailApp: App {
     /// of them into a status dot.
     @State private var healthWatcher = AuditWatcher(url: try? HealthLog.defaultURL())
     @State private var healthMonitor = AccountHealthMonitor()
+    /// Turns the dots the watcher moves into something the user hears about
+    /// while looking at something else entirely.
+    @State private var healthNotifier = HealthNotifier()
 
     init() {
         // Before any keychain access: the app never shows the consent dialog.
@@ -512,6 +515,15 @@ struct TorroMailApp: App {
                     // Whatever the log already says wins over the state file:
                     // the dots must be current before the first check lands.
                     model.applyHealth()
+                    // Baseline *after* that derivation, never before it. The
+                    // state file cannot store "broken": it round-trips an
+                    // account through `isVerified`, so a failed one comes back
+                    // as "not tested yet" — and seeding from the restored
+                    // accounts would therefore read every standing problem as
+                    // a fresh break and announce it, on every single launch.
+                    // What the log says at launch is what the user last saw,
+                    // and the only baseline that is not a lie.
+                    healthNotifier.seed(accounts: model.accounts)
                     healthMonitor.update(
                         accountIDs: model.checkableAccountIDs,
                         executableName: model.generalSettings.mcpExecutable
@@ -539,6 +551,12 @@ struct TorroMailApp: App {
                         accountIDs: model.checkableAccountIDs,
                         executableName: model.generalSettings.mcpExecutable
                     )
+                    // Last, and here rather than anywhere nearer the watcher:
+                    // this is the one place every route to a changed dot —
+                    // the log, a manual test, the wizard — has already
+                    // converged, so a crossing is seen once however it came
+                    // about.
+                    healthNotifier.reconcile(accounts: accounts)
                 }
                 .onChange(of: model.generalSettings) { _, settings in
                     persistState(accounts: model.accounts, settings: settings)

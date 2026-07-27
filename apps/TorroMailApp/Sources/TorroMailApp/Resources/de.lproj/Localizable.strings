@@ -295,3 +295,7 @@
 "Please include the version above when you report something." = "Gib bei einer Meldung bitte die Version oben mit an.";
 "Diagnostics" = "Diagnose";
 "Every action an assistant takes is recorded in the log — that is the first place to look when something went differently than expected." = "Jede Aktion eines Assistenten steht im Protokoll — dort schaust du zuerst nach, wenn etwas anders lief als erwartet.";
+
+/* Account health */
+"TorroMail can no longer reach this account." = "TorroMail erreicht dieses Konto nicht mehr.";
+"Reachable again." = "Wieder erreichbar.";
