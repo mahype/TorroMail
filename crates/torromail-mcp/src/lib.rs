@@ -22,7 +22,7 @@ use torromail_core::{
 use torromail_oauth::TokenSet;
 
 // `health` itself is this file's own module, already in scope.
-use crate::health::HealthOutcome;
+use crate::health::{HealthOutcome, HealthThrottle};
 use crate::policy_document::{
     DocumentAccount, DocumentClient, OAuthFacts, ParsedDocument, parse_policy_document,
 };
@@ -358,6 +358,10 @@ pub struct LineMcpServer {
     pending: RefCell<PendingActions>,
     /// Drafts composed this session, so `prepare_send` can name one by id.
     drafts: RefCell<DraftCache>,
+    /// The last health outcome recorded per account, so the throttle on the
+    /// tool-call path costs a map lookup rather than a read of the whole log.
+    /// `RefCell` for the same reason as `connections`.
+    health_throttle: RefCell<HealthThrottle>,
     /// SHA-256 of the access key the spawning client presented via
     /// `TORROMAIL_TOKEN` — hashed once at startup, the plaintext is not kept.
     /// Checked per tool call against the document's `clients` allowlist, so
@@ -394,6 +398,7 @@ impl LineMcpServer {
             sessions: RefCell::default(),
             pending: RefCell::default(),
             drafts: RefCell::default(),
+            health_throttle: RefCell::default(),
             presented_token_hash: None,
             connect_override: None,
             audit_path: None,
@@ -668,7 +673,13 @@ impl LineMcpServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default();
-        if !health::is_worth_recording(&health::load(path), account, outcome, now) {
+        // Bound to a local so the borrow ends here rather than spanning the
+        // append below.
+        let admitted = self
+            .health_throttle
+            .borrow_mut()
+            .admit(account, outcome, now);
+        if !admitted {
             return;
         }
         health::append(path, account, outcome, "tool-call", detail);

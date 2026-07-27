@@ -3,10 +3,18 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use torromail_mcp::health::{self, HealthOutcome};
+use torromail_core::CoreError;
+use torromail_mcp::health::{self, HealthOutcome, HealthThrottle};
 
+/// Scoped by process id like the helpers in `tool_contract.rs`: two concurrent
+/// test processes sharing one path would each see the other's records, and the
+/// per-account count assertions would break for reasons having nothing to do
+/// with the code under test.
 fn temp_path(name: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("torromail-health-{name}.jsonl"));
+    let path = std::env::temp_dir().join(format!(
+        "torromail-health-{}-{name}.jsonl",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     path
 }
@@ -129,15 +137,124 @@ fn records_come_back_in_file_order() {
     );
 }
 
+/// A long `detail` is cut, so the short-line assumption the append's atomicity
+/// rests on holds by construction. Multi-byte throughout, because cutting by
+/// bytes would slice a character in half and the line would not parse back.
 #[test]
-fn a_success_soon_after_a_success_is_not_worth_recording() {
-    let path = temp_path("throttle-ok");
+fn an_overlong_detail_is_truncated_and_still_reads_back() {
+    let path = temp_path("long-detail");
+    let shouted = "ä".repeat(5_000);
+    health::append(
+        &path,
+        "work",
+        HealthOutcome::Rejected,
+        "tool-call",
+        &shouted,
+    );
+
+    let records = health::load(&path);
+    assert_eq!(records.len(), 1, "the truncated line is still valid JSON");
+    assert!(
+        records[0].detail.chars().count() < shouted.chars().count(),
+        "the detail was cut down"
+    );
+    assert!(
+        shouted.starts_with(&records[0].detail),
+        "what survives is the front of the message, not a mangled slice"
+    );
+}
+
+// --- the throttle rule -------------------------------------------------
+
+#[test]
+fn a_repeat_of_the_same_outcome_is_throttled() {
+    let mut throttle = HealthThrottle::default();
+
+    assert!(
+        throttle.admit("work", HealthOutcome::Ok, 1_000),
+        "the first record for an account is always admitted"
+    );
+    assert!(
+        !throttle.admit("work", HealthOutcome::Ok, 1_030),
+        "a second 'still fine' inside the window says nothing new"
+    );
+    assert!(
+        throttle.admit("other", HealthOutcome::Ok, 1_030),
+        "the throttle is per account, not global"
+    );
+}
+
+/// The failure case the reviewer found: before this rule, only successes were
+/// capped, so an account failing inside a retry loop wrote a line per call.
+#[test]
+fn a_repeated_failure_is_throttled_too() {
+    let mut throttle = HealthThrottle::default();
+
+    assert!(throttle.admit("work", HealthOutcome::Unreachable, 1_000));
+    assert!(
+        !throttle.admit("work", HealthOutcome::Unreachable, 1_030),
+        "a retry loop against a down server does not fill the log"
+    );
+}
+
+#[test]
+fn a_repeat_past_the_throttle_is_admitted_again() {
+    let mut throttle = HealthThrottle::default();
+
+    assert!(throttle.admit("work", HealthOutcome::Ok, 1_000));
+    assert!(
+        throttle.admit("work", HealthOutcome::Ok, 1_000 + health::REPEAT_THROTTLE),
+        "past the window the same outcome is a fresh sample again"
+    );
+}
+
+/// Every transition, in both directions and inside the throttle window. This
+/// is the property that makes the throttle safe: it caps steady states without
+/// ever delaying news.
+#[test]
+fn a_change_of_outcome_is_never_throttled() {
+    let mut throttle = HealthThrottle::default();
+
+    assert!(throttle.admit("work", HealthOutcome::Ok, 1_000));
+    assert!(
+        throttle.admit("work", HealthOutcome::Rejected, 1_001),
+        "the first failure reaches the app on the call it happened"
+    );
+    assert!(
+        throttle.admit("work", HealthOutcome::Unreachable, 1_002),
+        "one failure kind changing to another is still news"
+    );
+    assert!(
+        throttle.admit("work", HealthOutcome::Ok, 1_003),
+        "and so is the recovery that turns the dot green again"
+    );
+}
+
+/// `admit` records the decision itself, so a caller cannot admit twice and
+/// silently defeat the throttle by forgetting to write down what it did.
+#[test]
+fn admitting_records_the_decision() {
+    let mut throttle = HealthThrottle::default();
+
+    assert!(throttle.admit("work", HealthOutcome::Ok, 1_000));
+    assert!(!throttle.admit("work", HealthOutcome::Ok, 1_000));
+}
+
+/// The same rule read off a loaded log rather than off in-process state. Both
+/// forms must agree, since a restarted process falls back to this one.
+#[test]
+fn the_log_form_of_the_rule_agrees_with_the_throttle() {
+    let path = temp_path("throttle-log");
     health::append(&path, "work", HealthOutcome::Ok, "tool-call", "fine");
     let records = health::load(&path);
 
     assert!(
         !health::is_worth_recording(&records, "work", HealthOutcome::Ok, now()),
-        "a second 'still fine' seconds later says nothing new"
+        "a repeat seconds later is throttled"
+    );
+    assert!(
+        health::is_worth_recording(&records, "work", HealthOutcome::Rejected, now()),
+        "a change is not"
     );
     assert!(
         health::is_worth_recording(&records, "other", HealthOutcome::Ok, now()),
@@ -145,55 +262,76 @@ fn a_success_soon_after_a_success_is_not_worth_recording() {
     );
 }
 
+/// Pins a deliberate choice: "last" means the most recent record, not the most
+/// recent record *of this outcome*. With an `Ok` still inside the window but a
+/// failure after it, the recovery is news and must be written — the variant
+/// that searches back for the newest `Ok` would suppress it and leave the dot
+/// red for up to a minute after the account came back.
 #[test]
-fn a_success_past_the_throttle_is_worth_recording_again() {
-    let path = temp_path("throttle-expired");
-    health::append(&path, "work", HealthOutcome::Ok, "tool-call", "fine");
-    let records = health::load(&path);
+fn a_recovery_is_recorded_even_with_an_earlier_success_still_in_the_window() {
+    let mut throttle = HealthThrottle::default();
 
+    assert!(throttle.admit("work", HealthOutcome::Ok, 1_000));
+    assert!(throttle.admit("work", HealthOutcome::Unreachable, 1_005));
     assert!(
-        health::is_worth_recording(
-            &records,
-            "work",
-            HealthOutcome::Ok,
-            now() + health::OK_THROTTLE + 1
-        ),
-        "past the throttle a success is a fresh sample again"
+        throttle.admit("work", HealthOutcome::Ok, 1_010),
+        "the recovery is written though the earlier success is 10s old"
     );
 }
 
-/// The case where throttling would be a bug rather than an optimisation: the
-/// first failure is the entire point of the feature and must reach the app on
-/// the call it happened, however recently we said the account was fine.
+/// The same deviation, against a log. It needs its own test: `HealthThrottle`
+/// keeps only the single last outcome, so it *cannot* express the "newest
+/// `Ok`" variant, whereas the log form has every record to hand and could.
 #[test]
-fn a_failure_is_never_throttled_by_a_recent_success() {
-    let path = temp_path("throttle-failure");
+fn the_log_form_records_a_recovery_with_an_earlier_success_still_in_the_window() {
+    let path = temp_path("recovery-log");
     health::append(&path, "work", HealthOutcome::Ok, "tool-call", "fine");
-    let records = health::load(&path);
-
-    assert!(
-        health::is_worth_recording(&records, "work", HealthOutcome::Rejected, now()),
-        "a rejection seconds after a success still gets written"
-    );
-    assert!(
-        health::is_worth_recording(&records, "work", HealthOutcome::Unreachable, now()),
-        "an outage seconds after a success still gets written"
-    );
-}
-
-/// Only a *success* silences a success. Throttling against a failure would
-/// delay the recovery that turns the dot green again.
-#[test]
-fn a_success_soon_after_a_failure_is_worth_recording() {
-    let path = temp_path("throttle-after-failure");
     health::append(&path, "work", HealthOutcome::Unreachable, "tool-call", "no");
     let records = health::load(&path);
 
     assert!(
         health::is_worth_recording(&records, "work", HealthOutcome::Ok, now()),
-        "the recovery is news even though it arrives seconds later"
+        "the last record is the outage, so the recovery is a change and is news"
     );
 }
+
+// --- what a failure says about an account ------------------------------
+
+/// The single place deciding between "accuse the user's password immediately"
+/// and "grant three strikes". Swapping these two arms is the kind of mistake
+/// that produces a red dot for a train tunnel.
+#[test]
+fn an_error_maps_to_the_outcome_its_handling_requires() {
+    assert_eq!(
+        HealthOutcome::from_error(&CoreError::CredentialRejected("bad password".to_owned())),
+        Some(HealthOutcome::Rejected),
+        "a refused login is the account's own problem and will not fix itself"
+    );
+    assert_eq!(
+        HealthOutcome::from_error(&CoreError::ProviderFailure("connection reset".to_owned())),
+        Some(HealthOutcome::Unreachable),
+        "a connection that failed on the way may well fix itself"
+    );
+}
+
+/// The `None` arm carries as much weight as the other two: an ordinary refusal
+/// is not a health signal, and recording one would turn a policy denial into
+/// an alarm about the user's password.
+#[test]
+fn an_ordinary_refusal_says_nothing_about_health() {
+    assert_eq!(
+        HealthOutcome::from_error(&CoreError::MessageNotFound("42".to_owned())),
+        None,
+        "a missing message is not an account problem"
+    );
+    assert_eq!(
+        HealthOutcome::from_error(&CoreError::GuiOnlyMutation),
+        None,
+        "a policy denial is not an account problem"
+    );
+}
+
+// --- the server-start debounce -----------------------------------------
 
 #[test]
 fn a_fresh_record_makes_a_check_unnecessary() {
@@ -202,11 +340,11 @@ fn a_fresh_record_makes_a_check_unnecessary() {
 
     let records = health::load(&path);
     assert!(
-        !health::needs_check(&records, "work", now(), 300),
+        !health::needs_check(&records, "work", now(), health::SERVER_START_WINDOW),
         "a record written seconds ago is fresh enough"
     );
     assert!(
-        health::needs_check(&records, "other", now(), 300),
+        health::needs_check(&records, "other", now(), health::SERVER_START_WINDOW),
         "an account with no record at all is always due"
     );
 }
@@ -218,7 +356,12 @@ fn a_stale_record_makes_a_check_due_again() {
     let records = health::load(&path);
 
     assert!(
-        health::needs_check(&records, "work", now() + 400, 300),
+        health::needs_check(
+            &records,
+            "work",
+            now() + health::SERVER_START_WINDOW + 1,
+            health::SERVER_START_WINDOW
+        ),
         "past the window the account is due again"
     );
 }

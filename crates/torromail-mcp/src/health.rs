@@ -81,12 +81,26 @@ const RECORDS_PER_ACCOUNT: usize = 20;
 /// quiet period is genuinely current.
 pub const SERVER_START_WINDOW: u64 = 300;
 
-/// How long a success silences further successes for the same account.
-/// Health is a status, not a transcript — `audit.jsonl` already records
-/// every call. Without this, one busy assistant session writes hundreds of
-/// identical "still fine" lines and crowds every other account out of the
-/// log.
-pub const OK_THROTTLE: u64 = 60;
+/// How long a repeat of the same outcome is silenced for one account. Health
+/// is a status, not a transcript — `audit.jsonl` already holds every call, and
+/// a second identical line thirty seconds later says nothing new. Only
+/// *repeats* are throttled: a change of outcome is written the moment it
+/// happens, so the first failure still reaches the app on the call it
+/// happened, and so does the recovery.
+///
+/// Clock skew is tolerated rather than corrected. Elapsed time is a
+/// `saturating_sub`, so a record dated in the future — a corrected clock, a
+/// log copied between machines — reads as zero elapsed and suppresses further
+/// records of that same outcome until real time catches up. Bounded by how far
+/// ahead the stamp was, self-clearing, and it never suppresses a *change* of
+/// outcome, which is the part that matters.
+pub const REPEAT_THROTTLE: u64 = 60;
+
+/// How much of `detail` is kept. The atomicity the append relies on holds for
+/// short lines; error strings are short in practice, but truncating makes that
+/// true by construction rather than by luck. Long enough for any provider
+/// message worth reading.
+const MAX_DETAIL_CHARS: usize = 300;
 
 /// Append one record. Every error is swallowed: this is a sample, not a
 /// transaction.
@@ -95,6 +109,9 @@ pub fn append(path: &Path, account: &str, outcome: HealthOutcome, source: &str, 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default();
+    // Taken by characters, not bytes, so a multi-byte message is never cut
+    // mid-character into something that will not round-trip as JSON.
+    let detail: String = detail.chars().take(MAX_DETAIL_CHARS).collect();
     let line = json!({
         "ts": ts,
         "account": account,
@@ -160,9 +177,26 @@ pub fn load(path: &Path) -> Vec<HealthRecord> {
     kept
 }
 
-/// Whether this outcome is worth writing, given what is already logged.
-/// Failures are never throttled: the first one is the entire point of the
-/// feature, and it must reach the app on the call it happened.
+/// The whole throttle rule, over nothing but the last outcome recorded for the
+/// account. Both entry points below funnel through here so the rule cannot
+/// drift between the in-memory path a tool call takes and the on-disk one.
+///
+/// Note what "last" means: the single most recent record, not the most recent
+/// record *of this outcome*. So a success arriving shortly after a failure is
+/// written even though an earlier success is still inside the window — the
+/// account is working again, and making the dot wait a minute to go green
+/// would be a bug dressed as an optimisation.
+fn worth_recording(last: Option<(u64, HealthOutcome)>, outcome: HealthOutcome, now: u64) -> bool {
+    match last {
+        None => true,
+        Some((ts, previous)) => previous != outcome || now.saturating_sub(ts) >= REPEAT_THROTTLE,
+    }
+}
+
+/// Whether this outcome is worth writing, judged against what is already in
+/// the log. The cold-path form, for a caller that has a loaded log in hand;
+/// anything on the path of a tool call wants [`HealthThrottle`] instead, which
+/// answers the same question without reading the file.
 #[must_use]
 pub fn is_worth_recording(
     records: &[HealthRecord],
@@ -170,18 +204,42 @@ pub fn is_worth_recording(
     outcome: HealthOutcome,
     now: u64,
 ) -> bool {
-    if outcome != HealthOutcome::Ok {
-        return true;
-    }
-    // Only a success silences a success — throttling against a failure would
-    // delay the recovery that turns the account's dot green again.
-    !records
+    let last = records
         .iter()
         .rev()
         .find(|record| record.account == account)
-        .is_some_and(|latest| {
-            latest.outcome == HealthOutcome::Ok && now.saturating_sub(latest.ts) < OK_THROTTLE
-        })
+        .map(|record| (record.ts, record.outcome));
+    worth_recording(last, outcome, now)
+}
+
+/// The last outcome recorded for each account, so the throttle needs no file
+/// read on the path a tool call takes. Empty in a fresh process, which costs
+/// exactly one unthrottled record per account per process — cheaper than
+/// parsing the log to learn something the process is about to know anyway.
+///
+/// This exists because the obvious alternative does not work. Consulting the
+/// log meant reading all of it on every eligible call — measured at 65 ms
+/// against a 100 000-line file, growing without bound, and quadratic in the
+/// case that matters most: an account failing inside a retry loop writes a
+/// line per call and re-reads everything each time. Reading only the file's
+/// tail would fix the cost and reintroduce the crowding-out bug, since a busy
+/// account floods any fixed window and a quiet account falls outside it.
+#[derive(Debug, Default)]
+pub struct HealthThrottle {
+    last: HashMap<String, (u64, HealthOutcome)>,
+}
+
+impl HealthThrottle {
+    /// Whether this outcome is worth writing. Records the decision when it
+    /// answers `true`, so a caller cannot forget to and silently defeat the
+    /// throttle.
+    pub fn admit(&mut self, account: &str, outcome: HealthOutcome, now: u64) -> bool {
+        if !worth_recording(self.last.get(account).copied(), outcome, now) {
+            return false;
+        }
+        self.last.insert(account.to_owned(), (now, outcome));
+        true
+    }
 }
 
 /// Whether `account` is due for a check. Without this, every MCP client that
