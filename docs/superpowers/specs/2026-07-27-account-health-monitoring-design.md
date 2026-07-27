@@ -106,8 +106,27 @@ decides:
 | --- | --- |
 | `NO [AUTHENTICATIONFAILED]`, `[AUTHORIZATIONFAILED]`, `[EXPIRED]` | `CredentialRejected` |
 | `NO` with no response code | `CredentialRejected` — the common shape, and no server says it about anything else |
+| `NO [ALERT]`, `[WEBALERT …]` | `CredentialRejected` — see below |
+| `NO` with any other response code | `ProviderFailure` — unknown means unknown, and the safe side is the one that costs three strikes rather than a wrong accusation |
 | `NO [UNAVAILABLE]`, `[PRIVACYREQUIRED]`, `[SERVERBUG]`, `[CONTACTADMIN]` | `ProviderFailure` — temporary, or a wrong transport setting |
 | any tagged `BAD` | `ProviderFailure` — a syntax or protocol fault, never a password |
+
+`ALERT` is the one code that must not be read as a diagnosis. RFC 3501 defines
+it as "show this text to the human" — it says nothing about why the command
+failed. Gmail's two permanent, user-must-act credential failures both wear it:
+`NO [ALERT] Application-specific password required: …` when an account has 2FA
+and no app password, and `NO [WEBALERT <url>] Web login required`. Filed under
+the unknown-code default, such an account would never go red — it would collect
+three transport strikes and then report an unreachable server for something
+that is neither transient nor about the network. So `ALERT` and `WEBALERT` are
+stripped and the answer falls through to the bare-`NO` reading. The price is
+that Gmail's `NO [ALERT] Too many simultaneous connections` throttle goes red on
+the first strike: a wrong answer that self-corrects at the next check, in place
+of one that never does.
+
+No mainstream server — Dovecot, Courier, Cyrus, Zimbra, Yahoo, iCloud, Outlook
+basic-auth — refuses a genuinely wrong password with a diagnosis code outside
+the three named above, so the unknown-code default costs nothing in practice.
 
 `PRIVACYREQUIRED` matters more here than its rarity suggests: this crate lets
 `ConnectionSecurity` be chosen independently of the port, so a wrongly
