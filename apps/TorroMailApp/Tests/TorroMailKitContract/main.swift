@@ -1079,4 +1079,116 @@ require(
     "brokenness feeds straight back in, reason carried through to the notification"
 )
 
+// MARK: - What the monitor does between checks
+
+/// Stands in for the real check. Counts what was asked for and how much of it
+/// happened at once, and takes as long as it is told to — a real check can hold
+/// the monitor for half a minute, and every decision worth pinning here is
+/// about what the monitor does while one is in flight.
+final class CheckSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked: [String] = []
+    private var live = 0
+    private var peak = 0
+    private let duration: TimeInterval
+
+    init(duration: TimeInterval) {
+        self.duration = duration
+    }
+
+    func check(_ accountID: String) -> AccountCheckResult {
+        lock.withLock {
+            asked.append(accountID)
+            live += 1
+            peak = max(peak, live)
+        }
+        if duration > 0 {
+            Thread.sleep(forTimeInterval: duration)
+        }
+        lock.withLock { live -= 1 }
+        return AccountCheckResult(outcome: .ok, detail: "")
+    }
+
+    var accountsAsked: [String] { lock.withLock { asked } }
+    var mostAtOnce: Int { lock.withLock { peak } }
+}
+
+func contractLog(_ name: String) -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+    try? FileManager.default.removeItem(at: url)
+    return url
+}
+
+// A pass is one login at a time, and every account it reaches lands in the log
+// as a periodic record — the file the dots are derived from, so a check nobody
+// wrote down changed nothing.
+let serialSpy = CheckSpy(duration: 0.05)
+let serialLog = contractLog("torromail-contract-monitor-serial.jsonl")
+let serialMonitor = AccountHealthMonitor(
+    interval: 0.2,
+    logURL: serialLog,
+    check: { accountID, _ in serialSpy.check(accountID) }
+)
+serialMonitor.update(accountIDs: ["work", "personal"], executableName: "torromail-mcp")
+serialMonitor.start()
+Thread.sleep(forTimeInterval: 0.3)
+serialMonitor.stop()
+require(
+    serialSpy.mostAtOnce == 1,
+    "accounts are checked one after another, never as a burst of simultaneous logins"
+)
+let serialRecords = HealthLog.load(from: serialLog)
+require(
+    Set(serialRecords.map(\.accountID)) == ["work", "personal"],
+    "every account the pass reached is written to the health log"
+)
+require(
+    serialRecords.allSatisfy { $0.source == "periodic" && $0.outcome == .ok },
+    "and written as what it was: a periodic check that succeeded"
+)
+
+// `cancel()` cannot interrupt a check already in flight, so a stopped monitor
+// has to notice between accounts. Without that, quitting the app leaves a pass
+// grinding through a list of half-minute timeouts nobody is waiting for.
+let stoppedSpy = CheckSpy(duration: 0.3)
+let stoppedMonitor = AccountHealthMonitor(
+    interval: 60,
+    logURL: contractLog("torromail-contract-monitor-stopped.jsonl"),
+    check: { accountID, _ in stoppedSpy.check(accountID) }
+)
+stoppedMonitor.update(accountIDs: ["one", "two", "three"], executableName: "torromail-mcp")
+stoppedMonitor.start()
+Thread.sleep(forTimeInterval: 0.1)
+stoppedMonitor.stop()
+Thread.sleep(forTimeInterval: 0.6)
+require(
+    stoppedSpy.accountsAsked == ["one"],
+    "a stopped pass abandons the accounts it has not reached yet"
+)
+
+// An empty executable name is a cleared text field, not a broken mailbox: it
+// must produce no record at all, and it must not be the end of the cadence
+// either, or configuring the binary later would never start the checks again.
+let configuredSpy = CheckSpy(duration: 0)
+let configuredLog = contractLog("torromail-contract-monitor-configured.jsonl")
+let configuredMonitor = AccountHealthMonitor(
+    interval: 0.1,
+    logURL: configuredLog,
+    check: { accountID, _ in configuredSpy.check(accountID) }
+)
+configuredMonitor.update(accountIDs: ["work"], executableName: "")
+configuredMonitor.start()
+Thread.sleep(forTimeInterval: 0.25)
+require(
+    configuredSpy.accountsAsked.isEmpty && HealthLog.load(from: configuredLog).isEmpty,
+    "with no executable configured nothing is checked and nothing is blamed on the account"
+)
+configuredMonitor.update(accountIDs: ["work"], executableName: "torromail-mcp")
+Thread.sleep(forTimeInterval: 0.3)
+configuredMonitor.stop()
+require(
+    !configuredSpy.accountsAsked.isEmpty,
+    "a pass with nothing it could check still schedules the next one"
+)
+
 print("TorroMailKit control-surface contract passed")
