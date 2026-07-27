@@ -7,8 +7,8 @@ use std::io::{Cursor, Read, Write};
 use std::rc::Rc;
 
 use torromail_core::{
-    AccountId, CoreResult, ImapAuth, ImapClient, ImapMailProvider, ImapTransport, MailProvider,
-    MarkChange, SearchHit, SearchWindow, StreamImapTransport,
+    AccountId, CoreError, CoreResult, ImapAuth, ImapClient, ImapMailProvider, ImapTransport,
+    MailProvider, MarkChange, SearchHit, SearchWindow, StreamImapTransport,
 };
 
 #[derive(Debug)]
@@ -736,4 +736,80 @@ fn a_date_only_search_needs_no_text_criterion() {
         .expect("search succeeds");
 
     assert_eq!(log.lines()[2], "t3 UID SEARCH SINCE 01-Jul-2026");
+}
+
+#[test]
+fn a_refused_password_is_a_credential_rejection_not_a_transport_failure() {
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("t1 NO [AUTHENTICATIONFAILED] Invalid credentials"),
+    ];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "wrong",
+    );
+
+    match result {
+        Ok(_) => panic!("login must fail"),
+        Err(CoreError::CredentialRejected(message)) => {
+            assert!(message.contains("Invalid credentials"), "got: {message}");
+        }
+        Err(other) => panic!("a refused login must be CredentialRejected, got: {other:?}"),
+    }
+}
+
+#[test]
+fn a_refused_token_is_a_credential_rejection_too() {
+    let script = vec![
+        line("* OK IMAP4rev1 server ready"),
+        line("+ eyJzdGF0dXMiOiI0MDEifQ=="),
+        line("t1 NO Invalid credentials (Failure)"),
+    ];
+    let result = ImapClient::connect_with(
+        ScriptedTransport::new(script, SentLog::default()),
+        "me@gmail.com",
+        "expired",
+        ImapAuth::XOAuth2,
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::CredentialRejected(_))),
+        "an expired token is a credential problem, not a transport one"
+    );
+}
+
+#[test]
+fn a_broken_greeting_stays_a_provider_failure() {
+    // Nothing was refused — we never got far enough to say a password. This
+    // is the case the three-strikes grace period exists for.
+    let script = vec![line("* BYE server too busy")];
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    );
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "a failure before authentication must not accuse the credentials"
+    );
+}
+
+#[test]
+fn a_refused_command_after_login_is_not_a_credential_problem() {
+    let mut script = login_script();
+    script.push(line("t2 NO LIST failed"));
+    let result = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds")
+    .list_mailboxes();
+
+    assert!(
+        matches!(result, Err(CoreError::ProviderFailure(_))),
+        "only the login command can produce a credential rejection"
+    );
 }

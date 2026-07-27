@@ -24,6 +24,11 @@ pub enum CoreError {
     },
     MessageNotFound(String),
     ProviderFailure(String),
+    /// The server spoke a refusal to the login command itself: a wrong
+    /// password, an expired app password, a rejected OAuth token. Kept apart
+    /// from `ProviderFailure` because the two need opposite handling — this
+    /// one will not fix itself, and retrying it is pointless.
+    CredentialRejected(String),
     PendingActionNotFound(String),
     PendingActionExpired(String),
     PendingActionAlreadyConfirmed(String),
@@ -45,6 +50,9 @@ impl Display for CoreError {
             }
             Self::MessageNotFound(id) => write!(f, "message not found: {id}"),
             Self::ProviderFailure(message) => write!(f, "mail provider failure: {message}"),
+            Self::CredentialRejected(message) => {
+                write!(f, "credentials rejected: {message}")
+            }
             Self::PendingActionNotFound(id) => write!(f, "pending action not found: {id}"),
             Self::PendingActionExpired(id) => write!(f, "pending action expired: {id}"),
             Self::PendingActionAlreadyConfirmed(id) => {

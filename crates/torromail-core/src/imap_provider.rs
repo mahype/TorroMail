@@ -239,11 +239,14 @@ impl<T: ImapTransport> ImapClient<T> {
     fn authenticate(&mut self, username: &str, secret: &str, auth: ImapAuth) -> CoreResult<()> {
         match auth {
             ImapAuth::Password => {
-                self.command(&format!(
+                self.command_answering(&format!(
                     "LOGIN {} {}",
                     imap_quoted(username),
                     imap_quoted(secret)
-                ))?;
+                ))?
+                .map_err(|refusal| {
+                    CoreError::CredentialRejected(format!("IMAP rejected the login: {refusal}"))
+                })?;
             }
             ImapAuth::XOAuth2 => self.authenticate_xoauth2(username, secret)?,
         }
@@ -273,7 +276,7 @@ impl<T: ImapTransport> ImapClient<T> {
                 if rest.starts_with("OK") {
                     return Ok(());
                 }
-                return Err(CoreError::ProviderFailure(format!(
+                return Err(CoreError::CredentialRejected(format!(
                     "IMAP rejected the access token: {rest}"
                 )));
             }
@@ -528,7 +531,15 @@ impl<T: ImapTransport> ImapClient<T> {
         Ok(())
     }
 
-    fn command(&mut self, command: &str) -> CoreResult<Vec<ResponseLine>> {
+    /// Sends `command` and reads until its tagged answer. The two failure
+    /// shapes stay apart on purpose: the outer `Err` is transport — the
+    /// connection broke on the way — while the inner `Err` is the server
+    /// speaking a tagged `NO` or `BAD`. Only a refusal the server actually
+    /// spoke can mean the credentials are wrong.
+    fn command_answering(
+        &mut self,
+        command: &str,
+    ) -> CoreResult<Result<Vec<ResponseLine>, String>> {
         self.next_tag += 1;
         let tag = format!("t{}", self.next_tag);
         self.transport.send_line(&format!("{tag} {command}"))?;
@@ -546,14 +557,18 @@ impl<T: ImapTransport> ImapClient<T> {
 
             if let Some(rest) = text.strip_prefix(&format!("{tag} ")) {
                 if rest.starts_with("OK") {
-                    return Ok(lines);
+                    return Ok(Ok(lines));
                 }
-                return Err(CoreError::ProviderFailure(format!(
-                    "IMAP command refused: {rest}"
-                )));
+                return Ok(Err(rest.to_owned()));
             }
             lines.push(ResponseLine { text, literals });
         }
+    }
+
+    fn command(&mut self, command: &str) -> CoreResult<Vec<ResponseLine>> {
+        self.command_answering(command)?.map_err(|refusal| {
+            CoreError::ProviderFailure(format!("IMAP command refused: {refusal}"))
+        })
     }
 }
 
