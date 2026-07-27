@@ -133,7 +133,7 @@ pub fn append(path: &Path, account: &str, outcome: HealthOutcome, source: &str, 
 }
 
 /// The log's recent history, oldest first and still in file order, trimmed to
-/// the last [`RECORDS_PER_ACCOUNT`] records of each account. A missing file is
+/// the last `RECORDS_PER_ACCOUNT` records of each account. A missing file is
 /// no records; a line that does not parse, or carries an outcome word we do
 /// not know, is skipped rather than taken as fatal.
 ///
