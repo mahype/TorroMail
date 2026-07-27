@@ -459,8 +459,9 @@ struct TorroMailApp: App {
     @State private var healthWatcher = AuditWatcher(url: try? HealthLog.defaultURL())
     @State private var healthMonitor = AccountHealthMonitor()
     /// Turns the dots the watcher moves into something the user hears about
-    /// while looking at something else entirely.
-    @State private var healthNotifier = HealthNotifier()
+    /// while looking at something else entirely. Built in `init` rather than
+    /// inline, because it has something to do there.
+    @State private var healthNotifier: HealthNotifier
 
     init() {
         // Before any keychain access: the app never shows the consent dialog.
@@ -468,6 +469,15 @@ struct TorroMailApp: App {
         // is skipped or re-minted rather than prompting the user.
         KeychainStore.silenceInteractivePrompts()
         registerBrandFont()
+        // A notification tapped while TorroMail was not running is handed to
+        // the delegate once, right after launch, so the delegate has to be in
+        // place before launch finishes. Here rather than in the scene's
+        // `.task`: measured, this runs some 170ms ahead of it. `.task` did in
+        // fact also beat `applicationDidFinishLaunching` — but incidentally,
+        // and its scheduling has already caught this file out once.
+        let notifier = HealthNotifier()
+        notifier.beginReceivingTaps()
+        _healthNotifier = State(initialValue: notifier)
     }
 
     var body: some Scene {
@@ -524,6 +534,29 @@ struct TorroMailApp: App {
                     // What the log says at launch is what the user last saw,
                     // and the only baseline that is not a lie.
                     healthNotifier.seed(accounts: model.accounts)
+                    // Where a tap lands. Set here, once there is a model to
+                    // navigate and a window to raise: a tap that arrived
+                    // before this — the cold launch that the tap itself
+                    // caused — has been held and is delivered by this
+                    // assignment.
+                    healthNotifier.reveal = { accountID in
+                        // The account may be gone: removed while its
+                        // notification sat in Notification Centre. The list is
+                        // then the honest destination — a detail view for
+                        // something that no longer exists is worse than the
+                        // question "which account was that?".
+                        if model.accounts.contains(where: { $0.id == accountID }) {
+                            model.openAccount(id: accountID)
+                        } else {
+                            model.selectedSidebarItem = .accounts
+                            model.accountPath = []
+                        }
+                        // The same door the menu bar item uses. TorroMail may
+                        // have no window open at all — that is a normal state
+                        // for it, not a broken one — and reopening it is
+                        // something only the scene can do.
+                        presence.showMainWindow()
+                    }
                     healthMonitor.update(
                         accountIDs: model.checkableAccountIDs,
                         executableName: model.generalSettings.mcpExecutable
