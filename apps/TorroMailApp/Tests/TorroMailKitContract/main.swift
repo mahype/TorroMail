@@ -962,6 +962,76 @@ require(
     "the quiet account's rejection still derives red after the round trip"
 )
 
+// MARK: - What the check made of stderr
+
+// The binary writes the outcome word alone on the first line and the reason
+// after it. Getting this wrong is silent: the dot still moves, it just blames
+// the wrong thing — so every shape the binary can produce is pinned here.
+require(
+    AccountCheckResult.parsing(stderr: "rejected\ncredentials rejected: NO [AUTHENTICATIONFAILED]")
+        == AccountCheckResult(
+            outcome: .rejected,
+            detail: "credentials rejected: NO [AUTHENTICATIONFAILED]"
+        ),
+    "the first line names the outcome and the rest is the reason"
+)
+require(
+    AccountCheckResult.parsing(stderr: "unreachable\ndns lookup for imap.example.com failed")
+        == AccountCheckResult(
+            outcome: .unreachable,
+            detail: "dns lookup for imap.example.com failed"
+        ),
+    "an unreachable server is classified as one, reason intact"
+)
+require(
+    AccountCheckResult.parsing(stderr: "unreachable\ntls handshake failed\ncaused by: timed out")
+        .detail == "tls handshake failed\ncaused by: timed out",
+    "a reason spanning several lines survives whole"
+)
+// A binary older than the two-part contract writes prose only. Reading that as
+// unreachable earns a grace period; reading it as rejected would accuse a
+// password that is probably fine.
+require(
+    AccountCheckResult.parsing(stderr: "could not open a connection to imap.example.com")
+        == AccountCheckResult(
+            outcome: .unreachable,
+            detail: "could not open a connection to imap.example.com"
+        ),
+    "prose with no outcome word is unreachable and keeps every word of itself"
+)
+require(
+    AccountCheckResult.parsing(stderr: "  \n ") == AccountCheckResult(
+        outcome: .unreachable,
+        detail: "connection check failed"
+    ),
+    "a check that said nothing still has to say something"
+)
+require(
+    AccountCheckResult.parsing(stderr: "rejected") == AccountCheckResult(
+        outcome: .rejected,
+        detail: "connection check failed"
+    ),
+    "an outcome word with no reason after it keeps the outcome"
+)
+// This function is only ever handed a *failing* check's stderr, so `ok` on the
+// first line is a contradiction — and believing it would turn a failed check
+// green, which is the exact bug this feature exists to remove.
+require(
+    AccountCheckResult.parsing(stderr: "ok\nwait, no").outcome == .unreachable,
+    "a failing check cannot talk its way into being ok"
+)
+// The manual button acts on one check alone: whatever it found, the user asked
+// just now and deserves the answer now.
+require(
+    AccountCheckResult(outcome: .ok, detail: "").state == .connected,
+    "a passing check is green"
+)
+require(
+    AccountCheckResult(outcome: .unreachable, detail: "the connection check timed out").state
+        == .failed("the connection check timed out"),
+    "a failing check shows its reason rather than waiting for a streak"
+)
+
 // Notifications follow crossings, not states — otherwise a broken account
 // announces itself every fifteen minutes until the user stops reading.
 let brokenAccount = MailAccount(

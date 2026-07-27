@@ -519,23 +519,125 @@ public enum MCPClientKeyStore {
     }
 }
 
+/// What one run of the connection check found: the classified outcome, the
+/// reason in words, and the state a caller acting on this single check alone
+/// should show.
+public struct AccountCheckResult: Hashable, Sendable {
+    public var outcome: HealthOutcome
+    public var detail: String
+
+    public init(outcome: HealthOutcome, detail: String) {
+        self.outcome = outcome
+        self.detail = detail
+    }
+
+    /// For the manual test button: the user asked right now, so any failure
+    /// is worth showing right now. The grace period for unreachable servers
+    /// belongs to the background monitor, which has a log to judge from.
+    public var state: ConnectionState {
+        outcome == .ok ? .connected : .failed(detail)
+    }
+
+    /// What a *failing* check's stderr said, in the two parts the binary
+    /// writes it: the outcome word alone on the first line, the reason after
+    /// it.
+    ///
+    /// A binary older than that contract writes only prose, whose first line
+    /// parses as no outcome word — and unreachable is the safe reading,
+    /// because it earns a grace period rather than accusing the password.
+    /// `ok` on the first line is refused for the same reason in reverse: this
+    /// is only ever handed the words of a check that failed, and believing it
+    /// would turn a failed check green, which is the bug the health log
+    /// exists to remove.
+    ///
+    /// Split out from `run` because it is the part most likely to break
+    /// silently — a misparse still moves the dot, it just blames the wrong
+    /// thing — and it is pure string handling, so it can be pinned by tests.
+    public static func parsing(stderr: String) -> AccountCheckResult {
+        var lines = stderr
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        var outcome = HealthOutcome.unreachable
+        if let first = lines.first, let word = HealthOutcome(rawValue: first), word != .ok {
+            outcome = word
+            lines.removeFirst()
+        }
+        let detail = lines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return AccountCheckResult(
+            outcome: outcome,
+            // A silent failure still owes the user a sentence: `.failed("")`
+            // would be just as red and tell nobody why.
+            detail: detail.isEmpty ? "connection check failed" : detail
+        )
+    }
+}
+
+/// Collects a subprocess's stderr on a thread of its own.
+///
+/// Separate from the wait because the reading has to happen *while* the child
+/// runs: a pipe's buffer is finite, and a child blocked on a full one never
+/// exits — a stall the caller's timeout would then report as an unreachable
+/// server rather than a talkative one.
+private final class StderrDrain: @unchecked Sendable {
+    /// Room for any reason worth showing, and a ceiling on what a runaway
+    /// child can push into memory and from there into a `health.jsonl` line
+    /// the monitor appends to every fifteen minutes.
+    private static let limit = 8 * 1024
+    private let lock = NSLock()
+    private var bytes = Data()
+
+    /// Reads until the last write end of the pipe closes. Blocking on
+    /// purpose — the caller runs this on a queue of its own.
+    func consume(_ handle: FileHandle) {
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { return }
+            lock.lock()
+            if bytes.count < Self.limit {
+                bytes.append(chunk.prefix(Self.limit - bytes.count))
+            }
+            lock.unlock()
+        }
+    }
+
+    /// Whatever has arrived so far. Decoded leniently: the cap can cut a
+    /// multi-byte character in half, and a replacement character beats losing
+    /// the whole reason.
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
 /// Runs the MCP binary's `--check-account`: the same secret resolution,
 /// TLS and LOGIN the tools use — so a green dot means the real path works.
 public enum AccountCheck {
     /// Checks an account the app has already published. `policyURL` overrides
     /// which document to check against — the wizard points it at a throwaway
     /// document so a candidate account can be proven before it joins the list.
+    ///
+    /// Never blocks longer than `timeout`: a background monitor calls this on
+    /// a queue that other accounts are waiting on, and one hung TLS handshake
+    /// must not be able to wedge it.
     public static func run(
         accountID: String,
         executableName: String,
-        policyURL: URL? = nil
-    ) -> ConnectionState {
+        policyURL: URL? = nil,
+        timeout: TimeInterval = 30
+    ) -> AccountCheckResult {
         let locator = MCPExecutableLocator(
             executableName: executableName,
             workspaceRoot: FileManager.default.currentDirectoryPath
         )
+        // Everything that goes wrong before the server gets a word in is
+        // unreachable, never rejected: a missing binary is not the user's
+        // password, and calling it one would turn the dot red for good.
         guard let command = locator.resolve() else {
-            return .failed("MCP executable not found")
+            return AccountCheckResult(outcome: .unreachable, detail: "MCP executable not found")
         }
 
         let process = Process()
@@ -552,24 +654,56 @@ public enum AccountCheck {
         }
         process.environment = environment
         let errorPipe = Pipe()
-        process.standardOutput = Pipe()
+        // Nobody has ever read this check's stdout, and an undrained pipe is
+        // one the child eventually blocks on mid-write. The null device
+        // cannot fill.
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = errorPipe
 
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
         do {
             try process.run()
         } catch {
-            return .failed(error.localizedDescription)
+            return AccountCheckResult(outcome: .unreachable, detail: error.localizedDescription)
         }
-        process.waitUntilExit()
+
+        // Started only once the child exists, so a spawn that threw cannot
+        // leave a thread reading a pipe whose write end will never close.
+        let drain = StderrDrain()
+        let drained = DispatchGroup()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            drain.consume(errorPipe.fileHandleForReading)
+            drained.leave()
+        }
+
+        // A hung TLS handshake must not wedge the monitor's queue forever.
+        // A check that never answers is a server we could not reach, which is
+        // exactly what the grace period is for.
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            // SIGTERM and go. Nothing waits for the child to actually die, and
+            // nothing waits on the drain either: a check that ignored the
+            // signal would hold this thread just as effectively as the hang we
+            // are walking away from. The read ends by itself whenever the
+            // child does.
+            process.terminate()
+            return AccountCheckResult(
+                outcome: .unreachable,
+                detail: "the connection check timed out"
+            )
+        }
+        // The child is gone, so its end of the pipe is closed and the drain is
+        // a moment from finishing — but bounded anyway, because a grandchild
+        // holding the same pipe open is the one way this could still wait
+        // forever, and stderr arrives outcome word first, so a partial read
+        // still classifies.
+        _ = drained.wait(timeout: .now() + 2)
 
         if process.terminationStatus == 0 {
-            return .connected
+            return AccountCheckResult(outcome: .ok, detail: "")
         }
-        let detail = String(
-            data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        )?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .failed(detail?.isEmpty == false ? detail ?? "" : "connection check failed")
+        return .parsing(stderr: drain.text)
     }
 }
 
@@ -792,11 +926,15 @@ public enum AccountTrial {
         } catch {
             return .failed(error.localizedDescription)
         }
+        // A trial is a manual check: the user is standing in the wizard, so it
+        // wants this one check's verdict, not the monitor's patience. Nothing
+        // is logged — the account has no id in the list yet, and a record
+        // naming one that never joins would haunt every later derivation.
         return AccountCheck.run(
             accountID: account.id,
             executableName: executableName,
             policyURL: url
-        )
+        ).state
     }
 }
 

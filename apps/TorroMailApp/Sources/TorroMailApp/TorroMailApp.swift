@@ -1403,9 +1403,20 @@ private struct AccountDetailView: View {
         let accountID = account.id
         let executable = model.generalSettings.mcpExecutable
         Task.detached(priority: .userInitiated) {
-            let state = AccountCheck.run(accountID: accountID, executableName: executable)
+            let result = AccountCheck.run(accountID: accountID, executableName: executable)
+            // The user pressed the button, so this check is a record like any
+            // other — the log is where every check lands.
+            HealthLog.append(
+                HealthRecord(
+                    accountID: accountID,
+                    at: Date(),
+                    outcome: result.outcome,
+                    source: "manual",
+                    detail: result.detail
+                )
+            )
             await MainActor.run {
-                account.connectionState = state
+                account.connectionState = result.state
                 isCheckingConnection = false
             }
         }
