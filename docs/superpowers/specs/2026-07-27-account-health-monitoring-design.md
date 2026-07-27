@@ -74,22 +74,43 @@ state an account had when the app last quit — but it no longer drives the dot
 once `health.jsonl` has a record for that account. It is the value shown for
 the seconds between launch and the first check.
 
-Trimming follows whatever `audit.jsonl` already does; health records are small
-and the derivation only reads the tail.
-
 ### Classification happens in Rust, at one place
 
 Today every failure is `CoreError::ProviderFailure(String)`, so telling a wrong
 password from a dead network would mean matching on message text. Instead:
 
 - Add `CoreError::CredentialRejected(String)`.
-- Return it from `ImapClient::authenticate` — both arms: a tagged `NO`/`BAD`
-  answer to `LOGIN`, and the rejection path in `authenticate_xoauth2`.
+- Return it from `ImapClient::authenticate` — both the `LOGIN` arm and the
+  rejection path in `authenticate_xoauth2`.
 - Everything before authentication — TCP connect, TLS setup, the IMAP greeting,
   `STARTTLS` — keeps returning `ProviderFailure`.
 
-That single boundary is the whole rule: past the greeting and refused means the
-credentials are wrong; anything earlier means we could not get there.
+Reaching the login command is necessary but not sufficient. A server that
+refuses one is not necessarily saying the password is wrong, and treating every
+refusal as though it were would fire a first-strike red dot and a notification
+at a TLS misconfiguration or a rate limit. The refusal's RFC 5530 response code
+decides:
+
+| Answer | Reading |
+| --- | --- |
+| `NO [AUTHENTICATIONFAILED]`, `[AUTHORIZATIONFAILED]`, `[EXPIRED]` | `CredentialRejected` |
+| `NO` with no response code | `CredentialRejected` — the common shape, and no server says it about anything else |
+| `NO [UNAVAILABLE]`, `[PRIVACYREQUIRED]`, `[SERVERBUG]`, `[CONTACTADMIN]` | `ProviderFailure` — temporary, or a wrong transport setting |
+| any tagged `BAD` | `ProviderFailure` — a syntax or protocol fault, never a password |
+
+`PRIVACYREQUIRED` matters more here than its rarity suggests: this crate lets
+`ConnectionSecurity` be chosen independently of the port, so a wrongly
+configured account produces exactly that refusal, and blaming the password for
+it would send the user to fix the one thing that is not broken.
+
+The refusal travels as a small struct — kind, response code, text — rather than
+a string, so this table lives in one function instead of being restated at each
+throw site. Two details ride along with it: any untagged `* NO [ALERT] …` line
+preceding the refusal is carried into the message, because that is where Gmail
+and Yahoo put the sentence the user actually needs ("Application-specific
+password required: …"); and on the login path the secret is redacted from the
+text before it goes anywhere, since a server that echoes the offending command
+in a `BAD` would otherwise write the password into `health.jsonl`.
 
 `check_account` maps its result accordingly, and reports the outcome rather
 than a bare `Result<String, String>`:
@@ -192,8 +213,11 @@ Rust:
 
 - A tagged `NO` to `LOGIN` produces `CredentialRejected`; a tagged `NO` in the
   XOAUTH2 continuation exchange does too.
+- `NO [UNAVAILABLE]` and a tagged `BAD` produce `ProviderFailure` — the
+  classification table above, tested rather than assumed.
 - A transport that fails to connect produces `ProviderFailure`, not
-  `CredentialRejected`.
+  `CredentialRejected` — and so does a transport that dies *after* the login
+  command was sent, which is the seam the split exists to hold.
 - `record_health` writes the right outcome for a rejected call, a transport
   failure, and a success.
 - The server-start sweep skips an account whose newest record is 4 minutes old

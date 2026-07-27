@@ -39,6 +39,8 @@
 
 Today every IMAP failure is `CoreError::ProviderFailure(String)`, so nothing downstream can tell a wrong password from a dead network without matching on message text. The refusal has to become its own error at the one place the server speaks it.
 
+> **Amended during review.** The steps below classify *every* tagged non-OK answer to `LOGIN` as a credential rejection. That is too coarse: `NO [UNAVAILABLE]` is a temporary backend failure, `NO [PRIVACYREQUIRED]` is a wrong transport setting, and a tagged `BAD` is a protocol fault — none of them is a wrong password, and each would fire a first-strike red dot and a notification. The implemented rule keys on the RFC 5530 response code and carries the refusal as a struct rather than a string; see the classification table in the spec. The refusal message also carries any preceding untagged `* NO [ALERT] …` line, and the secret is redacted from it on the login path. Read the shipped `crates/torromail-core/src/imap_provider.rs` rather than the code blocks below.
+
 **Files:**
 - Modify: `crates/torromail-core/src/lib.rs:17-56`
 - Modify: `crates/torromail-core/src/imap_provider.rs:239-291`, `crates/torromail-core/src/imap_provider.rs:531-557`
