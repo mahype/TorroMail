@@ -135,6 +135,19 @@ require(
     "off and unregistered needs no ServiceManagement call"
 )
 
+// Reopening TorroMail (Dock click, launching it again from the Finder) must
+// show exactly one window. Two actors can respond — this app and AppKit's
+// default handling — so the rule is mutual exclusion: whoever opens the
+// window silences the other, or every reopen would open it twice.
+require(
+    ReopenResponse.resolve(hasVisibleWindows: false) == .showMainWindow,
+    "reopening without a window opens the main window ourselves — and only ourselves"
+)
+require(
+    ReopenResponse.resolve(hasVisibleWindows: true) == .letSystemProceed,
+    "with a window on screen the system merely brings it forward"
+)
+
 // The product boundary is part of the contract: the app is a control
 // surface, never a mail client.
 require(

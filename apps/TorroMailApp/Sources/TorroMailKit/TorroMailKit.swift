@@ -2538,6 +2538,22 @@ public enum LoginItemSync: Hashable {
     }
 }
 
+/// What a reopen — Dock click, launching the already-running app again —
+/// should do. Two actors can answer it: this app, and AppKit's own reopen
+/// handling. The rule is mutual exclusion. When TorroMail opens the window
+/// itself it must also tell AppKit "handled", or both act and every reopen
+/// from the background shows the window twice.
+public enum ReopenResponse: Hashable {
+    /// No window on screen: open ours, and silence the system's handling.
+    case showMainWindow
+    /// A window is up: let the system bring it forward, touch nothing.
+    case letSystemProceed
+
+    public static func resolve(hasVisibleWindows: Bool) -> ReopenResponse {
+        hasVisibleWindows ? .letSystemProceed : .showMainWindow
+    }
+}
+
 public enum MCPServerStatus: Hashable {
     case stopped
     case starting

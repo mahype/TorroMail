@@ -381,10 +381,15 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
     /// Clicking the Dock tile, or launching TorroMail while it already runs in
     /// the background, brings the window back.
     func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows {
+        switch ReopenResponse.resolve(hasVisibleWindows: hasVisibleWindows) {
+        case .showMainWindow:
             showMainWindow()
+            // "Handled": returning true here lets AppKit run its own reopen
+            // on top of ours, and the one window opens as two.
+            return false
+        case .letSystemProceed:
+            return true
         }
-        return true
     }
 
     func showMainWindow() {
