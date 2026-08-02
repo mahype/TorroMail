@@ -115,6 +115,26 @@ require(
     "with the Dock icon on TorroMail stays in the Dock without a window"
 )
 
+// The launch-at-login toggle is a promise about the system's login items,
+// and the setting alone keeps no promise: every launch reconciles the
+// system's registration towards the setting, whichever side drifted.
+require(
+    LoginItemSync.resolve(wantsLaunchAtLogin: true, systemHasLoginItem: false) == .register,
+    "an enabled setting registers the login item the system is missing"
+)
+require(
+    LoginItemSync.resolve(wantsLaunchAtLogin: false, systemHasLoginItem: true) == .unregister,
+    "a disabled setting removes a stale registration"
+)
+require(
+    LoginItemSync.resolve(wantsLaunchAtLogin: true, systemHasLoginItem: true) == .inSync,
+    "a kept promise touches the system's list not at all"
+)
+require(
+    LoginItemSync.resolve(wantsLaunchAtLogin: false, systemHasLoginItem: false) == .inSync,
+    "off and unregistered needs no ServiceManagement call"
+)
+
 // The product boundary is part of the contract: the app is a control
 // surface, never a mail client.
 require(

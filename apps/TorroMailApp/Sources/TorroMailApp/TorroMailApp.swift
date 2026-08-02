@@ -1,4 +1,5 @@
 import CoreText
+import ServiceManagement
 import SwiftUI
 import TorroMailKit
 
@@ -418,6 +419,42 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
     }
 }
 
+/// The ServiceManagement side of `LoginItemSync`: read what the system has,
+/// ask the Kit what should change, perform exactly that call.
+///
+/// `.requiresApproval` counts as registered — the item exists and macOS is
+/// waiting for the user in System Settings; re-registering would change
+/// nothing and nagging is not this app's call to make. Failures are
+/// diagnostics, not decisions — they belong in the log.
+///
+/// `SMAppService.mainApp` registers the bundle it runs from, so a dev build
+/// registers the dev bundle. Harmless as long as the toggle is flipped from
+/// the same build, and the next launch of the installed app re-registers
+/// itself anyway.
+@MainActor
+enum LoginItemService {
+    static func apply(launchAtLogin: Bool) {
+        let service = SMAppService.mainApp
+        let registered = service.status == .enabled || service.status == .requiresApproval
+        switch LoginItemSync.resolve(wantsLaunchAtLogin: launchAtLogin, systemHasLoginItem: registered) {
+        case .register:
+            do {
+                try service.register()
+            } catch {
+                NSLog("TorroMail: login item registration failed: %@", error.localizedDescription)
+            }
+        case .unregister:
+            do {
+                try service.unregister()
+            } catch {
+                NSLog("TorroMail: login item removal failed: %@", error.localizedDescription)
+            }
+        case .inSync:
+            break
+        }
+    }
+}
+
 /// Failures are diagnostics, not decisions — they belong in the log.
 /// Internal, not private: connect/disconnect in the MCP views changes the
 /// pairing list and republishes from there.
@@ -565,6 +602,13 @@ struct TorroMailApp: App {
                 }
                 .onChange(of: model.generalSettings.showDockIcon, initial: true) { _, show in
                     presence.showDockIcon = show
+                }
+                // `initial: true` is the actual feature: the stored setting
+                // alone starts nothing, so every launch walks it over to the
+                // system's login-item list — including installs from before
+                // this wiring existed, whose toggle said "on" into the void.
+                .onChange(of: model.generalSettings.launchAtLogin, initial: true) { _, launch in
+                    LoginItemService.apply(launchAtLogin: launch)
                 }
                 // Every permission switch lands in the policy document the
                 // MCP server enforces — flipped in the UI, live on the wire —

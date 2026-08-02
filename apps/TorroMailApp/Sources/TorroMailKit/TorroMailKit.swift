@@ -2518,6 +2518,26 @@ public enum AppPresence: Hashable {
     }
 }
 
+/// What to do about the system's login-item registration so it matches the
+/// launch-at-login setting. A stored `true` on its own starts nothing — the
+/// system's list is the only thing `loginwindow` reads — so the two are
+/// reconciled towards the setting on every launch and on every flip of the
+/// toggle, whichever side drifted. The ServiceManagement calls live in the
+/// app; this is only the decision.
+public enum LoginItemSync: Hashable {
+    case register
+    case unregister
+    case inSync
+
+    public static func resolve(wantsLaunchAtLogin: Bool, systemHasLoginItem: Bool) -> LoginItemSync {
+        switch (wantsLaunchAtLogin, systemHasLoginItem) {
+        case (true, false): .register
+        case (false, true): .unregister
+        default: .inSync
+        }
+    }
+}
+
 public enum MCPServerStatus: Hashable {
     case stopped
     case starting
