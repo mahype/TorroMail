@@ -33,6 +33,15 @@
     <string>14.0</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <!-- Keep the pre-Tahoe appearance (opaque full-bleed sidebar, square
+         panel edges) on macOS 26 regardless of which SDK built the bundle.
+         CI builds on older runners never got the Liquid Glass treatment,
+         local Xcode 26 builds did — the app flip-flopped between the two
+         looks. This pins the one the app is designed for until Liquid
+         Glass is adopted deliberately (the key is honoured for one major
+         release, so that adoption has a deadline of macOS 27). -->
+    <key>UIDesignRequiresCompatibility</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
