@@ -87,6 +87,9 @@ fn main() -> io::Result<()> {
     let sweep_policy_path = policy_path();
     let sweep_token = presented_token.clone();
     std::thread::spawn(move || {
+        // Attachment housekeeping first — it is pure local filesystem work,
+        // so it never waits behind a slow TLS handshake.
+        torromail_mcp::sweep_attachment_files(sweep_policy_path.clone());
         torromail_mcp::sweep_account_health(sweep_policy_path, sweep_token.as_deref());
     });
 

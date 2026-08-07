@@ -2354,3 +2354,23 @@ fn an_unknown_attachment_id_answers_a_named_error() {
     assert!(response.contains("error"), "got: {response}");
     assert!(response.contains('9'), "got: {response}");
 }
+
+#[test]
+fn the_attachment_sweep_removes_old_files_and_prunes_empty_dirs() {
+    let root = std::env::temp_dir().join(format!("torromail-sweep-{}", std::process::id()));
+    let nested = root.join("work").join("m1");
+    std::fs::create_dir_all(&nested).expect("store created");
+    let file = nested.join("2-angebot.pdf");
+    std::fs::write(&file, b"x").expect("file written");
+
+    // A generous TTL keeps a fresh file.
+    torromail_mcp::sweep_attachment_dir(&root, std::time::Duration::from_secs(60 * 60));
+    assert!(file.exists());
+
+    // TTL zero: everything is old; files go, empty directories follow.
+    torromail_mcp::sweep_attachment_dir(&root, std::time::Duration::ZERO);
+    assert!(!file.exists());
+    assert!(!nested.exists());
+
+    std::fs::remove_dir_all(&root).ok();
+}

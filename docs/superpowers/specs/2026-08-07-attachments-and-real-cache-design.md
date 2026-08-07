@@ -108,7 +108,7 @@ below the TorroMail application-support directory, and answers:
   "filename": "angebot.pdf",
   "media_type": "application/pdf",
   "size_bytes": 182044,
-  "path": "/Users/…/Library/Application Support/TorroMail/attachments/gmail/4711/angebot.pdf",
+  "path": "/Users/…/Library/Application Support/TorroMail/attachments/gmail/4711/2-angebot.pdf",
   "from_cache": false
 }
 ```
@@ -126,11 +126,13 @@ where files land; the client learns the location from the answer.
 
 ### Files on disk
 
-`~/Library/Application Support/TorroMail/attachments/<account>/<message>/<filename>`.
+`~/Library/Application Support/TorroMail/attachments/<account>/<message>/<attachment_id>-<filename>`.
 Account and message directory names are the respective ids, sanitized.
 Filenames are sanitized before writing: path separators and NUL stripped,
 leading dots removed, length capped at 255 bytes; an empty or fully-consumed
-name becomes `attachment-<id>.bin`; a collision appends a numeric suffix. The
+name becomes `attachment-<id>.bin`. The id prefix replaces collision
+suffixes: re-downloads land on the same path (idempotent), and two
+same-named attachments of one message can never clash. The
 decoded size is capped at 50 MiB — above that the tool refuses with the size
 in the message, and the assistant can tell the user to fetch it in a mail
 client.

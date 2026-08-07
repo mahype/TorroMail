@@ -1572,6 +1572,53 @@ fn pairing_gate(
 /// Slow by nature — a TLS handshake and a login per account, with no timeout
 /// underneath either. The server runs it on a thread of its own for exactly
 /// that reason; see `main.rs`.
+/// Phase-1 housekeeping for the attachment store: downloaded files are the
+/// client's deliverable, not yet a cache, so anything older than the TTL is
+/// deleted on server start and emptied directories go with it. Best-effort
+/// throughout — a file the sweep cannot stat or remove is left for the next
+/// start.
+pub fn sweep_attachment_files(policy_path: Option<PathBuf>) {
+    let Some(dir) = policy_path
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(|parent| parent.join("attachments"))
+    else {
+        return;
+    };
+    sweep_attachment_dir(&dir, std::time::Duration::from_secs(24 * 60 * 60));
+}
+
+/// The sweep itself, TTL injected so tests need not fake file ages.
+pub fn sweep_attachment_dir(dir: &std::path::Path, ttl: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            sweep_attachment_dir(&path, ttl);
+            // Empty after its own sweep? Then it only held stale files.
+            let emptied = std::fs::read_dir(&path)
+                .map(|mut rest| rest.next().is_none())
+                .unwrap_or(false);
+            if emptied {
+                let _ = std::fs::remove_dir(&path);
+            }
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= ttl);
+        if stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 pub fn sweep_account_health(policy_path: Option<PathBuf>, presented_token: Option<&str>) {
     // No document is fixture mode: no accounts, nothing to prove, and no
     // folder to write a log into.
