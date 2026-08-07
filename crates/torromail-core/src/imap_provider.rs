@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::{
-    AccountId, CoreError, CoreResult, MailProvider, MarkChange, SearchHit, SearchWindow,
-    StoredMessage,
+    AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider, MarkChange, SearchHit,
+    SearchWindow, StoredMessage,
 };
 
 /// A pointer to a credential in the platform keychain — never the
@@ -879,6 +879,21 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         message.seen = fetched.seen;
         message.flagged = fetched.flagged;
         Ok(message)
+    }
+
+    fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload> {
+        // Honest stub until the extraction path lands: no part is served yet.
+        self.guard(account_id)?;
+        let (_mailbox, _uid) = self.split_message_id(message_id)?;
+        Err(CoreError::AttachmentNotFound {
+            message_id: message_id.to_owned(),
+            attachment_id: attachment_id.to_owned(),
+        })
     }
 
     /// The conversation `thread_id` (a `mailbox/uid`) belongs to, reconstructed

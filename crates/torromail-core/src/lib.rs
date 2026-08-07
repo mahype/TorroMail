@@ -8,6 +8,9 @@ pub use imap_provider::{
     ConnectionSecurity, FetchedMessage, ImapAuth, ImapClient, ImapMailProvider, ImapProviderConfig,
     ImapTransport, SecretRef, StreamImapTransport, TcpImapTransport,
 };
+/// Standard padded base64, shared so the MCP layer can inline small
+/// attachment downloads without a second implementation.
+pub use mime::encode_base64;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -23,6 +26,10 @@ pub enum CoreError {
         capability: Capability,
     },
     MessageNotFound(String),
+    AttachmentNotFound {
+        message_id: String,
+        attachment_id: String,
+    },
     /// The mail provider could not be reached or could not do as it was
     /// asked. Everything transient lives here — see `CredentialRejected` for
     /// the one failure that will not fix itself on its own.
@@ -52,6 +59,13 @@ impl Display for CoreError {
                 write!(f, "{capability:?} is not allowed for account {account_id}")
             }
             Self::MessageNotFound(id) => write!(f, "message not found: {id}"),
+            Self::AttachmentNotFound {
+                message_id,
+                attachment_id,
+            } => write!(
+                f,
+                "attachment {attachment_id} not found on message {message_id}"
+            ),
             Self::ProviderFailure(message) => write!(f, "mail provider failure: {message}"),
             Self::CredentialRejected(message) => {
                 write!(f, "credentials rejected: {message}")
@@ -886,6 +900,100 @@ pub struct StoredMessage {
     date: String,
     seen: bool,
     flagged: bool,
+    attachments: Vec<AttachmentInfo>,
+}
+
+/// One attachment as the message lists it: enough for an assistant to decide
+/// whether to download, never the bytes. The id is the MIME part path from
+/// the provider's walk ("2", "3.1") — the handle `mail_get_attachment` takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentInfo {
+    id: String,
+    filename: String,
+    media_type: String,
+    size_bytes: usize,
+    inline: bool,
+}
+
+impl AttachmentInfo {
+    pub fn new(
+        id: impl Into<String>,
+        filename: impl Into<String>,
+        media_type: impl Into<String>,
+        size_bytes: usize,
+        inline: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            filename: filename.into(),
+            media_type: media_type.into(),
+            size_bytes,
+            inline,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.size_bytes
+    }
+
+    pub fn inline(&self) -> bool {
+        self.inline
+    }
+}
+
+/// The decoded bytes of one downloaded attachment, with the mailbox the
+/// message lives in — the fact the folder-scoped policy check needs before
+/// the bytes may leave the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentPayload {
+    mailbox: String,
+    filename: String,
+    media_type: String,
+    content: Vec<u8>,
+}
+
+impl AttachmentPayload {
+    pub fn new(
+        mailbox: impl Into<String>,
+        filename: impl Into<String>,
+        media_type: impl Into<String>,
+        content: Vec<u8>,
+    ) -> Self {
+        Self {
+            mailbox: mailbox.into(),
+            filename: filename.into(),
+            media_type: media_type.into(),
+            content,
+        }
+    }
+
+    pub fn mailbox(&self) -> &str {
+        &self.mailbox
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn content(&self) -> &[u8] {
+        &self.content
+    }
 }
 
 impl StoredMessage {
@@ -912,6 +1020,7 @@ impl StoredMessage {
             date: String::new(),
             seen: false,
             flagged: false,
+            attachments: Vec::new(),
         }
     }
 
@@ -920,6 +1029,16 @@ impl StoredMessage {
     pub fn with_date(mut self, date: impl Into<String>) -> Self {
         self.date = date.into();
         self
+    }
+
+    /// The attachments the provider's MIME walk found, metadata only.
+    pub fn with_attachment_infos(mut self, attachments: Vec<AttachmentInfo>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    pub fn attachments(&self) -> &[AttachmentInfo] {
+        &self.attachments
     }
 
     pub fn mailbox(&self) -> &str {
@@ -1181,6 +1300,16 @@ pub trait MailProvider {
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
 
+    /// The decoded bytes of one attachment, id as listed on the stored
+    /// message. Providers answer `AttachmentNotFound` for an id no part
+    /// carries.
+    fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload>;
+
     /// Every message in the conversation `thread_id` names, oldest first.
     /// Plain IMAP has no thread identity, so a provider assembles this from
     /// the `References`/`In-Reply-To` headers; a mailbox that cannot relate
@@ -1246,6 +1375,15 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         (**self).get_message(account_id, message_id)
     }
 
+    fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload> {
+        (**self).get_attachment(account_id, message_id, attachment_id)
+    }
+
     fn get_thread(
         &self,
         account_id: &AccountId,
@@ -1297,13 +1435,33 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureMailProvider {
     messages: Vec<StoredMessage>,
+    /// Attachment bytes by message id and attachment id: the fixture's stand-in
+    /// for what a real provider extracts from the raw MIME body.
+    attachment_payloads: BTreeMap<(String, String), (String, String, Vec<u8>)>,
 }
 
 impl FixtureMailProvider {
     pub fn new(messages: impl IntoIterator<Item = StoredMessage>) -> Self {
         Self {
             messages: messages.into_iter().collect(),
+            attachment_payloads: BTreeMap::new(),
         }
+    }
+
+    /// Seed the bytes behind one listed attachment.
+    pub fn with_attachment(
+        mut self,
+        message_id: &str,
+        attachment_id: &str,
+        filename: &str,
+        media_type: &str,
+        content: Vec<u8>,
+    ) -> Self {
+        self.attachment_payloads.insert(
+            (message_id.to_owned(), attachment_id.to_owned()),
+            (filename.to_owned(), media_type.to_owned(), content),
+        );
+        self
     }
 }
 
@@ -1346,6 +1504,31 @@ impl MailProvider for FixtureMailProvider {
             .find(|message| &message.account_id == account_id && message.message_id == message_id)
             .cloned()
             .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))
+    }
+
+    fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload> {
+        // The message decides existence and mailbox; the payload map only
+        // holds the bytes.
+        let message = self.get_message(account_id, message_id)?;
+        let (filename, media_type, content) = self
+            .attachment_payloads
+            .get(&(message_id.to_owned(), attachment_id.to_owned()))
+            .cloned()
+            .ok_or_else(|| CoreError::AttachmentNotFound {
+                message_id: message_id.to_owned(),
+                attachment_id: attachment_id.to_owned(),
+            })?;
+        Ok(AttachmentPayload::new(
+            message.mailbox(),
+            filename,
+            media_type,
+            content,
+        ))
     }
 
     fn get_thread(
@@ -1529,6 +1712,37 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         let mut header_only = message;
         header_only.body = String::new();
         Ok(header_only)
+    }
+
+    /// One attachment's bytes, authorized twice like every read: the cheap
+    /// account-wide check refuses before any fetch, and the mailbox the
+    /// provider reports is checked again before the bytes leave the service.
+    pub fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload> {
+        self.policy_engine
+            .authorize(account_id, Capability::DownloadAttachments)?;
+        let payload = self
+            .provider
+            .get_attachment(account_id, message_id, attachment_id)?;
+        self.policy_engine.authorize_in(
+            account_id,
+            payload.mailbox(),
+            Capability::DownloadAttachments,
+        )?;
+        Ok(payload)
+    }
+
+    /// Whether a download from `mailbox` would be allowed — the fact the
+    /// attachment listing carries so an assistant can ask for the right
+    /// permission instead of guessing.
+    pub fn download_allowed(&self, account_id: &AccountId, mailbox: &str) -> bool {
+        self.policy_engine
+            .authorize_in(account_id, mailbox, Capability::DownloadAttachments)
+            .is_ok()
     }
 
     /// A thread, folder-checked message by message. A conversation can span

@@ -1,5 +1,6 @@
 use torromail_core::{
-    AccountDraft, AccountId, AccountRegistry, ActionKind, CachePolicy, Capability, Channel,
+    AccountDraft, AccountId, AccountRegistry, ActionKind, AttachmentInfo, CachePolicy, Capability,
+    Channel,
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
     OutgoingAttachment, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet,
     Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
@@ -552,4 +553,119 @@ fn search_result_sets_can_be_refined_in_memory() {
     assert_eq!(refined.query(), "invoice may billing");
     assert_eq!(refined.hits().len(), 1);
     assert_eq!(refined.hits()[0].message_id(), "m3");
+}
+
+#[test]
+fn attachment_download_needs_the_attachment_read_level() {
+    let account = AccountId::new("work");
+    let message = StoredMessage::new(
+        account.clone(),
+        "INBOX",
+        "m1",
+        "t1",
+        "Mit Anhang",
+        "a@example.com",
+        "s",
+        "b",
+    )
+    .with_attachment_infos(vec![AttachmentInfo::new(
+        "2",
+        "angebot.pdf",
+        "application/pdf",
+        4,
+        false,
+    )]);
+    let mut provider = FixtureMailProvider::new([message]).with_attachment(
+        "m1",
+        "2",
+        "angebot.pdf",
+        "application/pdf",
+        b"%PDF".to_vec(),
+    );
+
+    // full_message may list but not download.
+    let mut permissions = PermissionSet::default();
+    permissions.read = ReadAccess::FullMessage;
+    let engine = PolicyEngine::new([Policy::new(account.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let service = MailAccessService::new(&mut provider, engine, &mut sessions);
+
+    let listed = service.get_message(&account, "m1", false).expect("readable");
+    assert_eq!(listed.attachments().len(), 1);
+    assert_eq!(listed.attachments()[0].filename(), "angebot.pdf");
+    assert!(!service.download_allowed(&account, "INBOX"));
+    assert!(service.get_attachment(&account, "m1", "2").is_err());
+
+    // with_attachments downloads.
+    let mut permissions = PermissionSet::default();
+    permissions.read = ReadAccess::WithAttachments;
+    let engine = PolicyEngine::new([Policy::new(account.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let service = MailAccessService::new(&mut provider, engine, &mut sessions);
+
+    assert!(service.download_allowed(&account, "INBOX"));
+    let payload = service.get_attachment(&account, "m1", "2").expect("allowed");
+    assert_eq!(payload.mailbox(), "INBOX");
+    assert_eq!(payload.filename(), "angebot.pdf");
+    assert_eq!(payload.content(), b"%PDF");
+}
+
+#[test]
+fn a_blocked_folder_blocks_the_download_too() {
+    let account = AccountId::new("work");
+    let message = StoredMessage::new(
+        account.clone(),
+        "Geheim",
+        "m1",
+        "t1",
+        "S",
+        "a@example.com",
+        "s",
+        "b",
+    );
+    let mut provider = FixtureMailProvider::new([message]).with_attachment(
+        "m1",
+        "1",
+        "x.bin",
+        "application/octet-stream",
+        vec![0],
+    );
+
+    let mut permissions = PermissionSet::default();
+    permissions.read = ReadAccess::WithAttachments;
+    permissions.per_folder = true;
+    permissions.folder_rules.insert(
+        "Geheim".to_owned(),
+        FolderRule {
+            read: false,
+            write: true,
+        },
+    );
+    let engine = PolicyEngine::new([Policy::new(account.clone(), permissions)]);
+    let mut sessions = SearchSessionStore::default();
+    let service = MailAccessService::new(&mut provider, engine, &mut sessions);
+
+    assert!(service.get_attachment(&account, "m1", "1").is_err());
+}
+
+#[test]
+fn an_unknown_attachment_id_is_a_named_error() {
+    let account = AccountId::new("work");
+    let message = StoredMessage::new(
+        account.clone(),
+        "INBOX",
+        "m1",
+        "t1",
+        "S",
+        "a@example.com",
+        "s",
+        "b",
+    );
+    let provider = FixtureMailProvider::new([message]);
+
+    let error = provider
+        .get_attachment(&account, "m1", "7")
+        .expect_err("nothing seeded");
+    assert!(error.to_string().contains('7'));
+    assert!(error.to_string().contains("m1"));
 }

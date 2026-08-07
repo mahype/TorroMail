@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use torromail_core::{
-    AccountId, CoreError, CoreResult, FixtureMailProvider, MailProvider, MarkChange, SearchHit,
-    SearchWindow, StoredMessage,
+    AccountId, AttachmentPayload, CoreError, CoreResult, FixtureMailProvider, MailProvider,
+    MarkChange, SearchHit, SearchWindow, StoredMessage,
 };
 use torromail_mcp::{AccessLevel, LineMcpServer, ToolCatalog, ToolName, TransportMode};
 
@@ -38,6 +38,15 @@ impl MailProvider for FailingOnce {
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage> {
         self.inner.get_message(account_id, message_id)
+    }
+
+    fn get_attachment(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> CoreResult<AttachmentPayload> {
+        self.inner.get_attachment(account_id, message_id, attachment_id)
     }
 
     fn get_thread(

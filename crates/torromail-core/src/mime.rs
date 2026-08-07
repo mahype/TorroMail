@@ -666,8 +666,9 @@ pub(crate) fn encode_rfc2047(value: &str) -> String {
 }
 
 /// Standard padded base64. Small enough to hand-roll rather than take a
-/// dependency; the mirror of `decode_base64`.
-pub(crate) fn encode_base64(bytes: &[u8]) -> String {
+/// dependency; the mirror of `decode_base64`. Public through the crate root
+/// for the MCP layer's inline-content answers.
+pub fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
