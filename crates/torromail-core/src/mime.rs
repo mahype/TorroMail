@@ -277,6 +277,150 @@ fn decode_one_rfc2047_word(word: &str) -> Option<(String, usize)> {
     Some((decoded, consumed))
 }
 
+/// One part of a message that is a file rather than body text: it declares a
+/// filename, or says `Content-Disposition: attachment` outright.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MimeAttachment {
+    pub id: String,
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: usize,
+    pub inline: bool,
+}
+
+/// Every attachment of a message, ids assigned by a depth-first walk of the
+/// MIME tree — "2", "3.1" — stable because the walk is deterministic.
+pub(crate) fn list_attachments(
+    raw: &str,
+    content_type: &str,
+    transfer_encoding: &str,
+) -> Vec<MimeAttachment> {
+    let mut found = Vec::new();
+    walk_attachments(raw, content_type, "", transfer_encoding, "", &mut |info, _| {
+        found.push(info);
+    });
+    found
+}
+
+/// The decoded bytes of the attachment `attachment_id` names, with its
+/// listing entry. `None` when no part carries that id.
+pub(crate) fn extract_attachment_bytes(
+    raw: &str,
+    content_type: &str,
+    transfer_encoding: &str,
+    attachment_id: &str,
+) -> Option<(MimeAttachment, Vec<u8>)> {
+    let mut hit = None;
+    walk_attachments(
+        raw,
+        content_type,
+        "",
+        transfer_encoding,
+        "",
+        &mut |info, (body, encoding)| {
+            if info.id == attachment_id && hit.is_none() {
+                hit = Some((info, decode_transfer(body, encoding)));
+            }
+        },
+    );
+    hit
+}
+
+/// Depth-first over the MIME tree. Multipart nodes recurse with their child
+/// index appended to `prefix`; attachment leaves are reported with their raw
+/// body and transfer encoding so a caller can decode exactly the part it
+/// wants. A non-multipart top level walks as the single part "1".
+fn walk_attachments(
+    raw: &str,
+    content_type: &str,
+    content_disposition: &str,
+    transfer_encoding: &str,
+    prefix: &str,
+    visit: &mut dyn FnMut(MimeAttachment, (&str, &str)),
+) {
+    let (mime_type, type_params) = parse_content_type(content_type);
+
+    if mime_type.starts_with("multipart/") {
+        let Some(boundary) = param(&type_params, "boundary") else {
+            return;
+        };
+        for (index, segment) in parts(raw, &boundary).iter().enumerate() {
+            let (headers, body) = split_headers_body(segment);
+            let child_type = header_value(headers, "content-type").unwrap_or_default();
+            let child_disposition =
+                header_value(headers, "content-disposition").unwrap_or_default();
+            let child_encoding =
+                header_value(headers, "content-transfer-encoding").unwrap_or_default();
+            let child_id = if prefix.is_empty() {
+                format!("{}", index + 1)
+            } else {
+                format!("{prefix}.{}", index + 1)
+            };
+            walk_attachments(
+                body,
+                &child_type,
+                &child_disposition,
+                &child_encoding,
+                &child_id,
+                visit,
+            );
+        }
+        return;
+    }
+
+    // A leaf. The top level itself is a leaf when the message is not
+    // multipart; it walks under the id "1".
+    let id = if prefix.is_empty() {
+        "1".to_owned()
+    } else {
+        prefix.to_owned()
+    };
+
+    // Disposition parameters carry the filename first; `name=` on the
+    // Content-Type is the legacy spelling of the same fact.
+    let (disposition, disposition_params) = parse_content_type(content_disposition);
+    let mut params = disposition_params;
+    if filename_from_params(&params).is_none() {
+        if let Some(name) = param(&type_params, "name") {
+            params.push(("filename".to_owned(), name));
+        }
+    }
+
+    let filename = filename_from_params(&params);
+    let is_attachment = filename.is_some() || disposition == "attachment";
+    if !is_attachment {
+        return;
+    }
+
+    let media_type = if mime_type.is_empty() {
+        "application/octet-stream".to_owned()
+    } else {
+        mime_type
+    };
+    let info = MimeAttachment {
+        filename: filename.unwrap_or_else(|| format!("attachment-{id}.bin")),
+        media_type,
+        size_bytes: decoded_size_estimate(raw, transfer_encoding),
+        inline: disposition == "inline",
+        id,
+    };
+    visit(info, (raw, transfer_encoding));
+}
+
+/// Decoded size without decoding: exact for base64 (count the alphabet
+/// characters), the raw length otherwise.
+fn decoded_size_estimate(raw: &str, transfer_encoding: &str) -> usize {
+    if transfer_encoding.trim().eq_ignore_ascii_case("base64") {
+        let meaningful = raw
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace() && *c != '=')
+            .count();
+        meaningful * 3 / 4
+    } else {
+        raw.len()
+    }
+}
+
 /// Raw part content to bytes, undoing the transfer encoding. `7bit`, `8bit`,
 /// `binary` and an absent encoding are already bytes.
 fn decode_transfer(raw: &str, transfer_encoding: &str) -> Vec<u8> {
@@ -718,5 +862,101 @@ mod tests {
             "--b--\r\n",
         );
         assert_eq!(body_to_text(raw, "multipart/mixed; boundary=b", "7bit"), "");
+    }
+
+    /// A realistic multipart/mixed: an alternative body (plain+html), a PDF
+    /// beside it, and an inline PNG nested one level deeper in a related
+    /// wrapper, so ids cross a boundary ("3.1").
+    fn mixed_message() -> (&'static str, &'static str) {
+        let raw = concat!(
+            "--outer\r\n",
+            "Content-Type: multipart/alternative; boundary=inner\r\n\r\n",
+            "--inner\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n",
+            "Der Text\r\n",
+            "--inner\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n\r\n",
+            "<p>Der Text</p>\r\n",
+            "--inner--\r\n",
+            "--outer\r\n",
+            "Content-Type: application/pdf\r\n",
+            "Content-Disposition: attachment; filename*=UTF-8''Angebot%20M%C3%A4rz.pdf\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "JVBERi0xLjQKJcOkw7zDtsOf\r\n",
+            "--outer\r\n",
+            "Content-Type: multipart/related; boundary=rel\r\n\r\n",
+            "--rel\r\n",
+            "Content-Type: image/png; name=logo.png\r\n",
+            "Content-Disposition: inline; filename=logo.png\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "iVBORw0KGgo=\r\n",
+            "--rel--\r\n",
+            "--outer--\r\n",
+        );
+        (raw, "multipart/mixed; boundary=outer")
+    }
+
+    #[test]
+    fn attachments_are_listed_with_stable_part_ids() {
+        let (raw, content_type) = mixed_message();
+        let listed = list_attachments(raw, content_type, "7bit");
+
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "2");
+        assert_eq!(listed[0].filename, "Angebot März.pdf");
+        assert_eq!(listed[0].media_type, "application/pdf");
+        assert!(!listed[0].inline);
+        // "JVBERi0xLjQKJcOkw7zDtsOf" is 24 base64 chars, no padding: 18 bytes.
+        assert_eq!(listed[0].size_bytes, 18);
+
+        assert_eq!(listed[1].id, "3.1");
+        assert_eq!(listed[1].filename, "logo.png");
+        assert!(listed[1].inline);
+    }
+
+    #[test]
+    fn extraction_decodes_the_named_part() {
+        let (raw, content_type) = mixed_message();
+        let (info, bytes) =
+            extract_attachment_bytes(raw, content_type, "7bit", "2").expect("part 2 exists");
+        assert_eq!(info.filename, "Angebot März.pdf");
+        // "JVBERi0xLjQKJcOkw7zDtsOf" → "%PDF-1.4\n%" + UTF-8 "äüöß".
+        assert_eq!(bytes, b"%PDF-1.4\n%\xc3\xa4\xc3\xbc\xc3\xb6\xc3\x9f".to_vec());
+        assert!(extract_attachment_bytes(raw, content_type, "7bit", "9").is_none());
+    }
+
+    #[test]
+    fn a_single_part_attachment_message_is_part_one() {
+        // The whole message *is* the file: no multipart, filename on top.
+        let listed = list_attachments("AAAA", "application/pdf; name=direkt.pdf", "base64");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "1");
+        assert_eq!(listed[0].filename, "direkt.pdf");
+
+        let (_, bytes) =
+            extract_attachment_bytes("AAAA", "application/pdf; name=direkt.pdf", "base64", "1")
+                .expect("the single part");
+        assert_eq!(bytes, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn a_body_without_filenames_lists_nothing() {
+        assert!(list_attachments("Hallo", "text/plain; charset=utf-8", "7bit").is_empty());
+    }
+
+    #[test]
+    fn a_nameless_binary_part_gets_the_fallback_name() {
+        let raw = concat!(
+            "--b\r\n",
+            "Content-Type: application/octet-stream\r\n",
+            "Content-Disposition: attachment\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "AAAA\r\n",
+            "--b--\r\n",
+        );
+        let listed = list_attachments(raw, "multipart/mixed; boundary=b", "7bit");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "1");
+        assert_eq!(listed[0].filename, "attachment-1.bin");
     }
 }
