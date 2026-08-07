@@ -40,6 +40,7 @@ pub enum ToolName {
     MailSearch,
     MailRefineSearch,
     MailGetMessage,
+    MailGetAttachment,
     MailGetThread,
     MailListMailboxes,
     MailMark,
@@ -59,6 +60,7 @@ impl ToolName {
             Self::MailSearch => "mail_search",
             Self::MailRefineSearch => "mail_refine_search",
             Self::MailGetMessage => "mail_get_message",
+            Self::MailGetAttachment => "mail_get_attachment",
             Self::MailGetThread => "mail_get_thread",
             Self::MailListMailboxes => "mail_list_mailboxes",
             Self::MailMark => "mail_mark",
@@ -120,6 +122,9 @@ impl ToolDescriptor {
             }
             ToolName::MailGetMessage => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"include_body":{"type":"boolean"}},"required":["account_id","message_id"]}"#
+            }
+            ToolName::MailGetAttachment => {
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"attachment_id":{"type":"string","description":"From the attachments list of mail_get_message."},"include_content":{"type":"boolean","description":"Also inline the bytes as base64 when the file is 2 MiB or smaller."}},"required":["account_id","message_id","attachment_id"]}"#
             }
             ToolName::MailGetThread => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"thread_id":{"type":"string"},"include_bodies":{"type":"boolean"}},"required":["account_id","thread_id"]}"#
@@ -222,6 +227,12 @@ type ConnectOverride = Box<dyn Fn(&AccountId) -> CoreResult<Box<dyn MailProvider
 
 const MAX_ATTACHMENTS: usize = 20;
 const MAX_MESSAGE_BYTES: usize = 20 * 1024 * 1024;
+/// Ceiling for `mail_get_attachment`: above this the honest answer is a mail
+/// client, not a tool result.
+const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Ceiling for inlining bytes into the tool answer — a context window is not
+/// a filesystem.
+const MAX_INLINE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Metadata safe to show in an approval or audit line. File bytes remain only
 /// in the raw MIME message and never enter either surface.
@@ -384,6 +395,10 @@ pub struct LineMcpServer {
     /// actually happens rather than what happened once at setup. `None` in
     /// fixture mode, for the same reason as `audit_path`.
     health_path: Option<PathBuf>,
+    /// Sibling of the policy file: where `mail_get_attachment` materializes
+    /// downloads (`attachments/<account>/<message>/<id>-<name>`). `None` in
+    /// fixture mode — no shared place to write, and the tool says so.
+    attachments_dir: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -404,6 +419,7 @@ impl LineMcpServer {
             audit_path: None,
             connections_path: None,
             health_path: None,
+            attachments_dir: None,
         }
     }
 
@@ -425,11 +441,13 @@ impl LineMcpServer {
         let audit_path = path.parent().map(|dir| dir.join("audit.jsonl"));
         let connections_path = path.parent().map(|dir| dir.join("connections.jsonl"));
         let health_path = path.parent().map(|dir| dir.join("health.jsonl"));
+        let attachments_dir = path.parent().map(|dir| dir.join("attachments"));
         Self {
             policy_path: Some(path),
             audit_path,
             connections_path,
             health_path,
+            attachments_dir,
             ..Self::fixture()
         }
     }
@@ -560,6 +578,17 @@ impl LineMcpServer {
         if name == ToolName::MailGetMessage.as_str() {
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 handle_mail_get_message(arguments, &account_id, provider, engine)
+            });
+        }
+        if name == ToolName::MailGetAttachment.as_str() {
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                handle_mail_get_attachment(
+                    arguments,
+                    &account_id,
+                    provider,
+                    engine,
+                    self.attachments_dir.as_deref(),
+                )
             });
         }
         if name == ToolName::MailGetThread.as_str() {
@@ -1643,6 +1672,9 @@ enum ToolFailure {
     /// Everything the domain can refuse or fail at: policy denials, missing
     /// messages, and provider (connection) failures.
     Core(CoreError),
+    /// A local filesystem failure — the attachment store could not be
+    /// written. Says nothing about the mail connection or account health.
+    Io(String),
 }
 
 impl ToolFailure {
@@ -1658,14 +1690,14 @@ impl ToolFailure {
     fn health_outcome(&self) -> Option<HealthOutcome> {
         match self {
             Self::Core(error) => HealthOutcome::from_error(error),
-            Self::InvalidParams(_) => None,
+            Self::InvalidParams(_) | Self::Io(_) => None,
         }
     }
 
     /// The human-readable reason, readable without consuming the failure.
     fn message(&self) -> String {
         match self {
-            Self::InvalidParams(message) => message.clone(),
+            Self::InvalidParams(message) | Self::Io(message) => message.clone(),
             Self::Core(error) => error.to_string(),
         }
     }
@@ -1674,6 +1706,7 @@ impl ToolFailure {
         match self {
             Self::InvalidParams(message) => json_rpc_error(id, -32602, &message),
             Self::Core(error) => json_rpc_error(id, -32000, &error.to_string()),
+            Self::Io(message) => json_rpc_error(id, -32000, &message),
         }
     }
 }
@@ -1776,12 +1809,111 @@ fn handle_mail_get_message(
     let message = service
         .get_message(account_id, message_id, include_body)
         .map_err(ToolFailure::Core)?;
-    Ok(message_json(&message))
+    let download_allowed = service.download_allowed(account_id, message.mailbox());
+    Ok(message_json(&message, download_allowed))
+}
+
+/// Download one attachment into the TorroMail-managed store and answer with
+/// the absolute path — never a client-chosen destination. Bytes ride along
+/// as base64 only on request and only for small files.
+fn handle_mail_get_attachment(
+    arguments: &Value,
+    account_id: &AccountId,
+    provider: &mut dyn MailProvider,
+    engine: PolicyEngine,
+    attachments_dir: Option<&std::path::Path>,
+) -> ToolResult {
+    let message_id = arguments["message_id"].as_str().unwrap_or_default();
+    let attachment_id = arguments["attachment_id"].as_str().unwrap_or_default();
+    let include_content = arguments["include_content"].as_bool().unwrap_or(false);
+    if message_id.is_empty() || attachment_id.is_empty() {
+        return Err(ToolFailure::InvalidParams(
+            "message_id and attachment_id are required".to_owned(),
+        ));
+    }
+    let Some(base_dir) = attachments_dir else {
+        return Err(ToolFailure::Io(
+            "no attachment store: the server is running without a policy path".to_owned(),
+        ));
+    };
+
+    let mut sessions = SearchSessionStore::default();
+    let service = MailAccessService::new(provider, engine, &mut sessions);
+    let payload = service
+        .get_attachment(account_id, message_id, attachment_id)
+        .map_err(ToolFailure::Core)?;
+
+    if payload.content().len() > MAX_ATTACHMENT_DOWNLOAD_BYTES {
+        return Err(ToolFailure::InvalidParams(format!(
+            "attachment is {} bytes; the limit is {MAX_ATTACHMENT_DOWNLOAD_BYTES} — fetch it in a mail client instead",
+            payload.content().len()
+        )));
+    }
+
+    // `<id>-<name>` instead of collision suffixes: re-downloads land on the
+    // same path, and two same-named attachments of one message never clash.
+    let file_name = format!(
+        "{}-{}",
+        sanitize_component(attachment_id),
+        sanitize_component(payload.filename())
+    );
+    let directory = base_dir
+        .join(sanitize_component(account_id.as_str()))
+        .join(sanitize_component(message_id));
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| ToolFailure::Io(format!("cannot create attachment store: {error}")))?;
+    let target = directory.join(&file_name);
+    std::fs::write(&target, payload.content())
+        .map_err(|error| ToolFailure::Io(format!("cannot write attachment: {error}")))?;
+
+    let mut answer = json!({
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+        "filename": payload.filename(),
+        "media_type": payload.media_type(),
+        "size_bytes": payload.content().len(),
+        "path": target.to_string_lossy(),
+        "from_cache": false
+    });
+    if include_content {
+        if payload.content().len() <= MAX_INLINE_CONTENT_BYTES {
+            answer["content_base64"] = json!(torromail_core::encode_base64(payload.content()));
+        } else {
+            answer["content_note"] = json!(format!(
+                "file exceeds the {MAX_INLINE_CONTENT_BYTES}-byte inline limit; read it from `path`"
+            ));
+        }
+    }
+    Ok(answer)
+}
+
+/// One path component, defused: separators, NUL and leading dots cannot
+/// escape the store or hide the file; 255 bytes is the filesystem's own cap.
+fn sanitize_component(raw: &str) -> String {
+    let mut cleaned: String = raw
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | '\0' => '-',
+            _ => character,
+        })
+        .collect();
+    while cleaned.starts_with('.') {
+        cleaned.remove(0);
+    }
+    while cleaned.len() > 255 {
+        cleaned.pop();
+    }
+    if cleaned.is_empty() {
+        cleaned.push_str("item");
+    }
+    cleaned
 }
 
 /// One message on the wire — the shape `mail_get_message` returns and
-/// `mail_get_thread` repeats for each message in the conversation.
-fn message_json(message: &StoredMessage) -> Value {
+/// `mail_get_thread` repeats for each message in the conversation. The
+/// attachment listing carries `download_allowed` so an assistant can ask for
+/// the right permission instead of guessing why a download failed.
+fn message_json(message: &StoredMessage, download_allowed: bool) -> Value {
     json!({
         "message_id": message.message_id(),
         "mailbox": message.mailbox(),
@@ -1792,7 +1924,16 @@ fn message_json(message: &StoredMessage) -> Value {
         "snippet": message.snippet(),
         "body": message.body(),
         "seen": message.seen(),
-        "flagged": message.flagged()
+        "flagged": message.flagged(),
+        "attachments": message.attachments().iter().map(|info| json!({
+            "attachment_id": info.id(),
+            "filename": info.filename(),
+            "media_type": info.media_type(),
+            "size_bytes": info.size_bytes(),
+            "inline": info.inline(),
+            "download_allowed": download_allowed
+        })).collect::<Vec<_>>(),
+        "attachment_count": message.attachments().len()
     })
 }
 
@@ -1811,7 +1952,17 @@ fn handle_mail_get_thread(
     let messages = service
         .get_thread(account_id, thread_id, include_bodies)
         .map_err(ToolFailure::Core)?;
-    let messages = messages.iter().map(message_json).collect::<Vec<_>>();
+    // A thread can span folders, so the download right is answered per
+    // message, not once for the thread.
+    let messages = messages
+        .iter()
+        .map(|message| {
+            message_json(
+                message,
+                service.download_allowed(account_id, message.mailbox()),
+            )
+        })
+        .collect::<Vec<_>>();
     Ok(json!({ "thread_id": thread_id, "messages": messages }))
 }
 
@@ -2483,6 +2634,10 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
         read(
             ToolName::MailGetMessage,
             "Fetch one message according to the account policy.",
+        ),
+        read(
+            ToolName::MailGetAttachment,
+            "Download one attachment (listed by mail_get_message) to a TorroMail-managed folder and answer with its absolute path. Needs the 'Message and attachments' read level; destination paths are never accepted.",
         ),
         read(
             ToolName::MailGetThread,

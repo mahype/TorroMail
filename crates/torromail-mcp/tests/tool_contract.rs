@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use torromail_core::{
-    AccountId, AttachmentPayload, CoreError, CoreResult, FixtureMailProvider, MailProvider,
-    MarkChange, SearchHit, SearchWindow, StoredMessage,
+    AccountId, AttachmentInfo, AttachmentPayload, CoreError, CoreResult, FixtureMailProvider,
+    MailProvider, MarkChange, SearchHit, SearchWindow, StoredMessage,
 };
 use torromail_mcp::{AccessLevel, LineMcpServer, ToolCatalog, ToolName, TransportMode};
 
@@ -211,6 +211,7 @@ fn planned_mail_tools_are_exposed() {
     assert!(names.contains(&ToolName::MailSearch));
     assert!(names.contains(&ToolName::MailRefineSearch));
     assert!(names.contains(&ToolName::MailGetMessage));
+    assert!(names.contains(&ToolName::MailGetAttachment));
     assert!(names.contains(&ToolName::MailGetThread));
     assert!(names.contains(&ToolName::MailListMailboxes));
     assert!(names.contains(&ToolName::MailMark));
@@ -2229,4 +2230,127 @@ fn an_unpaired_server_sweeps_nothing() {
 fn a_sweep_without_a_policy_document_does_nothing_rather_than_failing() {
     // The fixture-mode server: no document, no accounts, nothing to prove.
     torromail_mcp::sweep_account_health(None, None);
+}
+
+/// A message with one PDF attachment, plus its payload bytes.
+fn mailbox_with_attachment() -> FixtureMailProvider {
+    let account = AccountId::new("work");
+    let message = StoredMessage::new(
+        account,
+        "INBOX",
+        "m1",
+        "thread-1",
+        "Mit Anhang",
+        "a@example.com",
+        "s",
+        "body",
+    )
+    .with_attachment_infos(vec![AttachmentInfo::new(
+        "2",
+        "angebot.pdf",
+        "application/pdf",
+        8,
+        false,
+    )]);
+    FixtureMailProvider::new([message]).with_attachment(
+        "m1",
+        "2",
+        "angebot.pdf",
+        "application/pdf",
+        b"%PDF-1.4".to_vec(),
+    )
+}
+
+fn attachment_document(path: &std::path::Path, read: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"{read}","write":{{"drafts":true}},"send":false,"per_folder":false,"folder_rules":{{}}}}]}}"#
+        ),
+    )
+    .expect("policy document written");
+}
+
+const GET_MESSAGE_WITH_BODY: &str = r#"{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"m1","include_body":true}}}"#;
+const GET_ATTACHMENT: &str = r#"{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"mail_get_attachment","arguments":{"account_id":"work","message_id":"m1","attachment_id":"2"}}}"#;
+const GET_ATTACHMENT_INLINE: &str = r#"{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"mail_get_attachment","arguments":{"account_id":"work","message_id":"m1","attachment_id":"2","include_content":true}}}"#;
+
+#[test]
+fn get_message_lists_attachments_and_their_download_right() {
+    let path = temp_policy_path("attachment-listing");
+    attachment_document(&path, "full_message");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(mailbox_with_attachment()) as Box<dyn MailProvider>)
+    });
+
+    let response = server.handle_line(GET_MESSAGE_WITH_BODY).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#"\"attachment_count\":1"#), "got: {response}");
+    assert!(response.contains("angebot.pdf"), "got: {response}");
+    assert!(
+        response.contains(r#"\"download_allowed\":false"#),
+        "got: {response}"
+    );
+}
+
+#[test]
+fn downloading_needs_the_attachment_read_level() {
+    let path = temp_policy_path("attachment-denied");
+    attachment_document(&path, "full_message");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(mailbox_with_attachment()) as Box<dyn MailProvider>)
+    });
+
+    let response = server.handle_line(GET_ATTACHMENT).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains("error"), "got: {response}");
+    assert!(response.contains("-32000"), "got: {response}");
+}
+
+#[test]
+fn downloading_writes_the_file_and_answers_its_path() {
+    let path = temp_policy_path("attachment-download");
+    attachment_document(&path, "with_attachments");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(mailbox_with_attachment()) as Box<dyn MailProvider>)
+    });
+
+    let response = server.handle_line(GET_ATTACHMENT).expect("a response");
+    let inline = server.handle_line(GET_ATTACHMENT_INLINE).expect("a response");
+
+    let expected_file = path
+        .parent()
+        .expect("temp dir")
+        .join("attachments/work/m1/2-angebot.pdf");
+    let written = std::fs::read(&expected_file).expect("file written");
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir_all(path.parent().expect("temp dir").join("attachments")).ok();
+
+    assert_eq!(written, b"%PDF-1.4");
+    assert!(
+        response.contains(r#"\"filename\":\"angebot.pdf\""#),
+        "got: {response}"
+    );
+    assert!(response.contains("2-angebot.pdf"), "got: {response}");
+    assert!(!response.contains("content_base64"), "got: {response}");
+    // include_content inlines the bytes: "%PDF-1.4" → JVBERi0xLjQ=
+    assert!(inline.contains("JVBERi0xLjQ="), "got: {inline}");
+}
+
+#[test]
+fn an_unknown_attachment_id_answers_a_named_error() {
+    let path = temp_policy_path("attachment-missing");
+    attachment_document(&path, "with_attachments");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(mailbox_with_attachment()) as Box<dyn MailProvider>)
+    });
+
+    let request = r#"{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"mail_get_attachment","arguments":{"account_id":"work","message_id":"m1","attachment_id":"9"}}}"#;
+    let response = server.handle_line(request).expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains("error"), "got: {response}");
+    assert!(response.contains('9'), "got: {response}");
 }
