@@ -105,15 +105,16 @@
 
 /* Search & Cache */
 "Search & Cache" = "Suche & Cache";
-"Local cache" = "Lokaler Cache";
-"Cache level" = "Cache-Stufe";
-"Metadata" = "Metadaten";
-"Headers" = "Kopfzeilen";
-"Bodies" = "Inhalte";
-"Full text" = "Volltext";
-"Full text index" = "Volltextindex";
-"Attachment index" = "Anhang-Index";
+"Cache" = "Cache";
+"Off" = "Aus";
+"Subject & sender" = "Betreff & Absender";
+"Full messages" = "Ganze E-Mails";
+"Messages & attachments" = "E-Mails & Anhänge";
+"Limited to “%@” by the read permission." = "Durch das Leserecht auf „%@“ begrenzt.";
 "Storage" = "Speicher";
+"Rebuild" = "Neu aufbauen";
+"Rebuilding…" = "Baue neu auf …";
+"MCP executable not found" = "MCP-Programm nicht gefunden";
 "More caching makes search faster but stores mail content on this Mac." = "Mehr Cache beschleunigt die Suche, speichert aber E-Mail-Inhalte auf diesem Mac.";
 
 /* Pending actions */

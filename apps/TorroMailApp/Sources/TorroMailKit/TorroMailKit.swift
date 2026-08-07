@@ -595,12 +595,18 @@ private final class StderrDrain: @unchecked Sendable {
         while true {
             let chunk = handle.availableData
             if chunk.isEmpty { return }
-            lock.lock()
-            if bytes.count < Self.limit {
-                bytes.append(chunk.prefix(Self.limit - bytes.count))
-            }
-            lock.unlock()
+            append(chunk)
         }
+    }
+
+    /// One chunk as a readability handler delivers it — the non-blocking
+    /// sibling of `consume`, same ceiling.
+    func append(_ chunk: Data) {
+        lock.lock()
+        if bytes.count < Self.limit {
+            bytes.append(chunk.prefix(Self.limit - bytes.count))
+        }
+        lock.unlock()
     }
 
     /// Whatever has arrived so far. Decoded leniently: the cap can cut a
@@ -704,6 +710,233 @@ public enum AccountCheck {
             return AccountCheckResult(outcome: .ok, detail: "")
         }
         return .parsing(stderr: drain.text)
+    }
+}
+
+/// The real on-disk footprint of one account's cache: the SQLite database
+/// (its WAL sibling included) plus the retained attachment files. Measured,
+/// never stored — a stored figure is how "0 MB" lies happen.
+public enum CacheStorage {
+    static func supportDirectory() -> URL? {
+        (try? PolicyDocument.defaultURL())?.deletingLastPathComponent()
+    }
+
+    /// Everything the account keeps on disk, in bytes.
+    public static func sizeBytes(accountID: String) -> Int64 {
+        guard let support = supportDirectory() else { return 0 }
+        var total: Int64 = 0
+        let database = support.appendingPathComponent("cache/\(accountID).sqlite")
+        for candidate in [database, URL(fileURLWithPath: database.path + "-wal")] {
+            let size = (try? FileManager.default.attributesOfItem(atPath: candidate.path))?[.size]
+            total += (size as? Int64) ?? 0
+        }
+        total += directorySize(support.appendingPathComponent("attachments/\(accountID)"))
+        return total
+    }
+
+    private static func directorySize(_ directory: URL) -> Int64 {
+        let manager = FileManager.default
+        guard
+            let walker = manager.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in walker {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+            total += Int64(size ?? 0)
+        }
+        return total
+    }
+
+    /// Delete is honest: the database files and the attachment directory go;
+    /// the server recreates the schema lazily on its next write.
+    public static func delete(accountID: String) throws {
+        guard let support = supportDirectory() else { return }
+        let manager = FileManager.default
+        let database = support.appendingPathComponent("cache/\(accountID).sqlite")
+        for path in [database.path, database.path + "-wal", database.path + "-shm"] {
+            if manager.fileExists(atPath: path) {
+                try manager.removeItem(atPath: path)
+            }
+        }
+        let attachments = support.appendingPathComponent("attachments/\(accountID)")
+        if manager.fileExists(atPath: attachments.path) {
+            try manager.removeItem(at: attachments)
+        }
+    }
+
+    public static func label(bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+/// Fire-and-forget `--trim-cache`: the disk follows a lowered level or read
+/// permission. Local housekeeping only — no login, no output anyone reads.
+public enum CacheTrim {
+    public static func run(accountID: String, executableName: String) {
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve() else { return }
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments + ["--trim-cache", accountID]
+        var environment = ProcessInfo.processInfo.environment
+        if let url = try? PolicyDocument.defaultURL() {
+            environment["TORROMAIL_POLICY_PATH"] = url.path
+        }
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+    }
+}
+
+/// Runs `torromail-mcp --rebuild-cache <id>` and relays its JSON progress
+/// lines — the same locator, policy path and app key `AccountCheck` uses,
+/// because a rebuild logs into the real mailbox.
+public final class CacheRebuild: @unchecked Sendable {
+    public struct Progress: Sendable {
+        public var phase: String
+        public var mailbox: String
+        public var done: Int
+        public var total: Int
+
+        public init(phase: String, mailbox: String, done: Int, total: Int) {
+            self.phase = phase
+            self.mailbox = mailbox
+            self.done = done
+            self.total = total
+        }
+
+        public var fraction: Double {
+            total > 0 ? Double(done) / Double(total) : 0
+        }
+    }
+
+    private let process: Process
+
+    private init(process: Process) {
+        self.process = process
+    }
+
+    /// `nil` when the MCP executable cannot be found or spawned — the caller
+    /// shows that as the failure it is. Callbacks arrive on a background
+    /// queue; hop to the main actor before touching UI state.
+    public static func start(
+        accountID: String,
+        executableName: String,
+        onProgress: @escaping @Sendable (Progress) -> Void,
+        onFinish: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) -> CacheRebuild? {
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve() else { return nil }
+
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments + ["--rebuild-cache", accountID]
+        var environment = ProcessInfo.processInfo.environment
+        if let url = try? PolicyDocument.defaultURL() {
+            environment["TORROMAIL_POLICY_PATH"] = url.path
+        }
+        if let appToken = try? MCPClientKeyStore.appToken() {
+            environment["TORROMAIL_TOKEN"] = appToken
+        }
+        process.environment = environment
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        // One JSON object per line; partial reads are buffered until their
+        // newline arrives.
+        let buffer = LineBuffer()
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            for line in buffer.consume(handle.availableData) {
+                guard
+                    let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+                    let fields = object as? [String: Any]
+                else { continue }
+                onProgress(
+                    Progress(
+                        phase: fields["phase"] as? String ?? "",
+                        mailbox: fields["mailbox"] as? String ?? "",
+                        done: fields["done"] as? Int ?? 0,
+                        total: fields["total"] as? Int ?? 0
+                    )
+                )
+            }
+        }
+        let failureText = StderrDrain()
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            failureText.append(handle.availableData)
+        }
+
+        process.terminationHandler = { finished in
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            if finished.terminationStatus == 0 {
+                onFinish(.success(()))
+            } else {
+                let reason = failureText.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                onFinish(
+                    .failure(
+                        NSError(
+                            domain: "TorroMail.CacheRebuild",
+                            code: Int(finished.terminationStatus),
+                            userInfo: [
+                                NSLocalizedDescriptionKey: reason.isEmpty
+                                    ? "the rebuild was interrupted" : reason
+                            ]
+                        )
+                    )
+                )
+            }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        return CacheRebuild(process: process)
+    }
+
+    /// SIGTERM; batches are transactional, so a canceled rebuild leaves a
+    /// valid partial cache behind.
+    public func cancel() {
+        process.terminate()
+    }
+}
+
+/// Splits an incoming byte stream into complete lines, keeping the tail
+/// until its newline arrives. Confined by the serial delivery of one pipe's
+/// readability handler.
+private final class LineBuffer: @unchecked Sendable {
+    private var pending = Data()
+    private let lock = NSLock()
+
+    func consume(_ data: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        pending.append(data)
+        var lines: [String] = []
+        while let newline = pending.firstIndex(of: 0x0A) {
+            let line = pending[pending.startIndex..<newline]
+            lines.append(String(decoding: line, as: UTF8.self))
+            pending = Data(pending[pending.index(after: newline)...])
+        }
+        return lines
     }
 }
 
@@ -1709,14 +1942,10 @@ public enum PolicyDocument {
             "folder_rules": account.permissions.folderRules.mapValues { rule in
                 ["read": rule.read, "write": rule.write]
             },
-            // The server reports these rather than acting on them, so an
-            // assistant can say why a body is missing or a search is slow.
+            // The server acts on this: it is the write-through ceiling for
+            // the account's local cache, capped again by the read level.
             "cache": [
-                "local_cache_enabled": account.searchCache.localCacheEnabled,
-                "mode": account.searchCache.cacheMode.rawValue,
-                "index_bodies": account.searchCache.indexBodies,
-                "index_attachments": account.searchCache.indexAttachments,
-                "storage": account.searchCache.storage
+                "level": account.searchCache.level.rawValue
             ]
         ]
         // Connection facts travel once the account has them, whatever the
@@ -2018,13 +2247,40 @@ public enum LoginMethod: String, CaseIterable, Identifiable, Hashable, Sendable,
     public var id: Self { self }
 }
 
-public enum CacheMode: String, CaseIterable, Identifiable, Hashable, Sendable, Codable {
-    case metadata
+/// How much of an account may rest on this Mac, in the language of the read
+/// permissions. One decision — indexing always covers exactly what is
+/// stored, so there is no separate index switch.
+public enum CacheLevel: String, CaseIterable, Identifiable, Hashable, Sendable, Codable, Comparable {
+    case off
     case headers
-    case body
-    case fullText
+    case bodies
+    case attachments
 
     public var id: Self { self }
+
+    private var rank: Int {
+        switch self {
+        case .off: 0
+        case .headers: 1
+        case .bodies: 2
+        case .attachments: 3
+        }
+    }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rank < rhs.rank
+    }
+
+    /// The most the read permission justifies keeping on disk: nothing is
+    /// stored that no assistant may read.
+    public static func ceiling(for read: ReadAccess) -> CacheLevel {
+        switch read {
+        case .none: .off
+        case .headers: .headers
+        case .fullMessage: .bodies
+        case .withAttachments: .attachments
+        }
+    }
 }
 
 /// Connection health of one account. The UI stays quiet while everything is
@@ -2222,24 +2478,45 @@ extension PermissionSet {
 }
 
 public struct SearchCacheSettings: Hashable, Sendable, Codable {
-    public var localCacheEnabled: Bool
-    public var cacheMode: CacheMode
-    public var indexBodies: Bool
-    public var indexAttachments: Bool
-    public var storage: String
+    public var level: CacheLevel
 
-    public init(
-        localCacheEnabled: Bool = true,
-        cacheMode: CacheMode = .metadata,
-        indexBodies: Bool = false,
-        indexAttachments: Bool = false,
-        storage: String = "0 MB"
-    ) {
-        self.localCacheEnabled = localCacheEnabled
-        self.cacheMode = cacheMode
-        self.indexBodies = indexBodies
-        self.indexAttachments = indexAttachments
-        self.storage = storage
+    public init(level: CacheLevel = .headers) {
+        self.level = level
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case level
+    }
+
+    /// The previous build stored four switches; they map exactly the way the
+    /// server maps a legacy policy document, so an upgrade keeps the user's
+    /// decision without asking again.
+    private enum LegacyKeys: String, CodingKey {
+        case localCacheEnabled
+        case cacheMode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let level = try container.decodeIfPresent(CacheLevel.self, forKey: .level) {
+            self.level = level
+            return
+        }
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        let enabled = try legacy.decodeIfPresent(Bool.self, forKey: .localCacheEnabled) ?? true
+        let mode = try legacy.decodeIfPresent(String.self, forKey: .cacheMode) ?? "metadata"
+        if !enabled {
+            self.level = .off
+        } else if mode == "body" || mode == "fullText" {
+            self.level = .bodies
+        } else {
+            self.level = .headers
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(level, forKey: .level)
     }
 }
 
@@ -2974,10 +3251,7 @@ extension TorroMailModel {
                             "Private": FolderRule(read: false, write: false)
                         ]
                     ),
-                    searchCache: SearchCacheSettings(
-                        cacheMode: .headers,
-                        storage: "42 MB"
-                    ),
+                    searchCache: SearchCacheSettings(level: .headers),
                     pendingActions: [
                         PendingAction(
                             id: "pending-1",

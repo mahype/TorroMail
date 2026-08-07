@@ -1318,4 +1318,47 @@ require(
     "and the account detail can say when that was"
 )
 
+
+// Cache settings: the single level replaces the four switches, and a state
+// file written by the previous build still decodes to the right level.
+let legacyCacheJSON = Data("""
+{"localCacheEnabled":true,"cacheMode":"fullText","indexBodies":true,"indexAttachments":false,"storage":"12 MB"}
+""".utf8)
+require(
+    (try? JSONDecoder().decode(SearchCacheSettings.self, from: legacyCacheJSON))?.level == .bodies,
+    "legacy fullText cache decodes to the bodies level"
+)
+let disabledCacheJSON = Data("""
+{"localCacheEnabled":false,"cacheMode":"metadata","indexBodies":false,"indexAttachments":false,"storage":"0 MB"}
+""".utf8)
+require(
+    (try? JSONDecoder().decode(SearchCacheSettings.self, from: disabledCacheJSON))?.level == .off,
+    "a disabled legacy cache decodes to off"
+)
+require(
+    (try? JSONDecoder().decode(SearchCacheSettings.self, from: Data(#"{"level":"attachments"}"#.utf8)))?.level == .attachments,
+    "the new shape decodes directly"
+)
+require(
+    CacheLevel.ceiling(for: .headers) == .headers && CacheLevel.ceiling(for: .fullMessage) == .bodies
+        && CacheLevel.ceiling(for: .withAttachments) == .attachments && CacheLevel.ceiling(for: ReadAccess.none) == .off,
+    "the read permission caps the cache level"
+)
+let cachePublishAccount = MailAccount(
+    id: "cache-contract",
+    name: "Cache Contract",
+    email: "cache@example.com",
+    provider: .imapSmtp,
+    loginMethod: .password,
+    searchCache: SearchCacheSettings(level: .attachments)
+)
+let cachePolicyData = (try? PolicyDocument.data(for: [cachePublishAccount], clients: [])) ?? Data()
+let cachePolicyText = String(data: cachePolicyData, encoding: .utf8) ?? ""
+let cacheAccounts = ((try? JSONSerialization.jsonObject(with: cachePolicyData)) as? [String: Any])?["accounts"] as? [[String: Any]] ?? []
+let cacheBlock = cacheAccounts.first?["cache"] as? [String: Any]
+require(
+    cacheBlock?["level"] as? String == "attachments" && !cachePolicyText.contains("local_cache_enabled"),
+    "the published cache block carries the level and nothing legacy"
+)
+
 print("TorroMailKit control-surface contract passed")

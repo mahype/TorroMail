@@ -79,12 +79,12 @@ private func label(for method: LoginMethod) -> String {
     }
 }
 
-private func label(for mode: CacheMode) -> String {
-    switch mode {
-    case .metadata: L("Metadata")
-    case .headers: L("Headers")
-    case .body: L("Bodies")
-    case .fullText: L("Full text")
+func label(for level: CacheLevel) -> String {
+    switch level {
+    case .off: L("Off")
+    case .headers: L("Subject & sender")
+    case .bodies: L("Full messages")
+    case .attachments: L("Messages & attachments")
     }
 }
 
@@ -1481,6 +1481,12 @@ private struct AccountDetailView: View {
     // sub-selection instead of resetting the user's choice.
     @State private var lastRead: ReadAccess = .fullMessage
     @State private var lastWrite = WriteAccess(drafts: true, mark: true)
+    // The cache section's live state: the measured figure, and the rebuild
+    // in flight, if any. The figure is measured, never stored.
+    @State private var cacheStorageBytes: Int64 = 0
+    @State private var rebuildProgress: CacheRebuild.Progress?
+    @State private var rebuildHandle: CacheRebuild?
+    @State private var rebuildFailure: String?
 
     var body: some View {
         Form {
@@ -1950,27 +1956,128 @@ private struct AccountDetailView: View {
         )
     }
 
+    /// The level the disk actually follows: the picker's choice, capped by
+    /// what assistants may read at all.
+    private var effectiveCacheLevel: CacheLevel {
+        min(account.searchCache.level, CacheLevel.ceiling(for: account.permissions.read))
+    }
+
     private var cacheSection: some View {
         Section {
-            Toggle(L("Local cache"), isOn: $account.searchCache.localCacheEnabled)
-            if account.searchCache.localCacheEnabled {
-                Picker(L("Cache level"), selection: $account.searchCache.cacheMode) {
-                    ForEach(CacheMode.allCases) { mode in
-                        Text(label(for: mode)).tag(mode)
+            Picker(L("Cache"), selection: $account.searchCache.level) {
+                ForEach(CacheLevel.allCases) { level in
+                    Text(label(for: level)).tag(level)
+                }
+            }
+            if effectiveCacheLevel < account.searchCache.level {
+                Text(
+                    String(
+                        format: L("Limited to “%@” by the read permission."),
+                        label(for: effectiveCacheLevel)
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            if account.searchCache.level != .off {
+                if let progress = rebuildProgress {
+                    LabeledContent(L("Rebuilding…")) {
+                        ProgressView(value: progress.fraction)
+                            .frame(maxWidth: 140)
+                        Button(L("Cancel")) { cancelRebuild() }
+                            .buttonStyle(.bordered)
+                    }
+                } else {
+                    LabeledContent(L("Storage")) {
+                        Text(CacheStorage.label(bytes: cacheStorageBytes))
+                        Button(L("Rebuild")) { startRebuild() }
+                            .buttonStyle(.bordered)
+                        Button(L("Delete")) { deleteCache() }
+                            .torroButton()
                     }
                 }
-                Toggle(L("Full text index"), isOn: $account.searchCache.indexBodies)
-                Toggle(L("Attachment index"), isOn: $account.searchCache.indexAttachments)
-                LabeledContent(L("Storage")) {
-                    Text(account.searchCache.storage)
-                    Button(L("Delete")) {}
-                        .torroButton()
-                }
+            }
+            if let failure = rebuildFailure {
+                Text(failure)
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         } header: {
             Text(L("Search & Cache"))
         } footer: {
             Text(L("More caching makes search faster but stores mail content on this Mac."))
+        }
+        .onAppear {
+            cacheStorageBytes = CacheStorage.sizeBytes(accountID: account.id)
+        }
+        .onChange(of: account.searchCache.level) {
+            // The disk follows the decision, whichever direction it went.
+            CacheTrim.run(
+                accountID: account.id,
+                executableName: model.generalSettings.mcpExecutable
+            )
+            refreshCacheStorage()
+        }
+        .onChange(of: account.permissions.read) {
+            // A lowered read permission caps the cache; trim right away.
+            CacheTrim.run(
+                accountID: account.id,
+                executableName: model.generalSettings.mcpExecutable
+            )
+            refreshCacheStorage()
+        }
+    }
+
+    /// The size figure is measured slightly later than the action that
+    /// changed it — the trim runs in its own process.
+    private func refreshCacheStorage() {
+        let accountID = account.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            cacheStorageBytes = CacheStorage.sizeBytes(accountID: accountID)
+        }
+    }
+
+    private func startRebuild() {
+        rebuildFailure = nil
+        let accountID = account.id
+        let handle = CacheRebuild.start(
+            accountID: accountID,
+            executableName: model.generalSettings.mcpExecutable,
+            onProgress: { progress in
+                DispatchQueue.main.async {
+                    rebuildProgress = progress
+                }
+            },
+            onFinish: { outcome in
+                DispatchQueue.main.async {
+                    rebuildProgress = nil
+                    rebuildHandle = nil
+                    if case let .failure(error) = outcome {
+                        rebuildFailure = error.localizedDescription
+                    }
+                    cacheStorageBytes = CacheStorage.sizeBytes(accountID: accountID)
+                }
+            }
+        )
+        if let handle {
+            rebuildHandle = handle
+            rebuildProgress = CacheRebuild.Progress(phase: "headers", mailbox: "", done: 0, total: 0)
+        } else {
+            rebuildFailure = L("MCP executable not found")
+        }
+    }
+
+    private func cancelRebuild() {
+        rebuildHandle?.cancel()
+    }
+
+    private func deleteCache() {
+        do {
+            try CacheStorage.delete(accountID: account.id)
+            cacheStorageBytes = 0
+            rebuildFailure = nil
+        } catch {
+            rebuildFailure = error.localizedDescription
         }
     }
 
