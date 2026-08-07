@@ -149,9 +149,11 @@ is the intended place for a human to read the preview and approve.
 
 All fifteen catalog tools are implemented.
 
-Read-only admin tools. These answer from the policy document alone and are
-dispatched before any account lookup or connection — `mail_list_accounts` is
-where an `account_id` is learned, so requiring one would lock every client out:
+Read-only admin tools. These are dispatched before any account lookup or
+connection — `mail_list_accounts` is where an `account_id` is learned, so
+requiring one would lock every client out. The first two answer from the
+policy document alone; `mail_get_cache_status` also reads the local cache
+store for real counts, sizes, and the effective (permission-capped) level:
 
 - `mail_list_accounts`
 - `mail_get_policy`

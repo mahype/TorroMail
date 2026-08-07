@@ -112,7 +112,35 @@ back to the product default (read and drafts).
 
 ## Search And Cache
 
-The default cache policy persists metadata and headers only. Body cache, body indexing, and attachment indexing are opt-in per account or mailbox. Every search creates a reusable `result_set_id`; refinements operate on the prior set before broadening back to provider search.
+Each account has one cache decision, spoken in the language of the read
+permissions: `off`, `headers` (Betreff & Absender), `bodies` (Ganze
+E-Mails), or `attachments` (E-Mails & Anhänge). The effective level is
+capped by the account's read permission — nothing rests on disk that no
+assistant may read — and lowering either triggers `--trim-cache`. There are
+no separate index switches: the FTS index always covers exactly what is
+stored (subjects and senders always, body text and attachment *filenames*
+from `bodies` up; file contents never).
+
+The store is one SQLite database per account (`cache/<account>.sqlite`
+beside the policy document, WAL mode — every MCP client spawns its own
+server process) with an FTS5 index; retained attachment files live in the
+`attachments/` tree from the download path. It fills write-through: what
+search and read tools fetch anyway is kept at the effective level, and rows
+are only valid under the UIDVALIDITY they were written with. Cached rows
+serve repeated reads (`from_cache: true`); `mail_search` merges local index
+hits into the live answer (`source: "live"`), and when the server is
+unreachable the index answers alone (`source: "cache_only"`). The empty
+browse query never consults the cache — recency is the server's to answer.
+Only ids of the `mailbox/uid` shape are cached, which keeps fixture data
+out by construction.
+
+`torromail-mcp --rebuild-cache <account>` wipes and prefetches (newest 500
+header rows per readable mailbox in one batched `UID FETCH` per chunk, the
+newest 100 INBOX bodies when the level allows), emitting one JSON progress
+line per batch for the app's progress bar. `mail_get_cache_status` reports
+the chosen and effective level plus real counts and bytes. Every search
+creates a reusable `result_set_id`; refinements operate on the prior set
+before broadening back to provider search.
 
 ## Risky Actions
 

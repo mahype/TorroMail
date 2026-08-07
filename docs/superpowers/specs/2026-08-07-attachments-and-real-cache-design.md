@@ -206,12 +206,14 @@ timeout, and all writes are idempotent upserts keyed by mailbox and UID.
 Tables: `mailboxes` (name, UIDVALIDITY), `messages` (mailbox, uid, message id,
 thread id, subject, sender, date, flags, body text nullable, cached-at), an
 FTS5 mirror of subject/sender/body/filenames, and `attachments` (message ref,
-attachment id, filename, media type, size, path nullable, retained flag —
-listing rows arrive with body fetches, path and retained fill in on
-download). Cached rows are
+attachment id, filename, media type, size, path nullable — listing rows
+arrive with body fetches, the path fills in on download and marks the file
+retained). Cached rows are
 only valid for the UIDVALIDITY under which they were written; a changed value
-on SELECT invalidates that mailbox's rows. Only accounts with real connection
-facts are cached — fixture accounts stay in-memory.
+on SELECT invalidates that mailbox's rows, and an *unknown* generation is
+never recorded over a known one. Cacheability follows the id shape: only
+`mailbox/uid` ids are cached, which keeps fixture data (ids like `m1`) out
+by construction.
 
 ### Write-through population
 
@@ -227,8 +229,8 @@ call needs, attachments as described in Part 1).
 The server stays the source of truth. A `mail_search` with a query runs the
 provider search as today and, in the same call, queries the local FTS index;
 results merge deduplicated by mailbox and message id, server order first,
-cache-only hits appended and marked `from_cache: true`. Server hits whose
-bodies are cached get real snippets instead of subject-derived ones. The
+cache-only hits appended and marked `from_cache: true` (those carry real
+snippets from the cached body text; live hits keep their provider shape). The
 result set carries `"source": "live"`; when the provider is unreachable the
 cache answers alone with `"source": "cache_only"`, which turns a dead network
 from an error into a degraded answer. The empty query ("what came in lately")
