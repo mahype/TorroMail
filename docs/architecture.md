@@ -46,6 +46,7 @@ Read and search tools:
 - `mail_search`
 - `mail_refine_search`
 - `mail_get_message`
+- `mail_get_attachment`
 - `mail_get_thread`
 - `mail_list_mailboxes`
 
@@ -146,6 +147,18 @@ most 20 attachments, and the finished MIME message may contain at most 20 MiB.
   ]
 }
 ```
+
+## Incoming Attachments
+
+`mail_get_message` lists a message's attachments (id, filename, media type,
+decoded size, inline flag) from the "Full message" read level; the bytes need
+"Message and attachments". `mail_get_attachment` writes the decoded file to
+`attachments/<account>/<message>/<id>-<filename>` under the shared Application
+Support directory and answers with the absolute path — clients never pass
+destination paths, mirroring the rule on the outgoing side.
+`include_content: true` additionally inlines base64 up to 2 MiB; downloads are
+capped at 50 MiB. Files older than 24 hours are swept on server start until
+the cache (spec phase 2) starts retaining them.
 
 ## Provider Roadmap
 

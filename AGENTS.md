@@ -113,6 +113,11 @@ Read/search tools:
 
 - `mail_search`
 - `mail_get_message`
+- `mail_get_attachment` — downloads one attachment (listed by
+  `mail_get_message`) into
+  `~/Library/Application Support/TorroMail/attachments/` and answers with the
+  absolute path; gated by the "Message and attachments" read level. Clients
+  never choose destination paths.
 - `mail_list_mailboxes`
 - `mail_refine_search`
 - `mail_get_thread` — plain IMAP has no thread identity, so a thread is
@@ -142,7 +147,7 @@ Prepared actions live in the server between prepare and confirm. The
 confirmation code is the handshake tying a confirm to one preparation; the GUI
 is the intended place for a human to read the preview and approve.
 
-All fourteen catalog tools are implemented.
+All fifteen catalog tools are implemented.
 
 Read-only admin tools. These answer from the policy document alone and are
 dispatched before any account lookup or connection — `mail_list_accounts` is

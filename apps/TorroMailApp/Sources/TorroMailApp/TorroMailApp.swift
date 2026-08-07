@@ -105,6 +105,7 @@ func auditEventLabel(_ tool: String) -> String {
     case "mail_search": L("Searched mail")
     case "mail_refine_search": L("Refined a search")
     case "mail_get_message": L("Read a message")
+    case "mail_get_attachment": L("Downloaded an attachment")
     case "mail_get_thread": L("Read a conversation")
     case "mail_list_mailboxes": L("Listed mailboxes")
     case "mail_mark": L("Marked a message")
