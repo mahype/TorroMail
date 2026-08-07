@@ -607,11 +607,11 @@ fn mail_get_policy_refuses_accounts_the_document_does_not_name() {
 }
 
 #[test]
-fn mail_get_cache_status_reports_the_published_facts() {
+fn cache_status_reports_levels_and_real_counts() {
     let path = temp_policy_path("cache-status");
     std::fs::write(
         &path,
-        r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"drafts":true},"send":false,"per_folder":false,"folder_rules":{},"cache":{"local_cache_enabled":true,"mode":"headers","index_bodies":false,"index_attachments":false,"storage":"12 MB"}}]}"#,
+        r#"{"version":1,"accounts":[{"id":"work","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"cache":{"level":"bodies"}}]}"#,
     )
     .expect("policy document written");
 
@@ -623,8 +623,39 @@ fn mail_get_cache_status_reports_the_published_facts() {
         .expect("a request gets a response");
     std::fs::remove_file(&path).ok();
 
-    assert!(response.contains(r#"\"mode\":\"headers\""#));
-    assert!(response.contains("12 MB"));
+    // The chosen level survives; the headers-only read permission caps it.
+    assert!(response.contains(r#"\"level\":\"bodies\""#), "got: {response}");
+    assert!(
+        response.contains(r#"\"effective_level\":\"headers\""#),
+        "got: {response}"
+    );
+    assert!(response.contains(r#"\"message_count\":0"#), "got: {response}");
+    assert!(response.contains(r#"\"size_bytes\":0"#), "got: {response}");
+}
+
+#[test]
+fn legacy_cache_blocks_still_parse() {
+    let path = temp_policy_path("cache-legacy");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"with_attachments","write":{},"send":false,"per_folder":false,"folder_rules":{},"cache":{"local_cache_enabled":true,"mode":"fullText","index_bodies":true,"index_attachments":true,"storage":"12 MB"}}]}"#,
+    )
+    .expect("policy document written");
+
+    let server = LineMcpServer::with_policy_path(path.clone());
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"mail_get_cache_status","arguments":{"account_id":"work"}}}"#,
+        )
+        .expect("a request gets a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains(r#"\"level\":\"bodies\""#), "got: {response}");
+    assert!(
+        response.contains(r#"\"effective_level\":\"bodies\""#),
+        "got: {response}"
+    );
+    assert!(!response.contains("local_cache_enabled"), "got: {response}");
 }
 
 #[test]

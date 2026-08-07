@@ -442,6 +442,7 @@ dependencies = [
  "security-framework",
  "serde_json",
  "sha2",
+ "torromail-cache",
  "torromail-core",
  "torromail-imap-tls",
  "torromail-oauth",

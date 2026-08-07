@@ -399,6 +399,9 @@ pub struct LineMcpServer {
     /// downloads (`attachments/<account>/<message>/<id>-<name>`). `None` in
     /// fixture mode — no shared place to write, and the tool says so.
     attachments_dir: Option<PathBuf>,
+    /// Sibling of the policy file: the per-account SQLite caches live in
+    /// `cache/<account>.sqlite`. `None` in fixture mode.
+    cache_dir: Option<PathBuf>,
 }
 
 impl LineMcpServer {
@@ -420,6 +423,7 @@ impl LineMcpServer {
             connections_path: None,
             health_path: None,
             attachments_dir: None,
+            cache_dir: None,
         }
     }
 
@@ -442,12 +446,14 @@ impl LineMcpServer {
         let connections_path = path.parent().map(|dir| dir.join("connections.jsonl"));
         let health_path = path.parent().map(|dir| dir.join("health.jsonl"));
         let attachments_dir = path.parent().map(|dir| dir.join("attachments"));
+        let cache_dir = path.parent().map(|dir| dir.join("cache"));
         Self {
             policy_path: Some(path),
             audit_path,
             connections_path,
             health_path,
             attachments_dir,
+            cache_dir,
             ..Self::fixture()
         }
     }
@@ -1248,6 +1254,51 @@ impl LineMcpServer {
         )
     }
 
+    /// One account's cache facts: the chosen level, the level the read
+    /// permission actually allows, and honest numbers from the store. A
+    /// missing database answers zeros — an empty cache is not an error.
+    fn cache_status_json(&self, account: &policy_document::DocumentAccount) -> Value {
+        let account_id = account.policy.account_id();
+        let effective = torromail_core::effective_cache_level(
+            account.cache.level,
+            account.policy.permissions().read,
+        );
+
+        let mut message_count = 0u64;
+        let mut attachment_count = 0u64;
+        let mut size_bytes = 0u64;
+        let mut last_write: Option<u64> = None;
+        // Open only what exists: `CacheStore::open` would create an empty
+        // database, and a status question must not leave files behind.
+        if let Some(cache_dir) = &self.cache_dir {
+            let db_path = cache_dir.join(format!("{}.sqlite", account_id.as_str()));
+            if db_path.exists() {
+                if let Ok(store) = torromail_cache::CacheStore::open(cache_dir, account_id.as_str())
+                {
+                    if let Ok(status) = store.status() {
+                        message_count = status.message_count;
+                        attachment_count = status.attachment_count;
+                        size_bytes = status.db_size_bytes;
+                        last_write = status.last_write;
+                    }
+                }
+            }
+        }
+        if let Some(attachments_dir) = &self.attachments_dir {
+            size_bytes += directory_size(&attachments_dir.join(account_id.as_str()));
+        }
+
+        json!({
+            "account_id": account_id.as_str(),
+            "level": account.cache.level.as_str(),
+            "effective_level": effective.as_str(),
+            "message_count": message_count,
+            "attachment_count": attachment_count,
+            "size_bytes": size_bytes,
+            "last_write": last_write
+        })
+    }
+
     /// Cache facts for one account, or all of them when none is named —
     /// "what is TorroMail keeping on disk?" is a fair question to ask whole.
     fn handle_mail_get_cache_status(&self, arguments: &Value, id: &Value) -> String {
@@ -1260,16 +1311,7 @@ impl LineMcpServer {
         let reports = accounts
             .iter()
             .filter(|account| wanted.is_none_or(|id| account.policy.account_id().as_str() == id))
-            .map(|account| {
-                json!({
-                    "account_id": account.policy.account_id().as_str(),
-                    "local_cache_enabled": account.cache.local_cache_enabled,
-                    "mode": account.cache.mode,
-                    "index_bodies": account.cache.index_bodies,
-                    "index_attachments": account.cache.index_attachments,
-                    "storage": account.cache.storage
-                })
-            })
+            .map(|account| self.cache_status_json(account))
             .collect::<Vec<_>>();
 
         if let Some(wanted) = wanted
@@ -1932,6 +1974,25 @@ fn handle_mail_get_attachment(
         }
     }
     Ok(answer)
+}
+
+/// Recursive on-disk size, best-effort: what cannot be statted counts as
+/// nothing rather than as an error — this feeds a status line, not an audit.
+fn directory_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                directory_size(&path)
+            } else {
+                entry.metadata().map(|meta| meta.len()).unwrap_or(0)
+            }
+        })
+        .sum()
 }
 
 /// One path component, defused: separators, NUL and leading dots cannot

@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use torromail_core::{
-    AccountId, ConnectionSecurity, FolderRule, ImapAuth, ImapProviderConfig, PermissionSet, Policy,
-    ReadAccess, SecretRef, WriteAccess,
+    AccountId, CacheLevel, ConnectionSecurity, FolderRule, ImapAuth, ImapProviderConfig,
+    PermissionSet, Policy, ReadAccess, SecretRef, WriteAccess,
 };
 
 /// One account as the document describes it: its permissions, how the admin
@@ -72,28 +72,20 @@ pub(crate) struct DocumentAccount {
     pub(crate) oauth: Option<OAuthFacts>,
 }
 
-/// What the app decided to keep on disk for this account. The server does
-/// not act on these — it reports them, so an assistant can say why a search
-/// is slow or a body is missing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the app decided to keep on disk for this account: one level in the
+/// language of the read permissions. The server acts on it — it is the
+/// write-through ceiling — and reports it through `mail_get_cache_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CacheFacts {
-    pub(crate) local_cache_enabled: bool,
-    pub(crate) mode: String,
-    pub(crate) index_bodies: bool,
-    pub(crate) index_attachments: bool,
-    pub(crate) storage: String,
+    pub(crate) level: CacheLevel,
 }
 
 impl Default for CacheFacts {
     /// What an account looks like before the app has published cache facts:
-    /// the product default from `CachePolicy` — metadata only, no index.
+    /// the product default — headers only.
     fn default() -> Self {
         Self {
-            local_cache_enabled: true,
-            mode: "metadata".to_owned(),
-            index_bodies: false,
-            index_attachments: false,
-            storage: "unknown".to_owned(),
+            level: CacheLevel::Headers,
         }
     }
 }
@@ -209,30 +201,22 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
     })
 }
 
+/// The new shape (`{"level": "bodies"}`) first; a document written by an
+/// older app maps its five switches through `CacheLevel::parse_legacy`, so
+/// nothing has to be reconfigured. No cache block at all means the default.
 fn parse_cache_facts(cache: &Value) -> CacheFacts {
-    let default = CacheFacts::default();
-    let Some(cache) = cache.as_object() else {
-        return default;
-    };
+    if !cache.is_object() {
+        return CacheFacts::default();
+    }
 
+    if let Some(level) = cache["level"].as_str().and_then(CacheLevel::parse) {
+        return CacheFacts { level };
+    }
+
+    let enabled = cache["local_cache_enabled"].as_bool().unwrap_or(true);
+    let mode = cache["mode"].as_str().unwrap_or("metadata");
     CacheFacts {
-        local_cache_enabled: cache["local_cache_enabled"]
-            .as_bool()
-            .unwrap_or(default.local_cache_enabled),
-        mode: cache["mode"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or(default.mode),
-        index_bodies: cache["index_bodies"]
-            .as_bool()
-            .unwrap_or(default.index_bodies),
-        index_attachments: cache["index_attachments"]
-            .as_bool()
-            .unwrap_or(default.index_attachments),
-        storage: cache["storage"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or(default.storage),
+        level: CacheLevel::parse_legacy(enabled, mode),
     }
 }
 

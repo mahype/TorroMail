@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+torromail-cache = { path = "../torromail-cache" }
 torromail-core = { path = "../torromail-core" }
 torromail-imap-tls = { path = "../torromail-imap-tls" }
 torromail-oauth = { path = "../torromail-oauth" }
