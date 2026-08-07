@@ -126,7 +126,7 @@ pub struct AccountDraft {
     auth_method: AuthMethod,
     imap_host: Option<String>,
     smtp_host: Option<String>,
-    cache_policy: CachePolicy,
+    cache_level: CacheLevel,
 }
 
 impl AccountDraft {
@@ -145,8 +145,12 @@ impl AccountDraft {
             auth_method: AuthMethod::Password,
             imap_host: Some(imap_host.into()),
             smtp_host: Some(smtp_host.into()),
-            cache_policy: CachePolicy::default(),
+            cache_level: CacheLevel::Headers,
         }
+    }
+
+    pub fn cache_level(&self) -> CacheLevel {
+        self.cache_level
     }
 }
 
@@ -159,7 +163,7 @@ pub struct Account {
     auth_method: AuthMethod,
     imap_host: Option<String>,
     smtp_host: Option<String>,
-    cache_policy: CachePolicy,
+    cache_level: CacheLevel,
 }
 
 impl Account {
@@ -175,8 +179,8 @@ impl Account {
         &self.email
     }
 
-    pub fn cache_policy(&self) -> &CachePolicy {
-        &self.cache_policy
+    pub fn cache_level(&self) -> CacheLevel {
+        self.cache_level
     }
 }
 
@@ -190,7 +194,7 @@ impl From<AccountDraft> for Account {
             auth_method: value.auth_method,
             imap_host: value.imap_host,
             smtp_host: value.smtp_host,
-            cache_policy: value.cache_policy,
+            cache_level: value.cache_level,
         }
     }
 }
@@ -264,27 +268,6 @@ impl CacheLevel {
 /// permission's ceiling.
 pub fn effective_cache_level(chosen: CacheLevel, read: ReadAccess) -> CacheLevel {
     chosen.min(CacheLevel::ceiling(read))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CachePolicy {
-    pub persist_metadata: bool,
-    pub persist_headers: bool,
-    pub persist_bodies: bool,
-    pub index_bodies: bool,
-    pub index_attachments: bool,
-}
-
-impl Default for CachePolicy {
-    fn default() -> Self {
-        Self {
-            persist_metadata: true,
-            persist_headers: true,
-            persist_bodies: false,
-            index_bodies: false,
-            index_attachments: false,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -529,7 +512,7 @@ impl PermissionSet {
 }
 
 /// The questions tools ask of a policy. Every variant is backed by the
-/// permission groups; cache and index decisions live in `CachePolicy`.
+/// permission groups; what rests on disk is decided by `CacheLevel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
     ReadHeaders,
@@ -1373,6 +1356,13 @@ pub trait MailProvider {
         attachment_id: &str,
     ) -> CoreResult<AttachmentPayload>;
 
+    /// The server-stated UIDVALIDITY of `mailbox`, if this provider ever
+    /// learned one. The cache keys its rows by it; `None` means "unknown" —
+    /// fixtures have no generations, so the default answers nothing.
+    fn mailbox_generation(&self, _account_id: &AccountId, _mailbox: &str) -> Option<u32> {
+        None
+    }
+
     /// Every message in the conversation `thread_id` names, oldest first.
     /// Plain IMAP has no thread identity, so a provider assembles this from
     /// the `References`/`In-Reply-To` headers; a mailbox that cannot relate
@@ -1445,6 +1435,10 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         attachment_id: &str,
     ) -> CoreResult<AttachmentPayload> {
         (**self).get_attachment(account_id, message_id, attachment_id)
+    }
+
+    fn mailbox_generation(&self, account_id: &AccountId, mailbox: &str) -> Option<u32> {
+        (**self).mailbox_generation(account_id, mailbox)
     }
 
     fn get_thread(

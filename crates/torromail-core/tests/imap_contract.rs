@@ -1215,3 +1215,27 @@ fn a_fetched_message_lists_and_serves_its_attachments() {
         .expect_err("no such part");
     assert!(matches!(missing, CoreError::AttachmentNotFound { .. }));
 }
+
+#[test]
+fn select_captures_uidvalidity_for_the_cache() {
+    let mut script = login_script();
+    script.extend([
+        line("* 1 EXISTS"),
+        line("* OK [UIDVALIDITY 9] UIDs valid"),
+        line("t2 OK SELECT completed"),
+    ]);
+    script.extend(fetch_script("t3", 101, "", HEADERS, BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let _ = provider
+        .get_message(&account_id, "INBOX/101")
+        .expect("fetch succeeds");
+    assert_eq!(provider.mailbox_generation(&account_id, "INBOX"), Some(9));
+}

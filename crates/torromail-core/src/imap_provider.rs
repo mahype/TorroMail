@@ -5,7 +5,7 @@
 //! Debug output, so configs can travel through logs and diagnostics safely.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -376,6 +376,10 @@ pub struct ImapClient<T: ImapTransport> {
     transport: T,
     next_tag: u32,
     selected: Option<String>,
+    /// UIDVALIDITY per mailbox, as the server stated it on SELECT. The cache
+    /// keys its rows by this — a changed value means every cached UID names
+    /// a different message now.
+    uidvalidity: BTreeMap<String, u32>,
 }
 
 impl<T: ImapTransport> ImapClient<T> {
@@ -396,6 +400,7 @@ impl<T: ImapTransport> ImapClient<T> {
             transport,
             next_tag: 0,
             selected: None,
+            uidvalidity: BTreeMap::new(),
         };
         let greeting = client.transport.read_line()?;
         if !greeting.starts_with("* OK") {
@@ -420,6 +425,7 @@ impl<T: ImapTransport> ImapClient<T> {
             transport,
             next_tag: 0,
             selected: None,
+            uidvalidity: BTreeMap::new(),
         };
         client.authenticate(username, secret, auth)?;
         Ok(client)
@@ -732,9 +738,22 @@ impl<T: ImapTransport> ImapClient<T> {
         if self.selected.as_deref() == Some(mailbox) {
             return Ok(());
         }
-        self.command(&format!("SELECT {}", imap_quoted(mailbox)))?;
+        let lines = self.command(&format!("SELECT {}", imap_quoted(mailbox)))?;
+        // `* OK [UIDVALIDITY 123] …` — mandatory per RFC 3501, but a server
+        // that omits it simply leaves the generation unknown.
+        for line in &lines {
+            if let Some(value) = parse_uidvalidity(&line.text) {
+                self.uidvalidity.insert(mailbox.to_owned(), value);
+            }
+        }
         self.selected = Some(mailbox.to_owned());
         Ok(())
+    }
+
+    /// The UIDVALIDITY the server stated for `mailbox`, if it was ever
+    /// selected on this session.
+    pub fn uidvalidity(&self, mailbox: &str) -> Option<u32> {
+        self.uidvalidity.get(mailbox).copied()
     }
 
     /// Sends `command` and reads until its tagged answer. The two failure
@@ -907,6 +926,17 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         message.seen = fetched.seen;
         message.flagged = fetched.flagged;
         Ok(message)
+    }
+
+    fn mailbox_generation(&self, account_id: &AccountId, mailbox: &str) -> Option<u32> {
+        if self.guard(account_id).is_err() {
+            return None;
+        }
+        // Selecting is what teaches the client the value; reuse is free when
+        // the mailbox is already selected.
+        let mut client = self.client.borrow_mut();
+        let _ = client.select(mailbox);
+        client.uidvalidity(mailbox)
     }
 
     fn get_attachment(
@@ -1160,6 +1190,13 @@ fn trailing_literal_size(text: &str) -> Option<usize> {
 }
 
 /// `* LIST (\Flags) "/" "Name"` → `Name`.
+/// `* OK [UIDVALIDITY 123] UIDs valid` → 123.
+fn parse_uidvalidity(text: &str) -> Option<u32> {
+    let (_, after) = text.split_once("[UIDVALIDITY ")?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 fn parse_list_mailbox(text: &str) -> Option<String> {
     let rest = text.strip_prefix("* LIST ")?;
     let after_flags = rest.split_once(')')?.1.trim_start();

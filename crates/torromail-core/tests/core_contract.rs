@@ -1,6 +1,6 @@
 use torromail_core::{
-    AccountDraft, AccountId, AccountRegistry, ActionKind, AttachmentInfo, CachePolicy, Capability,
-    Channel,
+    AccountDraft, AccountId, AccountRegistry, ActionKind, AttachmentInfo, CacheLevel, Capability,
+    Channel, effective_cache_level,
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
     OutgoingAttachment, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet,
     Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
@@ -97,14 +97,27 @@ fn account_mutations_are_gui_only() {
 }
 
 #[test]
-fn default_cache_policy_is_metadata_only() {
-    let policy = CachePolicy::default();
-
-    assert!(policy.persist_metadata);
-    assert!(policy.persist_headers);
-    assert!(!policy.persist_bodies);
-    assert!(!policy.index_bodies);
-    assert!(!policy.index_attachments);
+fn cache_levels_are_capped_by_the_read_permission() {
+    assert_eq!(
+        effective_cache_level(CacheLevel::Attachments, ReadAccess::FullMessage),
+        CacheLevel::Bodies
+    );
+    assert_eq!(
+        effective_cache_level(CacheLevel::Headers, ReadAccess::WithAttachments),
+        CacheLevel::Headers
+    );
+    assert_eq!(
+        effective_cache_level(CacheLevel::Bodies, ReadAccess::None),
+        CacheLevel::Off
+    );
+    assert_eq!(CacheLevel::parse_legacy(false, "fullText"), CacheLevel::Off);
+    assert_eq!(CacheLevel::parse_legacy(true, "metadata"), CacheLevel::Headers);
+    assert_eq!(CacheLevel::parse_legacy(true, "fullText"), CacheLevel::Bodies);
+    // New accounts start at the old default's equivalent.
+    let draft = AccountDraft::imap_password(
+        AccountId::new("neu"), "Neu", "neu@example.com", "imap.example.com", "smtp.example.com",
+    );
+    assert_eq!(draft.cache_level(), CacheLevel::Headers);
 }
 
 #[test]
