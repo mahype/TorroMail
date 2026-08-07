@@ -1151,3 +1151,67 @@ fn an_echoed_raw_token_does_not_reach_the_error_either() {
     );
     assert!(message.contains("***"), "got: {message}");
 }
+
+/// A multipart/mixed with a body and a base64 PDF beside it — the shape the
+/// attachment tools have to handle end to end.
+const ATTACHMENT_HEADERS: &str = concat!(
+    "Subject: Mit Anhang\r\n",
+    "From: a@example.com\r\n",
+    "Content-Type: multipart/mixed; boundary=\"outer\"\r\n",
+    "\r\n",
+);
+const ATTACHMENT_BODY: &str = concat!(
+    "--outer\r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n",
+    "\r\n",
+    "Bitte den Anhang pruefen.\r\n",
+    "--outer\r\n",
+    "Content-Type: application/pdf\r\n",
+    "Content-Disposition: attachment; filename=angebot.pdf\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "JVBERi0xLjQ=\r\n",
+    "--outer--\r\n",
+);
+
+#[test]
+fn a_fetched_message_lists_and_serves_its_attachments() {
+    let mut script = login_script();
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    // Three fetches: the message read, then one per download attempt — the
+    // provider re-fetches rather than holding message state between calls.
+    script.extend(fetch_script("t3", 101, "", ATTACHMENT_HEADERS, ATTACHMENT_BODY));
+    script.extend(fetch_script("t4", 101, "", ATTACHMENT_HEADERS, ATTACHMENT_BODY));
+    script.extend(fetch_script("t5", 101, "", ATTACHMENT_HEADERS, ATTACHMENT_BODY));
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let message = provider
+        .get_message(&account_id, "INBOX/101")
+        .expect("fetch succeeds");
+    assert_eq!(message.body(), "Bitte den Anhang pruefen.");
+    assert_eq!(message.attachments().len(), 1);
+    let info = &message.attachments()[0];
+    assert_eq!(info.id(), "2");
+    assert_eq!(info.filename(), "angebot.pdf");
+    assert_eq!(info.media_type(), "application/pdf");
+    assert_eq!(info.size_bytes(), 8); // "JVBERi0xLjQ=" → "%PDF-1.4", 8 bytes
+
+    let payload = provider
+        .get_attachment(&account_id, "INBOX/101", "2")
+        .expect("extraction works");
+    assert_eq!(payload.mailbox(), "INBOX");
+    assert_eq!(payload.filename(), "angebot.pdf");
+    assert_eq!(payload.content(), b"%PDF-1.4");
+
+    let missing = provider
+        .get_attachment(&account_id, "INBOX/101", "5")
+        .expect_err("no such part");
+    assert!(matches!(missing, CoreError::AttachmentNotFound { .. }));
+}

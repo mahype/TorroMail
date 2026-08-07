@@ -149,6 +149,13 @@ pub struct FetchedMessage {
     pub sender: String,
     pub date: String,
     pub body: String,
+    /// The body exactly as fetched, MIME fences and all — what the
+    /// attachment walk reads; `body` above is the rendered text.
+    pub raw_body: String,
+    /// Top-level `Content-Type` / `Content-Transfer-Encoding`, kept because
+    /// the raw body cannot be interpreted without them.
+    pub content_type: String,
+    pub transfer_encoding: String,
     pub seen: bool,
     pub flagged: bool,
 }
@@ -554,7 +561,8 @@ impl<T: ImapTransport> ImapClient<T> {
 
         // The body arrives MIME-encoded — multipart, transfer-encoded, often
         // HTML. Unwrap it to readable text once, here, so nothing downstream
-        // has to know MIME.
+        // has to know MIME; the raw form travels along for the attachment
+        // walk, which needs the fences the renderer strips.
         let content_type = header_field(&headers, "content-type").unwrap_or_default();
         let transfer_encoding =
             header_field(&headers, "content-transfer-encoding").unwrap_or_default();
@@ -566,6 +574,9 @@ impl<T: ImapTransport> ImapClient<T> {
             sender: header_field(&headers, "from").unwrap_or_default(),
             date: header_field(&headers, "date").unwrap_or_default(),
             body,
+            raw_body,
+            content_type,
+            transfer_encoding,
             seen: fetch.text.contains("\\Seen"),
             flagged: fetch.text.contains("\\Flagged"),
         })
@@ -863,6 +874,22 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         let fetched = self.client.borrow_mut().uid_fetch(mailbox, uid)?;
 
         let preview = snippet(&fetched.body);
+        let attachments = crate::mime::list_attachments(
+            &fetched.raw_body,
+            &fetched.content_type,
+            &fetched.transfer_encoding,
+        )
+        .into_iter()
+        .map(|part| {
+            crate::AttachmentInfo::new(
+                part.id,
+                part.filename,
+                part.media_type,
+                part.size_bytes,
+                part.inline,
+            )
+        })
+        .collect();
         let mut message = StoredMessage::new(
             account_id.clone(),
             mailbox,
@@ -875,7 +902,8 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
             preview,
             fetched.body,
         )
-        .with_date(fetched.date);
+        .with_date(fetched.date)
+        .with_attachment_infos(attachments);
         message.seen = fetched.seen;
         message.flagged = fetched.flagged;
         Ok(message)
@@ -887,13 +915,27 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         message_id: &str,
         attachment_id: &str,
     ) -> CoreResult<AttachmentPayload> {
-        // Honest stub until the extraction path lands: no part is served yet.
         self.guard(account_id)?;
-        let (_mailbox, _uid) = self.split_message_id(message_id)?;
-        Err(CoreError::AttachmentNotFound {
+        let (mailbox, uid) = self.split_message_id(message_id)?;
+        // A fresh fetch rather than held state: the provider stays stateless
+        // between calls, and the walk reads the same raw body the listing saw.
+        let fetched = self.client.borrow_mut().uid_fetch(mailbox, uid)?;
+        let (info, bytes) = crate::mime::extract_attachment_bytes(
+            &fetched.raw_body,
+            &fetched.content_type,
+            &fetched.transfer_encoding,
+            attachment_id,
+        )
+        .ok_or_else(|| CoreError::AttachmentNotFound {
             message_id: message_id.to_owned(),
             attachment_id: attachment_id.to_owned(),
-        })
+        })?;
+        Ok(AttachmentPayload::new(
+            mailbox,
+            info.filename,
+            info.media_type,
+            bytes,
+        ))
     }
 
     /// The conversation `thread_id` (a `mailbox/uid`) belongs to, reconstructed
