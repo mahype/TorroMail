@@ -585,7 +585,7 @@ fn granted(capability: Capability, read: ReadAccess, write: WriteAccess, send: b
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PolicyEngine {
     policies: BTreeMap<AccountId, Policy>,
 }
@@ -763,6 +763,9 @@ pub struct SearchHit {
     sender: String,
     snippet: String,
     date: String,
+    /// Whether the local search index produced this hit rather than the
+    /// live provider.
+    from_cache: bool,
 }
 
 impl SearchHit {
@@ -780,6 +783,7 @@ impl SearchHit {
             sender: sender.into(),
             snippet: snippet.into(),
             date: String::new(),
+            from_cache: false,
         }
     }
 
@@ -791,12 +795,30 @@ impl SearchHit {
         self
     }
 
+    /// Marks a hit the local index contributed — absent on live hits.
+    pub fn with_from_cache(mut self, from_cache: bool) -> Self {
+        self.from_cache = from_cache;
+        self
+    }
+
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
 
     pub fn mailbox(&self) -> &str {
         &self.mailbox
+    }
+
+    pub fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+
+    pub fn from_cache(&self) -> bool {
+        self.from_cache
     }
 
     pub fn subject(&self) -> &str {
@@ -1728,6 +1750,23 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         window: &SearchWindow,
         now: u64,
     ) -> CoreResult<SearchResultSet> {
+        let hits = self.search_hits(account_id, query, mailbox, limit, window)?;
+        Ok(self
+            .sessions
+            .create(account_id.clone(), query, hits, now, 7200))
+    }
+
+    /// The policy-checked hit list without a session — the shape a caller
+    /// needs when it merges other sources (the local index) before creating
+    /// the reusable result set.
+    pub fn search_hits(
+        &mut self,
+        account_id: &AccountId,
+        query: &str,
+        mailbox: Option<&str>,
+        limit: usize,
+        window: &SearchWindow,
+    ) -> CoreResult<Vec<SearchHit>> {
         match mailbox {
             Some(name) => self
                 .policy_engine
@@ -1740,16 +1779,25 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
         // A search across everything must not leak hits from folders the
         // policy blocks, so every hit answers for its own mailbox.
         let policy = self.policy_engine.policy(account_id)?;
-        let hits = self
+        Ok(self
             .provider
             .search(account_id, query, mailbox, limit, window)?
             .into_iter()
             .filter(|hit| policy.allows_in(hit.mailbox(), Capability::Search))
-            .collect();
+            .collect())
+    }
 
-        Ok(self
-            .sessions
-            .create(account_id.clone(), query, hits, now, 7200))
+    /// Session creation for hits assembled outside `search` — the doorway
+    /// stays the service so result-set semantics live in one place.
+    pub fn create_result_set(
+        &mut self,
+        account_id: &AccountId,
+        query: &str,
+        hits: Vec<SearchHit>,
+        now: u64,
+    ) -> SearchResultSet {
+        self.sessions
+            .create(account_id.clone(), query, hits, now, 7200)
     }
 
     pub fn get_message(

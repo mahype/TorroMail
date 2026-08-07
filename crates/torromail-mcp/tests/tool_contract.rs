@@ -2487,3 +2487,59 @@ fn a_headers_level_keeps_bodies_out_of_the_cache() {
     assert!(first.contains("Anbei die Rechnung"), "got: {first}");
     assert!(!second.contains(r#"\"from_cache\":true"#), "got: {second}");
 }
+
+#[test]
+fn search_merges_cached_hits_and_survives_a_dead_server() {
+    let path = isolated_policy_path("cache-search-merge");
+    cached_account_document(&path, "full_message", "bodies");
+
+    // Seed the cache directly — the store is the same one the server opens.
+    let cache_dir = path.parent().expect("dir").join("cache");
+    let store = torromail_cache::CacheStore::open(&cache_dir, "work").expect("store opens");
+    store
+        .upsert_body(
+            &torromail_cache::SummaryRow {
+                mailbox: "INBOX",
+                uid: 9,
+                subject: "Vertrag Entwurf",
+                sender: "legal@example.com",
+                date: "",
+            },
+            false,
+            false,
+            "Der Vertragsentwurf im Anhang.",
+            &[],
+        )
+        .expect("seeded");
+    drop(store);
+
+    // A provider whose search finds nothing for "vertrag" — any hit can
+    // only come from the cache.
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(imap_shaped_mailbox()) as Box<dyn MailProvider>)
+    });
+    let search = r#"{"jsonrpc":"2.0","id":81,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"vertrag"}}}"#;
+    let merged = server.handle_line(search).expect("a response");
+    assert!(merged.contains("Vertrag Entwurf"), "got: {merged}");
+    assert!(merged.contains(r#"\"from_cache\":true"#), "got: {merged}");
+    assert!(merged.contains(r#"\"source\":\"live\""#), "got: {merged}");
+
+    // A dead connection: open fails → the cache answers alone.
+    let dead = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Err(CoreError::ProviderFailure("no route to host".to_owned()))
+    });
+    let degraded = dead.handle_line(search).expect("a response");
+
+    // The empty browse query never degrades to the cache — recency is the
+    // server's to answer, so a dead server stays an error there.
+    let browse = r#"{"jsonrpc":"2.0","id":83,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":""}}}"#;
+    let browse_answer = dead.handle_line(browse).expect("a response");
+    remove_isolated_dir(&path);
+
+    assert!(degraded.contains("Vertrag Entwurf"), "got: {degraded}");
+    assert!(
+        degraded.contains(r#"\"source\":\"cache_only\""#),
+        "got: {degraded}"
+    );
+    assert!(browse_answer.contains("error"), "got: {browse_answer}");
+}

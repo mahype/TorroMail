@@ -18,7 +18,7 @@ use torromail_core::smtp::SmtpAuth;
 use torromail_core::{
     AccountId, AttachmentInfo, CacheLevel, Capability, CoreError, CoreResult, FixtureMailProvider,
     ImapAuth, ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
-    PermissionSet, Policy, PolicyEngine, ReadAccess, SearchSessionStore, SearchWindow,
+    PermissionSet, Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow,
     StoredMessage, effective_cache_level,
 };
 use torromail_oauth::TokenSet;
@@ -582,10 +582,23 @@ impl LineMcpServer {
         }
 
         if name == ToolName::MailSearch.as_str() {
-            return self.run_with_connection(&account_id, id, &|provider, engine| {
-                let mut sessions = self.sessions.borrow_mut();
-                handle_mail_search(arguments, &account_id, provider, engine, &mut sessions)
-            });
+            let cache = self.cache_context(&account_id);
+            return self.run_with_connection_or(
+                &account_id,
+                id,
+                &|provider, engine| {
+                    let mut sessions = self.sessions.borrow_mut();
+                    handle_mail_search(
+                        arguments,
+                        &account_id,
+                        provider,
+                        engine,
+                        &mut sessions,
+                        cache.as_ref(),
+                    )
+                },
+                Some(&|| self.cache_only_search(arguments, &account_id)),
+            );
         }
         if name == ToolName::MailGetMessage.as_str() {
             if let Some(answer) = self.answer_get_message_from_cache(arguments, &account_id, id) {
@@ -818,6 +831,22 @@ impl LineMcpServer {
         id: &Value,
         run: &dyn Fn(&mut dyn MailProvider, PolicyEngine) -> ToolResult,
     ) -> String {
+        self.run_with_connection_or(account_id, id, run, None)
+    }
+
+    /// Like `run_with_connection`, with an optional degraded answer: when
+    /// the connection itself is the problem — an unreachable server, a
+    /// session that stayed broken after its one rebuild — `degraded` may
+    /// produce a payload (the local index) instead of the error. Health is
+    /// recorded for the failure either way; a cache answer must not paint
+    /// the account green.
+    fn run_with_connection_or(
+        &self,
+        account_id: &AccountId,
+        id: &Value,
+        run: &dyn Fn(&mut dyn MailProvider, PolicyEngine) -> ToolResult,
+        degraded: Option<&dyn Fn() -> Option<Value>>,
+    ) -> String {
         let mut rebuilt = false;
         loop {
             let (engine, facts) = match self.runtime_for(account_id) {
@@ -841,6 +870,14 @@ impl LineMcpServer {
                     Err(error) => {
                         if let Some(outcome) = HealthOutcome::from_error(&error) {
                             self.record_health(account_id, outcome, &error.to_string());
+                        }
+                        // Only a transport failure may degrade — a rejected
+                        // credential is a fact the client has to hear.
+                        if matches!(error, CoreError::ProviderFailure(_)) {
+                            drop(pool);
+                            if let Some(payload) = degraded.and_then(|fallback| fallback()) {
+                                return json_rpc_text_result(id, &payload);
+                            }
                         }
                         return json_rpc_error(id, -32000, &error.to_string());
                     }
@@ -869,6 +906,12 @@ impl LineMcpServer {
                 Err(failure) => {
                     if let Some(outcome) = failure.health_outcome() {
                         self.record_health(account_id, outcome, &failure.message());
+                    }
+                    if failure.is_connection() {
+                        drop(pool);
+                        if let Some(payload) = degraded.and_then(|fallback| fallback()) {
+                            return json_rpc_text_result(id, &payload);
+                        }
                     }
                     return failure.into_response(id);
                 }
@@ -1130,7 +1173,7 @@ impl LineMcpServer {
 
         let mut sessions = self.sessions.borrow_mut();
         match sessions.refine(result_set_id, refinement, 100) {
-            Ok(result_set) => json_rpc_text_result(id, &result_set_payload(&result_set)),
+            Ok(result_set) => json_rpc_text_result(id, &result_set_payload(&result_set, "live")),
             Err(error) => json_rpc_error(id, -32000, &error.to_string()),
         }
     }
@@ -1390,6 +1433,32 @@ impl LineMcpServer {
             }
         }
         Some(json_rpc_text_result(id, &answer))
+    }
+
+    /// The degraded search: the local index alone, marked `cache_only`.
+    /// Only a real query qualifies — the empty browse asks for recency,
+    /// which a partial cache cannot answer honestly.
+    fn cache_only_search(&self, arguments: &Value, account_id: &AccountId) -> Option<Value> {
+        let query = arguments["query"].as_str().unwrap_or_default();
+        if query.trim().is_empty() {
+            return None;
+        }
+        let mailbox = arguments["mailbox"].as_str();
+        let limit = arguments["limit"].as_u64().unwrap_or(10).min(100) as usize;
+
+        let (store, _level) = self.cache_context(account_id)?;
+        let (engine, _facts) = self.runtime_for(account_id).ok()?;
+        match mailbox {
+            Some(name) => engine
+                .authorize_in(account_id, name, Capability::Search)
+                .ok()?,
+            None => engine.authorize(account_id, Capability::Search).ok()?,
+        }
+
+        let hits = cached_hits(&store, &engine, account_id, query, mailbox, limit);
+        let mut sessions = self.sessions.borrow_mut();
+        let result_set = sessions.create(account_id.clone(), query, hits, 100, 7200);
+        Some(result_set_payload(&result_set, "cache_only"))
     }
 
     /// One account's cache facts: the chosen level, the level the read
@@ -1944,6 +2013,7 @@ fn handle_mail_search(
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
     sessions: &mut SearchSessionStore,
+    cache: Option<&(Rc<CacheStore>, CacheLevel)>,
 ) -> ToolResult {
     let query = arguments["query"].as_str().unwrap_or_default();
     let mailbox = arguments["mailbox"].as_str();
@@ -1951,17 +2021,97 @@ fn handle_mail_search(
 
     let window = search_window(arguments).map_err(ToolFailure::InvalidParams)?;
 
-    let mut service = MailAccessService::new(provider, engine, sessions);
-    let result_set = service
-        .search(account_id, query, mailbox, limit, &window, 100)
+    // Cloned before the service takes the engine: the cache merge below
+    // answers folder-scoped policy questions of its own.
+    let policy_probe = engine.clone();
+    let mut service = MailAccessService::new(&mut *provider, engine, &mut *sessions);
+    let mut hits = service
+        .search_hits(account_id, query, mailbox, limit, &window)
         .map_err(ToolFailure::Core)?;
 
-    Ok(result_set_payload(&result_set))
+    if let Some((store, _level)) = cache {
+        // What the live search showed rides along as header rows.
+        let mut noted_mailboxes: Vec<String> = Vec::new();
+        for hit in &hits {
+            if let Some((hit_mailbox, uid)) = split_imap_id(hit.message_id()) {
+                if !noted_mailboxes.iter().any(|name| name == hit_mailbox) {
+                    let generation = provider.mailbox_generation(account_id, hit_mailbox);
+                    let _ = store.note_uidvalidity(hit_mailbox, generation);
+                    noted_mailboxes.push(hit_mailbox.to_owned());
+                }
+                let _ = store.upsert_summary(&SummaryRow {
+                    mailbox: hit_mailbox,
+                    uid,
+                    subject: hit.subject(),
+                    sender: hit.sender(),
+                    date: hit.date(),
+                });
+            }
+        }
+
+        // The local index adds what the provider search missed — dedupe by
+        // message id, live order first.
+        for cached in cached_hits(store, &policy_probe, account_id, query, mailbox, limit) {
+            if hits.len() >= limit {
+                break;
+            }
+            if !hits
+                .iter()
+                .any(|hit| hit.message_id() == cached.message_id())
+            {
+                hits.push(cached);
+            }
+        }
+    }
+
+    let mut service = MailAccessService::new(&mut *provider, policy_probe, sessions);
+    let result_set = service.create_result_set(account_id, query, hits, 100);
+    Ok(result_set_payload(&result_set, "live"))
+}
+
+/// Local index hits as `SearchHit`s, folder rules applied — a blocked
+/// mailbox stays invisible whether the hit is live or cached. The empty
+/// browse query answers nothing: recency is the server's to answer.
+fn cached_hits(
+    store: &CacheStore,
+    engine: &PolicyEngine,
+    account_id: &AccountId,
+    query: &str,
+    mailbox: Option<&str>,
+    limit: usize,
+) -> Vec<SearchHit> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(hits) = store.search(query, limit) else {
+        return Vec::new();
+    };
+    hits.into_iter()
+        .filter(|hit| mailbox.is_none_or(|name| hit.mailbox == name))
+        .filter(|hit| {
+            engine
+                .authorize_in(account_id, &hit.mailbox, Capability::Search)
+                .is_ok()
+        })
+        .map(|hit| {
+            SearchHit::new(
+                format!("{}/{}", hit.mailbox, hit.uid),
+                hit.mailbox,
+                hit.subject,
+                hit.sender,
+                hit.snippet,
+            )
+            .with_date(hit.date)
+            .with_from_cache(true)
+        })
+        .collect()
 }
 
 /// The wire shape of a result set — the same for a fresh search and a
-/// refinement, so a client sees one kind of answer.
-fn result_set_payload(result_set: &torromail_core::SearchResultSet) -> Value {
+/// refinement, so a client sees one kind of answer. `source` says who
+/// answered: `live` (the server, possibly enriched from the index) or
+/// `cache_only` (the server was unreachable; this is the local index alone).
+fn result_set_payload(result_set: &torromail_core::SearchResultSet, source: &str) -> Value {
     let hits = result_set
         .hits()
         .iter()
@@ -1970,12 +2120,16 @@ fn result_set_payload(result_set: &torromail_core::SearchResultSet) -> Value {
                 "message_id": hit.message_id(),
                 "mailbox": hit.mailbox(),
                 "subject": hit.subject(),
-                "date": hit.date()
+                "sender": hit.sender(),
+                "snippet": hit.snippet(),
+                "date": hit.date(),
+                "from_cache": hit.from_cache()
             })
         })
         .collect::<Vec<_>>();
     json!({
         "result_set_id": result_set.id(),
+        "source": source,
         "hits": hits
     })
 }
