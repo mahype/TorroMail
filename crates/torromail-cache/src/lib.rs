@@ -342,24 +342,76 @@ pub struct CacheStatus {
 
 impl CacheStore {
     /// Marks one listed attachment as downloaded-and-retained at `path` —
-    /// the next download answers from disk instead of the server.
+    /// the next download answers from disk instead of the server. Carries
+    /// the payload facts too, so a download without a prior body read still
+    /// leaves an honest row.
     pub fn record_attachment_file(
         &self,
         mailbox: &str,
         uid: u32,
-        attachment_id: &str,
+        attachment: &AttachmentRow,
         path: &str,
     ) -> Result<(), CacheError> {
         self.connection.execute(
             "INSERT INTO attachments
                 (mailbox, uid, attachment_id, filename, media_type, size_bytes, path, cached_at)
-             VALUES (?1, ?2, ?3, '', 'application/octet-stream', 0, ?4, ?5)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(mailbox, uid, attachment_id) DO UPDATE SET
+                filename = excluded.filename,
+                media_type = excluded.media_type,
+                size_bytes = excluded.size_bytes,
                 path = excluded.path,
                 cached_at = excluded.cached_at",
-            rusqlite::params![mailbox, uid, attachment_id, path, now()],
+            rusqlite::params![
+                mailbox,
+                uid,
+                attachment.attachment_id,
+                attachment.filename,
+                attachment.media_type,
+                attachment.size_bytes,
+                path,
+                now()
+            ],
         )?;
         Ok(())
+    }
+
+    /// The retained attachment's row, when a download was recorded and its
+    /// file still exists — filename and media type ride along so a cache hit
+    /// can answer without the server.
+    pub fn retained_attachment(
+        &self,
+        mailbox: &str,
+        uid: u32,
+        attachment_id: &str,
+    ) -> Result<Option<CachedAttachment>, CacheError> {
+        let found = self
+            .connection
+            .query_row(
+                "SELECT filename, media_type, size_bytes, path FROM attachments
+                 WHERE mailbox = ?1 AND uid = ?2 AND attachment_id = ?3",
+                rusqlite::params![mailbox, uid, attachment_id],
+                |row| {
+                    Ok(CachedAttachment {
+                        attachment_id: attachment_id.to_owned(),
+                        filename: row.get(0)?,
+                        media_type: row.get(1)?,
+                        size_bytes: row.get::<_, i64>(2)?.max(0) as usize,
+                        path: row.get(3)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        Ok(found.filter(|attachment| {
+            attachment
+                .path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).exists())
+        }))
     }
 
     /// The retained file's path, when this attachment was downloaded before
@@ -697,7 +749,17 @@ mod tests {
         let blob = dir.join("blob-a.pdf");
         std::fs::write(&blob, b"x").expect("blob written");
         store
-            .record_attachment_file("INBOX", 1, "2", &blob.to_string_lossy())
+            .record_attachment_file(
+                "INBOX",
+                1,
+                &AttachmentRow {
+                    attachment_id: "2",
+                    filename: "a.pdf",
+                    media_type: "application/pdf",
+                    size_bytes: 1,
+                },
+                &blob.to_string_lossy(),
+            )
             .expect("recorded");
         assert_eq!(
             store

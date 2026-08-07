@@ -1083,6 +1083,14 @@ impl StoredMessage {
         self
     }
 
+    /// Both flags at once — the shape providers and the cache rebuild a
+    /// message from.
+    pub fn with_flags(mut self, seen: bool, flagged: bool) -> Self {
+        self.seen = seen;
+        self.flagged = flagged;
+        self
+    }
+
     pub fn attachments(&self) -> &[AttachmentInfo] {
         &self.attachments
     }

@@ -394,6 +394,21 @@ fn temp_policy_path(name: &str) -> std::path::PathBuf {
     ))
 }
 
+/// A policy path in its own directory, for tests that grow siblings (cache
+/// databases, attachment stores) — the shared temp dir would let parallel
+/// tests see each other's files.
+fn isolated_policy_path(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("torromail-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("test dir created");
+    dir.join("policy.json")
+}
+
+fn remove_isolated_dir(path: &std::path::Path) {
+    if let Some(dir) = path.parent() {
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
 #[test]
 fn policy_document_permissions_reach_the_tools() {
     let path = temp_policy_path("grants");
@@ -608,7 +623,7 @@ fn mail_get_policy_refuses_accounts_the_document_does_not_name() {
 
 #[test]
 fn cache_status_reports_levels_and_real_counts() {
-    let path = temp_policy_path("cache-status");
+    let path = isolated_policy_path("cache-status");
     std::fs::write(
         &path,
         r#"{"version":1,"accounts":[{"id":"work","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"cache":{"level":"bodies"}}]}"#,
@@ -621,7 +636,7 @@ fn cache_status_reports_levels_and_real_counts() {
             r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"mail_get_cache_status","arguments":{"account_id":"work"}}}"#,
         )
         .expect("a request gets a response");
-    std::fs::remove_file(&path).ok();
+    remove_isolated_dir(&path);
 
     // The chosen level survives; the headers-only read permission caps it.
     assert!(response.contains(r#"\"level\":\"bodies\""#), "got: {response}");
@@ -635,7 +650,7 @@ fn cache_status_reports_levels_and_real_counts() {
 
 #[test]
 fn legacy_cache_blocks_still_parse() {
-    let path = temp_policy_path("cache-legacy");
+    let path = isolated_policy_path("cache-legacy");
     std::fs::write(
         &path,
         r#"{"version":1,"accounts":[{"id":"work","read":"with_attachments","write":{},"send":false,"per_folder":false,"folder_rules":{},"cache":{"local_cache_enabled":true,"mode":"fullText","index_bodies":true,"index_attachments":true,"storage":"12 MB"}}]}"#,
@@ -648,7 +663,7 @@ fn legacy_cache_blocks_still_parse() {
             r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"mail_get_cache_status","arguments":{"account_id":"work"}}}"#,
         )
         .expect("a request gets a response");
-    std::fs::remove_file(&path).ok();
+    remove_isolated_dir(&path);
 
     assert!(response.contains(r#"\"level\":\"bodies\""#), "got: {response}");
     assert!(
@@ -2342,7 +2357,7 @@ fn downloading_needs_the_attachment_read_level() {
 
 #[test]
 fn downloading_writes_the_file_and_answers_its_path() {
-    let path = temp_policy_path("attachment-download");
+    let path = isolated_policy_path("attachment-download");
     attachment_document(&path, "with_attachments");
     let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
         Ok(Box::new(mailbox_with_attachment()) as Box<dyn MailProvider>)
@@ -2356,8 +2371,7 @@ fn downloading_writes_the_file_and_answers_its_path() {
         .expect("temp dir")
         .join("attachments/work/m1/2-angebot.pdf");
     let written = std::fs::read(&expected_file).expect("file written");
-    std::fs::remove_file(&path).ok();
-    std::fs::remove_dir_all(path.parent().expect("temp dir").join("attachments")).ok();
+    remove_isolated_dir(&path);
 
     assert_eq!(written, b"%PDF-1.4");
     assert!(
@@ -2404,4 +2418,72 @@ fn the_attachment_sweep_removes_old_files_and_prunes_empty_dirs() {
     assert!(!nested.exists());
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+/// Fixture messages whose ids look like IMAP ids (`mailbox/uid`), so the
+/// cache path engages — fixture-shaped ids like `m1` never do.
+fn imap_shaped_mailbox() -> FixtureMailProvider {
+    let account = AccountId::new("work");
+    let message = StoredMessage::new(
+        account,
+        "INBOX",
+        "INBOX/7",
+        "t1",
+        "Rechnung März",
+        "billing@example.com",
+        "s",
+        "Anbei die Rechnung.",
+    );
+    FixtureMailProvider::new([message])
+}
+
+fn cached_account_document(path: &std::path::Path, read: &str, level: &str) {
+    std::fs::write(
+        path,
+        format!(
+            r#"{{"version":1,"accounts":[{{"id":"work","read":"{read}","write":{{}},"send":false,"per_folder":false,"folder_rules":{{}},"cache":{{"level":"{level}"}}}}]}}"#
+        ),
+    )
+    .expect("policy document written");
+}
+
+#[test]
+fn read_messages_land_in_the_cache_and_serve_the_next_read() {
+    let path = isolated_policy_path("cache-write-through");
+    cached_account_document(&path, "full_message", "bodies");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(imap_shaped_mailbox()) as Box<dyn MailProvider>)
+    });
+
+    let request = r#"{"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_body":true}}}"#;
+    let first = server.handle_line(request).expect("a response");
+    let second = server.handle_line(request).expect("a response");
+    let cache_file = path.parent().expect("temp dir").join("cache/work.sqlite");
+    let cached_exists = cache_file.exists();
+    remove_isolated_dir(&path);
+
+    assert!(first.contains("Anbei die Rechnung"), "got: {first}");
+    assert!(!first.contains(r#"\"from_cache\":true"#), "got: {first}");
+    assert!(cached_exists, "the store was created");
+    assert!(second.contains("Anbei die Rechnung"), "got: {second}");
+    assert!(second.contains(r#"\"from_cache\":true"#), "got: {second}");
+}
+
+#[test]
+fn a_headers_level_keeps_bodies_out_of_the_cache() {
+    let path = isolated_policy_path("cache-headers-only");
+    cached_account_document(&path, "full_message", "headers");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(imap_shaped_mailbox()) as Box<dyn MailProvider>)
+    });
+
+    let request = r#"{"jsonrpc":"2.0","id":82,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_body":true}}}"#;
+    let first = server.handle_line(request).expect("a response");
+    let second = server.handle_line(request).expect("a response");
+    remove_isolated_dir(&path);
+
+    // Both reads answer live: the level stores headers, never the body,
+    // so a body read can never come from the cache.
+    assert!(first.contains("Anbei die Rechnung"), "got: {first}");
+    assert!(!second.contains(r#"\"from_cache\":true"#), "got: {second}");
 }

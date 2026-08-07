@@ -8,16 +8,18 @@ pub mod keychain;
 mod policy_document;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use serde_json::{Value, json};
+use torromail_cache::{AttachmentRow as CacheAttachmentRow, CacheStore, SummaryRow};
 use torromail_core::smtp::SmtpAuth;
 use torromail_core::{
-    AccountId, Capability, CoreError, CoreResult, FixtureMailProvider, ImapAuth,
-    ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
+    AccountId, AttachmentInfo, CacheLevel, Capability, CoreError, CoreResult, FixtureMailProvider,
+    ImapAuth, ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
     PermissionSet, Policy, PolicyEngine, ReadAccess, SearchSessionStore, SearchWindow,
-    StoredMessage,
+    StoredMessage, effective_cache_level,
 };
 use torromail_oauth::TokenSet;
 
@@ -402,6 +404,9 @@ pub struct LineMcpServer {
     /// Sibling of the policy file: the per-account SQLite caches live in
     /// `cache/<account>.sqlite`. `None` in fixture mode.
     cache_dir: Option<PathBuf>,
+    /// Open cache stores by account, one per process — SQLite connections
+    /// are not free, and WAL handles the cross-process side.
+    caches: RefCell<BTreeMap<AccountId, Rc<CacheStore>>>,
 }
 
 impl LineMcpServer {
@@ -424,6 +429,7 @@ impl LineMcpServer {
             health_path: None,
             attachments_dir: None,
             cache_dir: None,
+            caches: RefCell::default(),
         }
     }
 
@@ -582,11 +588,20 @@ impl LineMcpServer {
             });
         }
         if name == ToolName::MailGetMessage.as_str() {
+            if let Some(answer) = self.answer_get_message_from_cache(arguments, &account_id, id) {
+                return answer;
+            }
+            let cache = self.cache_context(&account_id);
             return self.run_with_connection(&account_id, id, &|provider, engine| {
-                handle_mail_get_message(arguments, &account_id, provider, engine)
+                handle_mail_get_message(arguments, &account_id, provider, engine, cache.as_ref())
             });
         }
         if name == ToolName::MailGetAttachment.as_str() {
+            if let Some(answer) = self.answer_get_attachment_from_cache(arguments, &account_id, id)
+            {
+                return answer;
+            }
+            let cache = self.cache_context(&account_id);
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 handle_mail_get_attachment(
                     arguments,
@@ -594,12 +609,14 @@ impl LineMcpServer {
                     provider,
                     engine,
                     self.attachments_dir.as_deref(),
+                    cache.as_ref(),
                 )
             });
         }
         if name == ToolName::MailGetThread.as_str() {
+            let cache = self.cache_context(&account_id);
             return self.run_with_connection(&account_id, id, &|provider, engine| {
-                handle_mail_get_thread(arguments, &account_id, provider, engine)
+                handle_mail_get_thread(arguments, &account_id, provider, engine, cache.as_ref())
             });
         }
         if name == ToolName::MailCreateDraft.as_str() {
@@ -1254,6 +1271,127 @@ impl LineMcpServer {
         )
     }
 
+    /// The account's effective cache and an open store — or `None`, which
+    /// always means "serve live": level off, no policy path, an unknown
+    /// account, or a store that will not open. A broken cache must never
+    /// break mail access.
+    fn cache_context(&self, account_id: &AccountId) -> Option<(Rc<CacheStore>, CacheLevel)> {
+        let cache_dir = self.cache_dir.as_ref()?;
+        let accounts = self.document_accounts().ok()??;
+        let account = accounts
+            .iter()
+            .find(|account| account.policy.account_id() == account_id)?;
+        let level = effective_cache_level(
+            account.cache.level,
+            account.policy.permissions().read,
+        );
+        if level == CacheLevel::Off {
+            return None;
+        }
+        let mut caches = self.caches.borrow_mut();
+        if let Some(store) = caches.get(account_id) {
+            return Some((store.clone(), level));
+        }
+        let store = Rc::new(CacheStore::open(cache_dir, account_id.as_str()).ok()?);
+        caches.insert(account_id.clone(), store.clone());
+        Some((store, level))
+    }
+
+    /// A `mail_get_message` answered from the store — no connection, no
+    /// fetch. Only a complete answer counts: a missing row, a missing body,
+    /// or any policy doubt falls through to the live path, which errors (or
+    /// serves) on its own terms.
+    fn answer_get_message_from_cache(
+        &self,
+        arguments: &Value,
+        account_id: &AccountId,
+        id: &Value,
+    ) -> Option<String> {
+        let message_id = arguments["message_id"].as_str().unwrap_or_default();
+        let include_body = arguments["include_body"].as_bool().unwrap_or(false);
+        let (mailbox, uid) = split_imap_id(message_id)?;
+        let (store, level) = self.cache_context(account_id)?;
+        if include_body && level < CacheLevel::Bodies {
+            return None;
+        }
+        let cached = store.get_message(mailbox, uid).ok()??;
+        if include_body && cached.body_text.is_none() {
+            return None;
+        }
+
+        let (engine, _facts) = self.runtime_for(account_id).ok()?;
+        engine
+            .authorize(account_id, Capability::ReadHeaders)
+            .ok()?;
+        engine
+            .authorize_in(account_id, mailbox, Capability::ReadHeaders)
+            .ok()?;
+        if include_body {
+            engine
+                .authorize_in(account_id, mailbox, Capability::ReadBody)
+                .ok()?;
+        }
+        let download_allowed = engine
+            .authorize_in(account_id, mailbox, Capability::DownloadAttachments)
+            .is_ok();
+
+        let message = stored_message_from_cache(account_id, message_id, &cached, include_body);
+        let mut payload = message_json(&message, download_allowed);
+        payload["from_cache"] = json!(true);
+        Some(json_rpc_text_result(id, &payload))
+    }
+
+    /// A `mail_get_attachment` answered from a retained file. The policy is
+    /// asked exactly as the live path would ask it; only then does the path
+    /// leave the process.
+    fn answer_get_attachment_from_cache(
+        &self,
+        arguments: &Value,
+        account_id: &AccountId,
+        id: &Value,
+    ) -> Option<String> {
+        let message_id = arguments["message_id"].as_str().unwrap_or_default();
+        let attachment_id = arguments["attachment_id"].as_str().unwrap_or_default();
+        let include_content = arguments["include_content"].as_bool().unwrap_or(false);
+        let (mailbox, uid) = split_imap_id(message_id)?;
+        let (store, level) = self.cache_context(account_id)?;
+        if level < CacheLevel::Attachments {
+            return None;
+        }
+        let retained = store.retained_attachment(mailbox, uid, attachment_id).ok()??;
+        let path = retained.path.as_deref()?;
+
+        let (engine, _facts) = self.runtime_for(account_id).ok()?;
+        engine
+            .authorize(account_id, Capability::DownloadAttachments)
+            .ok()?;
+        engine
+            .authorize_in(account_id, mailbox, Capability::DownloadAttachments)
+            .ok()?;
+
+        let size_bytes = std::fs::metadata(path).map(|meta| meta.len()).ok()? as usize;
+        let mut answer = json!({
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "filename": retained.filename,
+            "media_type": retained.media_type,
+            "size_bytes": size_bytes,
+            "path": path,
+            "from_cache": true
+        });
+        if include_content {
+            if size_bytes <= MAX_INLINE_CONTENT_BYTES {
+                let bytes = std::fs::read(path).ok()?;
+                answer["content_base64"] = json!(torromail_core::encode_base64(&bytes));
+            } else {
+                answer["content_note"] = json!(format!(
+                    "file exceeds the {MAX_INLINE_CONTENT_BYTES}-byte inline limit; read it from `path`"
+                ));
+            }
+        }
+        Some(json_rpc_text_result(id, &answer))
+    }
+
     /// One account's cache facts: the chosen level, the level the read
     /// permission actually allows, and honest numbers from the store. A
     /// missing database answers zeros — an empty cache is not an error.
@@ -1888,18 +2026,136 @@ fn handle_mail_get_message(
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
+    cache: Option<&(Rc<CacheStore>, CacheLevel)>,
 ) -> ToolResult {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
 
+    // The generation is asked while the provider is still free — the service
+    // below borrows it for the fetch.
+    let generation = cache
+        .and_then(|_| split_imap_id(message_id))
+        .map(|(mailbox, _)| provider.mailbox_generation(account_id, mailbox));
+
     let mut sessions = SearchSessionStore::default();
-    let service = MailAccessService::new(provider, engine, &mut sessions);
+    let service = MailAccessService::new(&mut *provider, engine, &mut sessions);
 
     let message = service
         .get_message(account_id, message_id, include_body)
         .map_err(ToolFailure::Core)?;
     let download_allowed = service.download_allowed(account_id, message.mailbox());
+
+    if let (Some((store, level)), Some((mailbox, uid))) = (cache, split_imap_id(message_id)) {
+        write_through_message(
+            store,
+            *level,
+            mailbox,
+            uid,
+            generation.flatten(),
+            &message,
+            include_body,
+        );
+    }
     Ok(message_json(&message, download_allowed))
+}
+
+/// Keep what a read fetched anyway, as deep as the level allows. Best-effort
+/// throughout: the cache never fails a mail answer.
+fn write_through_message(
+    store: &CacheStore,
+    level: CacheLevel,
+    mailbox: &str,
+    uid: u32,
+    generation: Option<u32>,
+    message: &StoredMessage,
+    body_was_fetched: bool,
+) {
+    let _ = store.note_uidvalidity(mailbox, generation);
+    let row = SummaryRow {
+        mailbox,
+        uid,
+        subject: message.subject(),
+        sender: message.sender(),
+        date: message.date(),
+    };
+    if body_was_fetched && level >= CacheLevel::Bodies {
+        let attachments: Vec<CacheAttachmentRow> = message
+            .attachments()
+            .iter()
+            .map(|info| CacheAttachmentRow {
+                attachment_id: info.id(),
+                filename: info.filename(),
+                media_type: info.media_type(),
+                size_bytes: info.size_bytes(),
+            })
+            .collect();
+        let _ = store.upsert_body(
+            &row,
+            message.seen(),
+            message.flagged(),
+            message.body(),
+            &attachments,
+        );
+    } else {
+        let _ = store.upsert_summary(&row);
+    }
+}
+
+/// A `StoredMessage` rebuilt from its cached row, for the cache-hit answer.
+fn stored_message_from_cache(
+    account_id: &AccountId,
+    message_id: &str,
+    cached: &torromail_cache::CachedMessage,
+    include_body: bool,
+) -> StoredMessage {
+    let body = if include_body {
+        cached.body_text.clone().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let snippet: String = cached
+        .body_text
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect();
+    let attachments = cached
+        .attachments
+        .iter()
+        .map(|attachment| {
+            AttachmentInfo::new(
+                attachment.attachment_id.clone(),
+                attachment.filename.clone(),
+                attachment.media_type.clone(),
+                attachment.size_bytes,
+                false,
+            )
+        })
+        .collect();
+    StoredMessage::new(
+        account_id.clone(),
+        cached.mailbox.clone(),
+        message_id,
+        message_id,
+        cached.subject.clone(),
+        cached.sender.clone(),
+        snippet,
+        body,
+    )
+    .with_date(cached.date.clone())
+    .with_attachment_infos(attachments)
+    .with_flags(cached.seen, cached.flagged)
+}
+
+/// `INBOX/4711` → (`INBOX`, 4711). Fixture-shaped ids (`m1`) answer `None`,
+/// which is exactly what keeps fixture data out of the cache.
+fn split_imap_id(message_id: &str) -> Option<(&str, u32)> {
+    let (mailbox, uid) = message_id.rsplit_once('/')?;
+    if mailbox.is_empty() {
+        return None;
+    }
+    Some((mailbox, uid.parse().ok()?))
 }
 
 /// Download one attachment into the TorroMail-managed store and answer with
@@ -1911,6 +2167,7 @@ fn handle_mail_get_attachment(
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
     attachments_dir: Option<&std::path::Path>,
+    cache: Option<&(Rc<CacheStore>, CacheLevel)>,
 ) -> ToolResult {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let attachment_id = arguments["attachment_id"].as_str().unwrap_or_default();
@@ -1926,8 +2183,12 @@ fn handle_mail_get_attachment(
         ));
     };
 
+    let generation = cache
+        .and_then(|_| split_imap_id(message_id))
+        .map(|(mailbox, _)| provider.mailbox_generation(account_id, mailbox));
+
     let mut sessions = SearchSessionStore::default();
-    let service = MailAccessService::new(provider, engine, &mut sessions);
+    let service = MailAccessService::new(&mut *provider, engine, &mut sessions);
     let payload = service
         .get_attachment(account_id, message_id, attachment_id)
         .map_err(ToolFailure::Core)?;
@@ -1954,6 +2215,25 @@ fn handle_mail_get_attachment(
     let target = directory.join(&file_name);
     std::fs::write(&target, payload.content())
         .map_err(|error| ToolFailure::Io(format!("cannot write attachment: {error}")))?;
+
+    // At the attachments level the file is retained: the next download of
+    // the same part answers from disk. Below it, the 24-hour sweep collects.
+    if let (Some((store, CacheLevel::Attachments)), Some((mailbox, uid))) =
+        (cache, split_imap_id(message_id))
+    {
+        let _ = store.note_uidvalidity(mailbox, generation.flatten());
+        let _ = store.record_attachment_file(
+            mailbox,
+            uid,
+            &CacheAttachmentRow {
+                attachment_id,
+                filename: payload.filename(),
+                media_type: payload.media_type(),
+                size_bytes: payload.content().len(),
+            },
+            &target.to_string_lossy(),
+        );
+    }
 
     let mut answer = json!({
         "message_id": message_id,
@@ -2050,16 +2330,41 @@ fn handle_mail_get_thread(
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
+    cache: Option<&(Rc<CacheStore>, CacheLevel)>,
 ) -> ToolResult {
     let thread_id = arguments["thread_id"].as_str().unwrap_or_default();
     let include_bodies = arguments["include_bodies"].as_bool().unwrap_or(false);
 
+    // A thread stays inside one mailbox — the one its id names.
+    let generation = cache
+        .and_then(|_| split_imap_id(thread_id))
+        .map(|(mailbox, _)| provider.mailbox_generation(account_id, mailbox));
+
     let mut sessions = SearchSessionStore::default();
-    let service = MailAccessService::new(provider, engine, &mut sessions);
+    let service = MailAccessService::new(&mut *provider, engine, &mut sessions);
 
     let messages = service
         .get_thread(account_id, thread_id, include_bodies)
         .map_err(ToolFailure::Core)?;
+
+    if let Some((store, level)) = cache {
+        for message in &messages {
+            if let Some((mailbox, uid)) = split_imap_id(message.message_id()) {
+                // Bodies only travel when they were fetched and survived the
+                // per-folder check — an emptied body is not a cached body.
+                let body_present = include_bodies && !message.body().is_empty();
+                write_through_message(
+                    store,
+                    *level,
+                    mailbox,
+                    uid,
+                    generation.flatten(),
+                    message,
+                    body_present,
+                );
+            }
+        }
+    }
     // A thread can span folders, so the download right is answered per
     // message, not once for the thread.
     let messages = messages
