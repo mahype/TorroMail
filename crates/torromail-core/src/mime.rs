@@ -159,6 +159,124 @@ fn param(params: &[(String, String)], key: &str) -> Option<String> {
         .map(|(_, value)| value.clone())
 }
 
+/// The filename a part declares, decoded. RFC 2231 `filename*` (and its
+/// `filename*0*`… continuations) wins over plain `filename`, which may carry
+/// RFC 2047 encoded-words. `None` when the part declares nothing.
+pub(crate) fn filename_from_params(params: &[(String, String)]) -> Option<String> {
+    if let Some(extended) = param(params, "filename*") {
+        return Some(decode_rfc2231_value(&extended));
+    }
+
+    // Continuations: filename*0*, filename*1*, … — joined in numeric order.
+    // Only the first segment carries the charset'language' prefix.
+    let mut segments: Vec<(u32, String)> = params
+        .iter()
+        .filter_map(|(key, value)| {
+            let index = key
+                .strip_prefix("filename*")?
+                .trim_end_matches('*')
+                .parse()
+                .ok()?;
+            Some((index, value.clone()))
+        })
+        .collect();
+    if !segments.is_empty() {
+        segments.sort_by_key(|(index, _)| *index);
+        let joined: String = segments.into_iter().map(|(_, value)| value).collect();
+        return Some(decode_rfc2231_value(&joined));
+    }
+
+    param(params, "filename").map(|plain| decode_rfc2047_words(&plain))
+}
+
+/// RFC 2231: `charset'language'percent-escaped-bytes`. A value without the
+/// two apostrophes is taken as already-plain text.
+fn decode_rfc2231_value(value: &str) -> String {
+    let mut pieces = value.splitn(3, '\'');
+    let (charset, escaped) = match (pieces.next(), pieces.next(), pieces.next()) {
+        (Some(charset), Some(_language), Some(rest)) => (charset.to_owned(), rest),
+        _ => (String::from("utf-8"), value),
+    };
+
+    let mut bytes = Vec::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while let Some(index) = rest.find('%') {
+        bytes.extend_from_slice(rest[..index].as_bytes());
+        let escape = rest.get(index + 1..index + 3);
+        match escape.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+            Some(byte) => {
+                bytes.push(byte);
+                rest = &rest[index + 3..];
+            }
+            None => {
+                bytes.push(b'%');
+                rest = &rest[index + 1..];
+            }
+        }
+    }
+    bytes.extend_from_slice(rest.as_bytes());
+
+    decode_charset(&charset, &bytes)
+        .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// RFC 2047 encoded-words (`=?charset?B|Q?text?=`) anywhere in the value;
+/// everything between words passes through untouched.
+fn decode_rfc2047_words(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(start) = rest.find("=?") {
+        out.push_str(&rest[..start]);
+        let word = &rest[start..];
+        match decode_one_rfc2047_word(word) {
+            Some((decoded, consumed)) => {
+                out.push_str(&decoded);
+                rest = &word[consumed..];
+            }
+            None => {
+                out.push_str("=?");
+                rest = &word[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `=?charset?encoding?text?=` word at the start of `word`; answers the
+/// decoded text and how many bytes the word consumed.
+fn decode_one_rfc2047_word(word: &str) -> Option<(String, usize)> {
+    let inner = word.strip_prefix("=?")?;
+    let charset_end = inner.find('?')?;
+    let charset = &inner[..charset_end];
+    let after_charset = &inner[charset_end + 1..];
+    let encoding = after_charset.chars().next()?;
+    if after_charset.get(1..2) != Some("?") {
+        return None;
+    }
+    let text = after_charset.get(2..)?;
+    let text_end = text.find("?=")?;
+    let payload = &text[..text_end];
+
+    let bytes = match encoding.to_ascii_lowercase() {
+        'b' => decode_base64(
+            &payload
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect::<String>(),
+        )?,
+        // Header Q form: `_` is a space, `=XX` escapes as in bodies.
+        'q' => decode_quoted_printable(&payload.replace('_', " ")),
+        _ => return None,
+    };
+    let decoded = decode_charset(charset, &bytes)
+        .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+    // =? + charset + ? + encoding + ? + payload + ?=
+    let consumed = 2 + charset_end + 1 + 2 + text_end + 2;
+    Some((decoded, consumed))
+}
+
 /// Raw part content to bytes, undoing the transfer encoding. `7bit`, `8bit`,
 /// `binary` and an absent encoding are already bytes.
 fn decode_transfer(raw: &str, transfer_encoding: &str) -> Vec<u8> {
@@ -534,6 +652,60 @@ mod tests {
         assert!(!text.contains("track()"));
         assert!(!text.contains("color:red"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn plain_and_rfc2047_filenames_decode() {
+        let plain = vec![("filename".to_owned(), "angebot.pdf".to_owned())];
+        assert_eq!(filename_from_params(&plain).as_deref(), Some("angebot.pdf"));
+
+        // "Größenliste.pdf" as one UTF-8 B word.
+        let b_word = vec![(
+            "filename".to_owned(),
+            "=?UTF-8?B?R3LDtsOfZW5saXN0ZS5wZGY=?=".to_owned(),
+        )];
+        assert_eq!(
+            filename_from_params(&b_word).as_deref(),
+            Some("Größenliste.pdf")
+        );
+
+        // Q form: underscores are spaces, =XX escapes apply.
+        let q_word = vec![(
+            "filename".to_owned(),
+            "=?utf-8?Q?M=C3=A4rz_Bericht.pdf?=".to_owned(),
+        )];
+        assert_eq!(
+            filename_from_params(&q_word).as_deref(),
+            Some("März Bericht.pdf")
+        );
+    }
+
+    #[test]
+    fn rfc2231_extended_filenames_decode_and_win() {
+        // filename* beats filename; charset prefix and percent escapes resolve.
+        let extended = vec![
+            ("filename".to_owned(), "fallback.bin".to_owned()),
+            ("filename*".to_owned(), "UTF-8''%E2%82%AC-rechnung.pdf".to_owned()),
+        ];
+        assert_eq!(
+            filename_from_params(&extended).as_deref(),
+            Some("€-rechnung.pdf")
+        );
+
+        // Continuations join in numeric order; only segment 0 carries the
+        // charset.
+        let split = vec![
+            ("filename*0*".to_owned(), "UTF-8''ver%20".to_owned()),
+            ("filename*1*".to_owned(), "trag.pdf".to_owned()),
+        ];
+        assert_eq!(filename_from_params(&split).as_deref(), Some("ver trag.pdf"));
+    }
+
+    #[test]
+    fn missing_filenames_stay_none() {
+        assert_eq!(filename_from_params(&[]), None);
+        let unrelated = vec![("charset".to_owned(), "utf-8".to_owned())];
+        assert_eq!(filename_from_params(&unrelated), None);
     }
 
     #[test]
