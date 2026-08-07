@@ -591,29 +591,62 @@ impl<T: ImapTransport> ImapClient<T> {
     /// Just the headers a search hit shows — no `BODY[TEXT]`, so a search over
     /// many mailboxes stops pulling every match in full.
     pub fn uid_fetch_summary(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedSummary> {
-        self.select(mailbox)?;
-        let lines = self.command(&format!(
-            "UID FETCH {uid} (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
-        ))?;
-        let fetch = lines
-            .iter()
-            .find(|line| line.text.contains("FETCH"))
-            .ok_or_else(|| {
-                CoreError::ProviderFailure(format!("no FETCH response for uid {uid}"))
-            })?;
-
-        let headers = fetch
-            .literals
-            .first()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
-
-        Ok(FetchedSummary {
-            uid,
-            subject: header_field(&headers, "subject").unwrap_or_default(),
-            sender: header_field(&headers, "from").unwrap_or_default(),
-            date: header_field(&headers, "date").unwrap_or_default(),
+        let mut summaries = self.uid_fetch_summaries(mailbox, &[uid])?;
+        summaries.pop().ok_or_else(|| {
+            CoreError::ProviderFailure(format!("no FETCH response for uid {uid}"))
         })
+    }
+
+    /// The summaries of many UIDs in one round trip — `UID FETCH a,b,c`.
+    /// Answers in the order asked, holes silently skipped (an expunged uid
+    /// is not this caller's problem). One command instead of one per
+    /// message is what makes search listings and cache rebuilds bearable
+    /// over a real network.
+    pub fn uid_fetch_summaries(
+        &mut self,
+        mailbox: &str,
+        uids: &[u32],
+    ) -> CoreResult<Vec<FetchedSummary>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.select(mailbox)?;
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let lines = self.command(&format!(
+            "UID FETCH {set} (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
+        ))?;
+
+        // The server answers one untagged FETCH per message, in its own
+        // order and with the UID inside the line — collect by UID, then
+        // answer in the order asked.
+        let mut by_uid = BTreeMap::new();
+        for fetch in lines.iter().filter(|line| line.text.contains("FETCH")) {
+            let Some(uid) = parse_fetch_uid(&fetch.text) else {
+                continue;
+            };
+            let headers = fetch
+                .literals
+                .first()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .unwrap_or_default();
+            by_uid.insert(
+                uid,
+                FetchedSummary {
+                    uid,
+                    subject: header_field(&headers, "subject").unwrap_or_default(),
+                    sender: header_field(&headers, "from").unwrap_or_default(),
+                    date: header_field(&headers, "date").unwrap_or_default(),
+                },
+            );
+        }
+        Ok(uids
+            .iter()
+            .filter_map(|uid| by_uid.remove(uid))
+            .collect())
     }
 
     /// The headers that tie a message to its conversation — its own id, and
@@ -865,16 +898,14 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
             // off the oldest messages, not the ones the caller asked about.
             let mut uids = client.uid_search(&mailbox, query, window)?;
             uids.reverse();
-            for uid in uids {
-                if hits.len() >= limit {
-                    break;
-                }
-                // Headers only: the snippet a full body would buy is not part
-                // of a search result, so paying for the body is pure waste.
-                let summary = client.uid_fetch_summary(&mailbox, uid)?;
+            uids.truncate(limit - hits.len());
+            // Headers only, and all of them in one round trip: the snippet a
+            // full body would buy is not part of a search result, and one
+            // command per message would pay the network once per hit.
+            for summary in client.uid_fetch_summaries(&mailbox, &uids)? {
                 hits.push(
                     SearchHit::new(
-                        format!("{mailbox}/{uid}"),
+                        format!("{mailbox}/{}", summary.uid),
                         mailbox.clone(),
                         summary.subject,
                         summary.sender,
@@ -1190,6 +1221,13 @@ fn trailing_literal_size(text: &str) -> Option<usize> {
 }
 
 /// `* LIST (\Flags) "/" "Name"` → `Name`.
+/// `* 1 FETCH (UID 8 …` → 8.
+fn parse_fetch_uid(text: &str) -> Option<u32> {
+    let (_, after) = text.split_once("UID ")?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// `* OK [UIDVALIDITY 123] UIDs valid` → 123.
 fn parse_uidvalidity(text: &str) -> Option<u32> {
     let (_, after) = text.split_once("[UIDVALIDITY ")?;

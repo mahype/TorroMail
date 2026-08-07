@@ -68,6 +68,51 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // The cache rebuild behind the app's "Rebuild" button: wipe, prefetch,
+    // one JSON progress line per batch on stdout. The exit code carries the
+    // verdict; the reason goes to stderr.
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--rebuild-cache")
+    {
+        let Some(account_id) = arguments.get(position + 1) else {
+            eprintln!("--rebuild-cache needs an account id");
+            std::process::exit(2);
+        };
+        let mut stdout = io::stdout().lock();
+        let outcome = torromail_mcp::rebuild_cache(
+            account_id,
+            policy_path(),
+            presented_token.as_deref(),
+            &mut |line| {
+                let _ = writeln!(stdout, "{line}");
+                let _ = stdout.flush();
+            },
+        );
+        if let Err(message) = outcome {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // The trim behind a lowered level or read permission: local housekeeping,
+    // no login, quiet on success.
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--trim-cache")
+    {
+        let Some(account_id) = arguments.get(position + 1) else {
+            eprintln!("--trim-cache needs an account id");
+            std::process::exit(2);
+        };
+        if let Err(message) = torromail_mcp::trim_cache(account_id, policy_path()) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // Prove the accounts before the first tool call needs them, so the app's
     // dots are current even when a client — not the app — started us.
     //

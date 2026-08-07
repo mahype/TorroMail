@@ -569,9 +569,23 @@ fn an_empty_query_asks_the_server_for_everything_newest_first() {
         line("* SEARCH 101 102"),
         line("t3 OK SEARCH completed"),
     ]);
-    // Newest first, so the higher UID is fetched before the lower one.
-    script.extend(fetch_script("t4", 102, "", HEADERS, BODY));
-    script.extend(fetch_script("t5", 101, "", HEADERS, BODY));
+    // Newest first: both summaries answer one batched fetch, higher UID
+    // asked (and answered) before the lower one.
+    script.extend([
+        line(&format!(
+            "* 2 FETCH (UID 102 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}",
+            HEADERS.len()
+        )),
+        Incoming::Bytes(HEADERS.as_bytes().to_vec()),
+        line(")"),
+        line(&format!(
+            "* 1 FETCH (UID 101 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}",
+            HEADERS.len()
+        )),
+        Incoming::Bytes(HEADERS.as_bytes().to_vec()),
+        line(")"),
+        line("t4 OK FETCH completed"),
+    ]);
     let log = SentLog::default();
     let client = ImapClient::connect(
         ScriptedTransport::new(script, log.clone()),
@@ -591,6 +605,7 @@ fn an_empty_query_asks_the_server_for_everything_newest_first() {
     let sent = log.lines();
     assert_eq!(sent[1], "t2 SELECT \"INBOX\"");
     assert_eq!(sent[2], "t3 UID SEARCH ALL");
+    assert_eq!(sent[3], "t4 UID FETCH 102,101 (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])");
     assert_eq!(
         hits.iter().map(SearchHit::message_id).collect::<Vec<_>>(),
         ["INBOX/102", "INBOX/101"]
@@ -1238,4 +1253,48 @@ fn select_captures_uidvalidity_for_the_cache() {
         .get_message(&account_id, "INBOX/101")
         .expect("fetch succeeds");
     assert_eq!(provider.mailbox_generation(&account_id, "INBOX"), Some(9));
+}
+
+#[test]
+fn a_batched_summary_fetch_is_one_command() {
+    let mut script = login_script();
+    script.extend([line("* 2 EXISTS"), line("t2 OK SELECT completed")]);
+    script.extend([
+        line(&format!(
+            "* 1 FETCH (UID 8 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}",
+            HEADERS.len()
+        )),
+        Incoming::Bytes(HEADERS.as_bytes().to_vec()),
+        line(")"),
+        line(&format!(
+            "* 2 FETCH (UID 9 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}",
+            HEADERS.len()
+        )),
+        Incoming::Bytes(HEADERS.as_bytes().to_vec()),
+        line(")"),
+        line("t3 OK FETCH completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+
+    let summaries = client
+        .uid_fetch_summaries("INBOX", &[8, 9])
+        .expect("batch works");
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].uid, 8);
+    assert_eq!(summaries[0].subject, "Quarterly invoice");
+    assert_eq!(summaries[1].uid, 9);
+
+    let fetches: Vec<_> = log
+        .lines()
+        .into_iter()
+        .filter(|sent| sent.contains("UID FETCH"))
+        .collect();
+    assert_eq!(fetches.len(), 1, "one command for the whole batch: {fetches:?}");
+    assert!(fetches[0].contains("UID FETCH 8,9 "), "got: {fetches:?}");
 }

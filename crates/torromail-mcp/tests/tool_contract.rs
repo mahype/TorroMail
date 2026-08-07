@@ -2543,3 +2543,40 @@ fn search_merges_cached_hits_and_survives_a_dead_server() {
     );
     assert!(browse_answer.contains("error"), "got: {browse_answer}");
 }
+
+#[test]
+fn trim_cache_drops_material_above_the_effective_level() {
+    let path = isolated_policy_path("cache-trim");
+    // Chosen level attachments, but the read permission stops at headers.
+    cached_account_document(&path, "headers", "attachments");
+    let cache_dir = path.parent().expect("dir").join("cache");
+    let store = torromail_cache::CacheStore::open(&cache_dir, "work").expect("store opens");
+    store
+        .upsert_body(
+            &torromail_cache::SummaryRow {
+                mailbox: "INBOX",
+                uid: 1,
+                subject: "S",
+                sender: "a@example.com",
+                date: "",
+            },
+            false,
+            false,
+            "Body",
+            &[],
+        )
+        .expect("seeded");
+    drop(store);
+
+    torromail_mcp::trim_cache("work", Some(path.clone())).expect("trim runs");
+
+    let store = torromail_cache::CacheStore::open(&cache_dir, "work").expect("store reopens");
+    let row = store
+        .get_message("INBOX", 1)
+        .expect("read")
+        .expect("summary survives");
+    let body_gone = row.body_text.is_none();
+    drop(store);
+    remove_isolated_dir(&path);
+    assert!(body_gone, "headers read permission caps the level, the body goes");
+}

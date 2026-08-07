@@ -1709,6 +1709,155 @@ fn resolve_credential(
 /// same check serves a user standing at a button and the sweep below, and only
 /// one of them is entitled to speak for the account afterwards.
 #[must_use]
+/// The document account behind a CLI command, with the cache facts already
+/// reduced to the level that actually applies.
+fn document_account_for_cli(
+    account_id: &str,
+    policy_path: &Option<PathBuf>,
+) -> Result<(PathBuf, DocumentAccount, CacheLevel), String> {
+    let path = policy_path
+        .clone()
+        .ok_or("no policy document path available")?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("policy document unreadable: {error}"))?;
+    let document = parse_policy_document(&text)?;
+    let account = document
+        .accounts
+        .into_iter()
+        .find(|account| account.policy.account_id().as_str() == account_id)
+        .ok_or_else(|| CoreError::AccountNotFound(AccountId::new(account_id)).to_string())?;
+    let level = effective_cache_level(account.cache.level, account.policy.permissions().read);
+    Ok((path, account, level))
+}
+
+/// `--trim-cache`: cut the account's store down to its effective level. The
+/// app invokes this whenever the level or the read permission drops — the
+/// disk follows the decision. Local housekeeping only; nothing logs in.
+pub fn trim_cache(account_id: &str, policy_path: Option<PathBuf>) -> Result<(), String> {
+    let (path, _account, level) = document_account_for_cli(account_id, &policy_path)?;
+    let cache_dir = path
+        .parent()
+        .ok_or("policy path has no parent directory")?
+        .join("cache");
+    if !cache_dir.join(format!("{account_id}.sqlite")).exists() {
+        return Ok(());
+    }
+    let store =
+        CacheStore::open(&cache_dir, account_id).map_err(|error| error.to_string())?;
+    store.trim(level).map_err(|error| error.to_string())
+}
+
+/// `--rebuild-cache`: wipe and prefetch — newest 500 header rows per
+/// readable mailbox, then the newest 100 INBOX bodies when the level allows.
+/// Attachments are never prefetched; they arrive on demand and are retained
+/// per level. One JSON progress line per batch through `progress`.
+pub fn rebuild_cache(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let (path, account, level) = document_account_for_cli(account_id, &policy_path)?;
+    if level == CacheLevel::Off {
+        return Err("the cache is off for this account".to_owned());
+    }
+    // The rebuild logs into the real mailbox, so it sits behind the same
+    // pairing gate as the tools and the account check.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("policy document unreadable: {error}"))?;
+    let document = parse_policy_document(&text)?;
+    pairing_gate(document.clients.as_deref(), presented_token).map_err(str::to_owned)?;
+
+    let config = account
+        .imap
+        .as_ref()
+        .ok_or_else(|| unconfigured(account.policy.account_id()).to_string())?;
+    let secret =
+        resolve_credential(config, account.oauth.as_ref()).map_err(|error| error.to_string())?;
+    let provider = torromail_imap_tls::connect_account(config, &secret)
+        .map_err(|error| error.to_string())?;
+
+    let cache_dir = path
+        .parent()
+        .ok_or("policy path has no parent directory")?
+        .join("cache");
+    let store =
+        CacheStore::open(&cache_dir, account_id).map_err(|error| error.to_string())?;
+    // A rebuild starts clean: whatever was cached is rebuilt from scratch.
+    store
+        .trim(CacheLevel::Off)
+        .map_err(|error| error.to_string())?;
+
+    let aid = &config.account_id;
+    let mailboxes: Vec<String> = provider
+        .list_mailboxes(aid)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|mailbox| account.policy.allows_in(mailbox, Capability::Search))
+        .collect();
+
+    for mailbox in &mailboxes {
+        if let Some(generation) = provider.mailbox_generation(aid, mailbox) {
+            let _ = store.note_uidvalidity(mailbox, Some(generation));
+        }
+        let hits = provider
+            .search(aid, "", Some(mailbox), 500, &SearchWindow::default())
+            .map_err(|error| error.to_string())?;
+        let total = hits.len();
+        let mut done = 0usize;
+        for chunk in hits.chunks(50) {
+            for hit in chunk {
+                if let Some((hit_mailbox, uid)) = split_imap_id(hit.message_id()) {
+                    let _ = store.upsert_summary(&SummaryRow {
+                        mailbox: hit_mailbox,
+                        uid,
+                        subject: hit.subject(),
+                        sender: hit.sender(),
+                        date: hit.date(),
+                    });
+                }
+            }
+            done += chunk.len();
+            progress(
+                &json!({"phase": "headers", "mailbox": mailbox, "done": done, "total": total})
+                    .to_string(),
+            );
+        }
+    }
+
+    if level >= CacheLevel::Bodies {
+        // The generation the headers pass already noted — handing anything
+        // else to the write would read as a UIDVALIDITY change and wipe the
+        // rows just written.
+        let inbox_generation = provider.mailbox_generation(aid, "INBOX");
+        let hits = provider
+            .search(aid, "", Some("INBOX"), 100, &SearchWindow::default())
+            .map_err(|error| error.to_string())?;
+        let total = hits.len();
+        for (index, hit) in hits.iter().enumerate() {
+            if let (Ok(message), Some((mailbox, uid))) = (
+                provider.get_message(aid, hit.message_id()),
+                split_imap_id(hit.message_id()),
+            ) {
+                write_through_message(&store, level, mailbox, uid, inbox_generation, &message, true);
+            }
+            if (index + 1) % 10 == 0 || index + 1 == total {
+                progress(
+                    &json!({"phase": "bodies", "mailbox": "INBOX", "done": index + 1, "total": total})
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let status = store.status().map_err(|error| error.to_string())?;
+    progress(
+        &json!({"phase": "done", "messages": status.message_count, "size_bytes": status.db_size_bytes})
+            .to_string(),
+    );
+    Ok(())
+}
+
 pub fn check_account(
     account_id: &str,
     policy_path: Option<PathBuf>,
@@ -2035,8 +2184,11 @@ fn handle_mail_search(
         for hit in &hits {
             if let Some((hit_mailbox, uid)) = split_imap_id(hit.message_id()) {
                 if !noted_mailboxes.iter().any(|name| name == hit_mailbox) {
-                    let generation = provider.mailbox_generation(account_id, hit_mailbox);
-                    let _ = store.note_uidvalidity(hit_mailbox, generation);
+                    if let Some(generation) =
+                        provider.mailbox_generation(account_id, hit_mailbox)
+                    {
+                        let _ = store.note_uidvalidity(hit_mailbox, Some(generation));
+                    }
                     noted_mailboxes.push(hit_mailbox.to_owned());
                 }
                 let _ = store.upsert_summary(&SummaryRow {
@@ -2224,7 +2376,12 @@ fn write_through_message(
     message: &StoredMessage,
     body_was_fetched: bool,
 ) {
-    let _ = store.note_uidvalidity(mailbox, generation);
+    // Only a stated generation is worth recording: `None` means the provider
+    // could not say (fixtures, a failed select), and overwriting a known
+    // value with "unknown" would read as a change and wipe good rows.
+    if generation.is_some() {
+        let _ = store.note_uidvalidity(mailbox, generation);
+    }
     let row = SummaryRow {
         mailbox,
         uid,
@@ -2375,7 +2532,9 @@ fn handle_mail_get_attachment(
     if let (Some((store, CacheLevel::Attachments)), Some((mailbox, uid))) =
         (cache, split_imap_id(message_id))
     {
-        let _ = store.note_uidvalidity(mailbox, generation.flatten());
+        if let Some(generation) = generation.flatten() {
+            let _ = store.note_uidvalidity(mailbox, Some(generation));
+        }
         let _ = store.record_attachment_file(
             mailbox,
             uid,
