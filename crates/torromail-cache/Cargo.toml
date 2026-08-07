@@ -1,0 +1,17 @@
+[package]
+name = "torromail-cache"
+description = "Per-account SQLite/FTS5 search cache for TorroMail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+torromail-core = { path = "../torromail-core" }
+# The workspace's first external dependency, quarantined here on purpose:
+# core stays portable, and everything SQLite lives behind this crate's API.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[lints]
+workspace = true

@@ -203,6 +203,69 @@ pub enum ProviderKind {
     JmapProfile,
 }
 
+/// How much of an account may rest on this Mac, in the language of the read
+/// permissions: nothing, the envelope, whole messages, or messages plus their
+/// attachment files. One decision — indexing always covers exactly what is
+/// stored, so there is no separate index switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CacheLevel {
+    Off,
+    Headers,
+    Bodies,
+    Attachments,
+}
+
+impl CacheLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Headers => "headers",
+            Self::Bodies => "bodies",
+            Self::Attachments => "attachments",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "off" => Some(Self::Off),
+            "headers" => Some(Self::Headers),
+            "bodies" => Some(Self::Bodies),
+            "attachments" => Some(Self::Attachments),
+            _ => None,
+        }
+    }
+
+    /// The old five-switch shape, mapped: a disabled cache is off, the two
+    /// header-ish modes are `Headers`, and both body modes are `Bodies` —
+    /// "full text" as a storage level never meant anything more.
+    pub fn parse_legacy(local_cache_enabled: bool, mode: &str) -> Self {
+        if !local_cache_enabled {
+            return Self::Off;
+        }
+        match mode {
+            "body" | "fullText" => Self::Bodies,
+            _ => Self::Headers,
+        }
+    }
+
+    /// The most the read permission justifies keeping on disk: nothing is
+    /// stored that no assistant may read.
+    pub fn ceiling(read: ReadAccess) -> Self {
+        match read {
+            ReadAccess::None => Self::Off,
+            ReadAccess::Headers => Self::Headers,
+            ReadAccess::FullMessage => Self::Bodies,
+            ReadAccess::WithAttachments => Self::Attachments,
+        }
+    }
+}
+
+/// The level that actually applies: the chosen one, capped by the read
+/// permission's ceiling.
+pub fn effective_cache_level(chosen: CacheLevel, read: ReadAccess) -> CacheLevel {
+    chosen.min(CacheLevel::ceiling(read))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachePolicy {
     pub persist_metadata: bool,

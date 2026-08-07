@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/torromail-cache",
     "crates/torromail-core",
     "crates/torromail-imap-tls",
     "crates/torromail-mcp",
