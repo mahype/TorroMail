@@ -332,6 +332,140 @@ impl CacheStore {
     }
 }
 
+/// What the app and `mail_get_cache_status` report: real counts, real bytes.
+pub struct CacheStatus {
+    pub message_count: u64,
+    pub attachment_count: u64,
+    pub db_size_bytes: u64,
+    pub last_write: Option<u64>,
+}
+
+impl CacheStore {
+    /// Marks one listed attachment as downloaded-and-retained at `path` —
+    /// the next download answers from disk instead of the server.
+    pub fn record_attachment_file(
+        &self,
+        mailbox: &str,
+        uid: u32,
+        attachment_id: &str,
+        path: &str,
+    ) -> Result<(), CacheError> {
+        self.connection.execute(
+            "INSERT INTO attachments
+                (mailbox, uid, attachment_id, filename, media_type, size_bytes, path, cached_at)
+             VALUES (?1, ?2, ?3, '', 'application/octet-stream', 0, ?4, ?5)
+             ON CONFLICT(mailbox, uid, attachment_id) DO UPDATE SET
+                path = excluded.path,
+                cached_at = excluded.cached_at",
+            rusqlite::params![mailbox, uid, attachment_id, path, now()],
+        )?;
+        Ok(())
+    }
+
+    /// The retained file's path, when this attachment was downloaded before
+    /// and the file is still there. A recorded path whose file vanished
+    /// answers `None` — the disk is the truth, the row only remembers.
+    pub fn attachment_path(
+        &self,
+        mailbox: &str,
+        uid: u32,
+        attachment_id: &str,
+    ) -> Result<Option<String>, CacheError> {
+        let path: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT path FROM attachments
+                 WHERE mailbox = ?1 AND uid = ?2 AND attachment_id = ?3",
+                rusqlite::params![mailbox, uid, attachment_id],
+                |row| row.get(0),
+            )
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        Ok(path.filter(|candidate| Path::new(candidate).exists()))
+    }
+
+    /// Drops everything above `level`: retained files and attachment rows
+    /// below `Attachments`, bodies below `Bodies`, everything at `Off`.
+    /// File deletion is best-effort — a locked file must not wedge a trim.
+    pub fn trim(&self, level: torromail_core::CacheLevel) -> Result<(), CacheError> {
+        use torromail_core::CacheLevel;
+
+        if level < CacheLevel::Attachments {
+            let mut statement = self
+                .connection
+                .prepare("SELECT path FROM attachments WHERE path IS NOT NULL")?;
+            let retained = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for path in retained {
+                let _ = std::fs::remove_file(&path);
+            }
+            drop(statement);
+            self.connection.execute("DELETE FROM attachments", [])?;
+        }
+        if level < CacheLevel::Bodies {
+            self.connection.execute(
+                "UPDATE messages SET body_text = NULL, filenames = ''",
+                [],
+            )?;
+            // The index must forget the bodies too.
+            let mut statement = self
+                .connection
+                .prepare("SELECT mailbox, uid FROM messages")?;
+            let keys = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            for (mailbox, uid) in keys {
+                self.refresh_fts(&mailbox, uid)?;
+            }
+        }
+        if level < CacheLevel::Headers {
+            self.connection.execute("DELETE FROM messages_fts", [])?;
+            self.connection.execute("DELETE FROM messages", [])?;
+            self.connection.execute("DELETE FROM mailboxes", [])?;
+        }
+        Ok(())
+    }
+
+    /// Honest numbers for the status tool and the app's storage row.
+    pub fn status(&self) -> Result<CacheStatus, CacheError> {
+        let message_count: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))?;
+        let attachment_count: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM attachments", [], |row| row.get(0))?;
+        let last_write: Option<i64> = self.connection.query_row(
+            "SELECT max(cached_at) FROM messages",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // The WAL sibling holds real bytes until a checkpoint folds it in.
+        let mut db_size_bytes = 0u64;
+        for candidate in [
+            self.db_path.clone(),
+            PathBuf::from(format!("{}-wal", self.db_path.display())),
+        ] {
+            if let Ok(metadata) = std::fs::metadata(&candidate) {
+                db_size_bytes += metadata.len();
+            }
+        }
+
+        Ok(CacheStatus {
+            message_count: message_count.max(0) as u64,
+            attachment_count: attachment_count.max(0) as u64,
+            db_size_bytes,
+            last_write: last_write.and_then(|stamp| u64::try_from(stamp).ok()),
+        })
+    }
+}
+
 /// Every whitespace token as a quoted prefix term, ANDed — the substring-ish
 /// matching people expect from a mail search. `None` for an empty query.
 fn fts_query(query: &str) -> Option<String> {
@@ -530,6 +664,90 @@ mod tests {
             .expect("second writes");
         assert!(first.get_message("INBOX", 2).expect("read").is_some());
         drop((first, second));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_attachments_trim_and_status_agree() {
+        let dir = std::env::temp_dir().join(format!("torromail-cache-att-{}", std::process::id()));
+        let store = CacheStore::open(&dir, "work").expect("store opens");
+        let row = SummaryRow {
+            mailbox: "INBOX",
+            uid: 1,
+            subject: "S",
+            sender: "a@example.com",
+            date: "",
+        };
+        store
+            .upsert_body(
+                &row,
+                false,
+                false,
+                "Text",
+                &[AttachmentRow {
+                    attachment_id: "2",
+                    filename: "a.pdf",
+                    media_type: "application/pdf",
+                    size_bytes: 1,
+                }],
+            )
+            .expect("body lands");
+
+        // Retain a real file so trim can delete it.
+        let blob = dir.join("blob-a.pdf");
+        std::fs::write(&blob, b"x").expect("blob written");
+        store
+            .record_attachment_file("INBOX", 1, "2", &blob.to_string_lossy())
+            .expect("recorded");
+        assert_eq!(
+            store
+                .attachment_path("INBOX", 1, "2")
+                .expect("lookup")
+                .as_deref(),
+            Some(blob.to_string_lossy().as_ref())
+        );
+
+        let status = store.status().expect("status");
+        assert_eq!(status.message_count, 1);
+        assert_eq!(status.attachment_count, 1);
+        assert!(status.db_size_bytes > 0);
+        assert!(status.last_write.is_some());
+
+        // Trim to Bodies: attachment rows and the file go, the body stays.
+        store
+            .trim(torromail_core::CacheLevel::Bodies)
+            .expect("trimmed");
+        assert!(store.attachment_path("INBOX", 1, "2").expect("lookup").is_none());
+        assert!(!blob.exists());
+        assert!(
+            store
+                .get_message("INBOX", 1)
+                .expect("read")
+                .expect("row")
+                .body_text
+                .is_some()
+        );
+
+        // Trim to Headers: the body goes too, the summary stays searchable.
+        store
+            .trim(torromail_core::CacheLevel::Headers)
+            .expect("trimmed");
+        assert!(
+            store
+                .get_message("INBOX", 1)
+                .expect("read")
+                .expect("row")
+                .body_text
+                .is_none()
+        );
+        assert_eq!(store.search("s", 10).expect("search").len(), 1);
+
+        // Trim to Off: nothing left.
+        store
+            .trim(torromail_core::CacheLevel::Off)
+            .expect("trimmed");
+        assert_eq!(store.status().expect("status").message_count, 0);
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
