@@ -1353,12 +1353,14 @@ impl LineMcpServer {
         let message_id = arguments["message_id"].as_str().unwrap_or_default();
         let include_body = arguments["include_body"].as_bool().unwrap_or(false);
         let (mailbox, uid) = split_imap_id(message_id)?;
-        let (store, level) = self.cache_context(account_id)?;
-        if include_body && level < CacheLevel::Bodies {
-            return None;
-        }
+        let (store, _level) = self.cache_context(account_id)?;
         let cached = store.get_message(mailbox, uid).ok()??;
-        if include_body && cached.body_text.is_none() {
+        // Only a complete row may answer — for header reads too. Summary
+        // rows (search write-through) carry no attachment listing, and a
+        // cache answer claiming "no attachments" for a message that has
+        // some would be a lie. A row with a body came from a full fetch,
+        // listing included.
+        if cached.body_text.is_none() {
             return None;
         }
 

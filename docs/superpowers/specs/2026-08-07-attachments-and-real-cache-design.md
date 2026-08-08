@@ -221,8 +221,11 @@ The tools feed the cache with what they fetched anyway: search result
 summaries upsert header rows, `mail_get_message`/`mail_get_thread` upsert body
 text at `bodies` and above, `mail_get_attachment` records and retains the file
 at `attachments`. A cache miss never triggers an extra server round-trip; a
-hit saves one (message reads answer from the cache when the row has what the
-call needs, attachments as described in Part 1).
+hit saves one. A row only serves message reads once it is *complete* — body
+fetched, attachment listing included. Summary rows (search write-through)
+never answer `mail_get_message`, not even header reads: they carry no
+attachment listing, and "no attachments" would be a claim, not a fact.
+Attachment downloads hit as described in Part 1.
 
 ### Search
 

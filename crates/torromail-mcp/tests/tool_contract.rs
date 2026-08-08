@@ -2433,7 +2433,14 @@ fn imap_shaped_mailbox() -> FixtureMailProvider {
         "billing@example.com",
         "s",
         "Anbei die Rechnung.",
-    );
+    )
+    .with_attachment_infos(vec![AttachmentInfo::new(
+        "2",
+        "maerz.pdf",
+        "application/pdf",
+        8,
+        false,
+    )]);
     FixtureMailProvider::new([message])
 }
 
@@ -2579,4 +2586,35 @@ fn trim_cache_drops_material_above_the_effective_level() {
     drop(store);
     remove_isolated_dir(&path);
     assert!(body_gone, "headers read permission caps the level, the body goes");
+}
+
+#[test]
+fn a_summary_row_never_serves_a_message_read() {
+    // A search caches header rows; those carry no attachment listing, so a
+    // message read served from one would claim "no attachments" for a
+    // message that has some. Reads stay live until a full row exists.
+    let path = isolated_policy_path("cache-summary-no-serve");
+    cached_account_document(&path, "full_message", "bodies");
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+        Ok(Box::new(imap_shaped_mailbox()) as Box<dyn MailProvider>)
+    });
+
+    let search = r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"mail_search","arguments":{"account_id":"work","query":"rechnung"}}}"#;
+    let _ = server.handle_line(search).expect("a response");
+
+    // Header read after the search: the summary row exists, but the answer
+    // must come live — with the real attachment listing.
+    let header_read = r#"{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_body":false}}}"#;
+    let live = server.handle_line(header_read).expect("a response");
+    assert!(live.contains("maerz.pdf"), "got: {live}");
+    assert!(!live.contains(r#"\"from_cache\":true"#), "got: {live}");
+
+    // A body read completes the row; from then on the cache may answer,
+    // listing included.
+    let body_read = r#"{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_body":true}}}"#;
+    let _ = server.handle_line(body_read).expect("a response");
+    let cached = server.handle_line(header_read).expect("a response");
+    remove_isolated_dir(&path);
+    assert!(cached.contains(r#"\"from_cache\":true"#), "got: {cached}");
+    assert!(cached.contains("maerz.pdf"), "got: {cached}");
 }
