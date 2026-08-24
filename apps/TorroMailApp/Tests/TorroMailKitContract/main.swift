@@ -10,9 +10,10 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 
 let model = TorroMailModel.preview()
 
-// Decisions, not options: the sidebar carries exactly four destinations —
-// Overview, Mail Accounts, Settings, Log. Individual accounts live one level
-// deeper, as cards inside the accounts destination.
+// Decisions, not options: every sidebar destination is something the user
+// decides — Overview, Mail Accounts, MCP Clients, Settings, Updates, Log, Help.
+// Individual accounts live one level deeper, as cards inside the accounts
+// destination.
 require(
     model.accounts.map(\.name) == ["Work", "Personal"],
     "accounts are the primary navigation"

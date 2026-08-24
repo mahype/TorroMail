@@ -8,6 +8,7 @@ public enum TorroMailSidebarSelection: Hashable {
     case accounts
     case mcp
     case settings
+    case updates
     case log
     case help
 }

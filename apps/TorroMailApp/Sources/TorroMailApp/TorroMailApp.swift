@@ -736,6 +736,8 @@ private struct TorroMailRootView: View {
                     .tag(TorroMailSidebarSelection.mcp)
                 Label(L("Settings"), systemImage: "gearshape")
                     .tag(TorroMailSidebarSelection.settings)
+                Label(L("Updates"), systemImage: "arrow.triangle.2.circlepath")
+                    .tag(TorroMailSidebarSelection.updates)
                 Label(L("Log"), systemImage: "list.bullet.rectangle")
                     .tag(TorroMailSidebarSelection.log)
                 Label(L("Help"), systemImage: "questionmark.circle")
@@ -793,6 +795,8 @@ private struct TorroMailRootView: View {
             }
         case .settings:
             SettingsView()
+        case .updates:
+            UpdatesView()
         case .log:
             LogView()
         case .help:
@@ -2210,7 +2214,6 @@ private struct ConnectionStatusBadge: View {
 
 private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
-    @EnvironmentObject private var updaterController: UpdaterController
 
     var body: some View {
         Form {
@@ -2241,6 +2244,31 @@ private struct SettingsView: View {
             }
 
             Section {
+                Button(L("Open Updates…")) {
+                    model.selectedSidebarItem = .updates
+                }
+                .torroButton()
+            } header: {
+                Text(L("Updates"))
+            } footer: {
+                Text(L("Staying up to date is its own section in the sidebar."))
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(L("Settings"))
+    }
+}
+
+/// Updating is a decision of its own, so it gets a destination of its own
+/// rather than a section buried at the bottom of Settings: the sidebar states
+/// that TorroMail can update itself, and the pane answers the only two
+/// questions worth asking — which version am I on, and is there a newer one.
+private struct UpdatesView: View {
+    @EnvironmentObject private var updaterController: UpdaterController
+
+    var body: some View {
+        Form {
+            Section {
                 Toggle(
                     L("Automatically check for updates"),
                     isOn: $updaterController.automaticallyChecksForUpdates
@@ -2250,6 +2278,7 @@ private struct SettingsView: View {
                 Button(L("Check for updates now")) {
                     updaterController.checkForUpdates()
                 }
+                .torroButton()
                 .disabled(!updaterController.isAvailable)
 
                 if updaterController.isAvailable {
@@ -2265,17 +2294,32 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 }
             } header: {
-                Text(L("Updates"))
+                Text(L("Automatic updates"))
             } footer: {
                 if updaterController.isAvailable {
                     Text(L("TorroMail checks for new versions at launch and then every 24 hours. Updates download in the background and install when you restart."))
                 } else {
-                    Text(L("Updates are available in signed release builds."))
+                    Text(L("Updates are available in signed release builds. This build is unsigned, so it stays on the version you built."))
                 }
+            }
+
+            Section {
+                HStack(spacing: 4) {
+                    Text(L("Installed version:"))
+                    Text(Self.installedVersion)
+                        .monospacedDigit()
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(L("Settings"))
+        .navigationTitle(L("Updates"))
+    }
+
+    private static var installedVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? L("Unknown")
     }
 }
 

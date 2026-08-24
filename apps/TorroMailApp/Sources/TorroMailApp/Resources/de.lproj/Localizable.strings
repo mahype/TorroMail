@@ -149,7 +149,12 @@
 "Last checked:" = "Zuletzt geprüft:";
 "Never" = "Noch nie";
 "TorroMail checks for new versions at launch and then every 24 hours. Updates download in the background and install when you restart." = "TorroMail sucht beim Start und danach alle 24 Stunden nach neuen Versionen. Updates werden im Hintergrund geladen und beim nächsten Start installiert.";
-"Updates are available in signed release builds." = "Updates sind in signierten Release-Versionen verfügbar.";
+"Automatic updates" = "Automatische Updates";
+"Open Updates…" = "Updates öffnen …";
+"Staying up to date is its own section in the sidebar." = "Aktuell bleiben hat einen eigenen Bereich in der Seitenleiste.";
+"Installed version:" = "Installierte Version:";
+"Unknown" = "Unbekannt";
+"Updates are available in signed release builds. This build is unsigned, so it stays on the version you built." = "Updates sind in signierten Release-Versionen verfügbar. Diese Version ist unsigniert und bleibt daher auf dem Stand, den du gebaut hast.";
 "MCP Server" = "MCP-Server";
 "Running" = "Läuft";
 "Starting up…" = "Startet gerade …";
