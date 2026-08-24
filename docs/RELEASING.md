@@ -47,11 +47,12 @@ On push of a `v*` tag, the GitHub Actions release workflow (`macos-14` runner):
 5. Packages a drag-to-Applications `.dmg`, signs + notarizes + staples it, and
    writes `SHA256SUMS.txt`.
 6. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket.
-7. Publishes a GitHub Release with auto-generated notes and attaches the DMG
-   and checksum file.
-
-TorroMail has no in-app auto-update (no Sparkle/appcast): distribution is the
-notarized DMG on the GitHub Releases page.
+7. Signs the DMG with TorroMail's Sparkle Ed25519 key and creates
+   `appcast.xml` with the generated release notes.
+8. Publishes one GitHub Release containing the DMG, checksum, and appcast.
+   Installed apps poll the stable
+   `releases/latest/download/appcast.xml` address, so the feed and the file it
+   advertises become visible together.
 
 ## Required GitHub Actions secrets
 
@@ -65,10 +66,42 @@ Actions**). Without them the workflow fails at the signing step.
 | `APPLE_ID` | Apple ID email tied to your developer account. |
 | `APPLE_TEAM_ID` | 10-character Apple Developer Team ID. |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com → App-Specific Passwords (used for notarytool). |
+| `SPARKLE_ED_PUBLIC_KEY` | Public Ed25519 key printed by Sparkle's `generate_keys`; injected into the release app's `Info.plist`. |
+| `SPARKLE_ED_PRIVATE_KEY` | Private Ed25519 key exported once with `generate_keys -x`; signs each update and must never be committed. |
 
 Exporting the certificate: in **Keychain Access**, find *Developer ID
 Application: … (TEAMID)*, right-click → Export, choose Personal Information
 Exchange (`.p12`), set a password → that becomes `MACOS_CERTIFICATE_PASSWORD`.
+
+### One-time Sparkle key setup
+
+Use a TorroMail-specific key pair. After resolving the Swift package, Sparkle's
+key tool is available inside the package artifact:
+
+```bash
+swift package --package-path apps/TorroMailApp resolve
+GEN="$(find apps/TorroMailApp/.build -type f -name generate_keys | head -1)"
+"$GEN" --account torromail
+```
+
+The command stores the private key in the macOS keychain and prints the public
+key. Add that printed value as `SPARKLE_ED_PUBLIC_KEY` in the TorroMail GitHub
+repository (`gh secret set SPARKLE_ED_PUBLIC_KEY`), then export the private key
+directly into its matching secret without placing it in the repository:
+
+```bash
+private_key="$(mktemp)"
+rm -f "$private_key"
+"$GEN" --account torromail -x "$private_key"
+gh secret set SPARKLE_ED_PRIVATE_KEY < "$private_key"
+rm -P "$private_key"
+```
+
+Back the private key up in the maintainer's password manager. If it is lost,
+Sparkle can rotate the Ed25519 key through a DMG signed with the same Apple
+Developer ID certificate, but that recovery is more involved than restoring a
+backup. The public and private keys are separate from the Apple Developer ID
+certificate; both signature layers are required.
 
 ## Building locally
 
@@ -85,11 +118,16 @@ export MACOS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 export APPLE_ID="you@example.com"
 export APPLE_TEAM_ID="XXXXXXXXXX"
 export APPLE_APP_SPECIFIC_PASSWORD="abcd-efgh-ijkl-mnop"
+export SPARKLE_ED_PUBLIC_KEY="base64-public-key"
 ./scripts/build-macos-app.sh
 ./scripts/codesign-macos.sh
 ./scripts/build-dmg.sh
 ./scripts/smoke-test-dmg.sh dist/TorroMail-*.dmg
 ```
+
+Local builds omit and disable the updater when `SPARKLE_ED_PUBLIC_KEY` is not
+set. CI passes `REQUIRE_SPARKLE_KEY=1`, so a release cannot silently ship in
+that state.
 
 For the fast day-to-day dev bundle (debug, host-arch, ad-hoc), use
 [scripts/make-app-bundle.sh](../scripts/make-app-bundle.sh) instead.

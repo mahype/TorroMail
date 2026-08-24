@@ -87,7 +87,9 @@ jobs:
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Build universal .app
-        run: ./scripts/build-macos-app.sh
+        env:
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+        run: REQUIRE_SPARKLE_KEY=1 ./scripts/build-macos-app.sh
 
       - name: Sign and notarize .app
         run: ./scripts/codesign-macos.sh
@@ -103,6 +105,42 @@ jobs:
           version="${TAG#v}"
           ./scripts/smoke-test-dmg.sh "dist/TorroMail-${version}.dmg"
 
+      - name: Verify Sparkle signing tool
+        run: |
+          set -euo pipefail
+          sign_update="$(find apps/TorroMailApp/.build \
+            -path '*/old_dsa_scripts' -prune -o \
+            -type f -name sign_update -print 2>/dev/null | head -1 || true)"
+          if [[ ! -x "$sign_update" ]]; then
+            echo "error: Sparkle sign_update was not materialised by the Swift build" >&2
+            exit 1
+          fi
+          echo "sign_update: $sign_update"
+
+      - name: Generate release notes for updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body > release-notes.md
+          echo "Generated $(wc -c < release-notes.md) bytes of release notes"
+
+      - name: Create signed Sparkle appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          ./scripts/create-appcast.sh \
+            "dist/TorroMail-${version}.dmg" \
+            "$version" \
+            "https://github.com/mahype/TorroMail/releases/tag/${TAG}" \
+            "dist/appcast.xml" \
+            "release-notes.md"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -113,6 +151,7 @@ jobs:
           files: |
             dist/TorroMail-*.dmg
             dist/SHA256SUMS.txt
+            dist/appcast.xml
 
       - name: Cleanup keychain
         if: always()

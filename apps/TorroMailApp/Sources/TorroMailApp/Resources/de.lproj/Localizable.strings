@@ -142,6 +142,14 @@
 "Show in menu bar" = "In der Menüleiste anzeigen";
 "Keep in Dock" = "Im Dock behalten";
 "TorroMail serves assistants either way. With both off it only shows up while this window is open — open TorroMail again to bring it back." = "TorroMail bedient Assistenten so oder so. Sind beide aus, ist es nur sichtbar, solange dieses Fenster offen ist — öffne TorroMail einfach erneut, um es zurückzuholen.";
+"Updates" = "Updates";
+"Automatically check for updates" = "Automatisch nach Updates suchen";
+"Check for Updates…" = "Nach Updates suchen …";
+"Check for updates now" = "Jetzt nach Updates suchen";
+"Last checked:" = "Zuletzt geprüft:";
+"Never" = "Noch nie";
+"TorroMail checks for new versions at launch and then every 24 hours. Updates download in the background and install when you restart." = "TorroMail sucht beim Start und danach alle 24 Stunden nach neuen Versionen. Updates werden im Hintergrund geladen und beim nächsten Start installiert.";
+"Updates are available in signed release builds." = "Updates sind in signierten Release-Versionen verfügbar.";
 "MCP Server" = "MCP-Server";
 "Running" = "Läuft";
 "Starting up…" = "Startet gerade …";

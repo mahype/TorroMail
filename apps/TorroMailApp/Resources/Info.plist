@@ -46,5 +46,17 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © Sven Wagener. All rights reserved.</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/mahype/TorroMail/releases/latest/download/appcast.xml</string>
+    <!-- Release builds replace this marker with TorroMail's Ed25519 public
+         key. Local bundles explicitly disable Sparkle until a key is supplied. -->
+    <key>SUPublicEDKey</key>
+    <string>__SPARKLE_PUBLIC_ED_KEY__</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
 </dict>
 </plist>

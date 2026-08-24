@@ -40,6 +40,26 @@ if [[ -z "$app_path" ]]; then
 fi
 echo "Found app bundle: $app_path"
 
+echo "-> verify embedded updater"
+if [[ ! -d "$app_path/Contents/Frameworks/Sparkle.framework" ]]; then
+    echo "error: Sparkle.framework is missing from the release bundle" >&2
+    exit 1
+fi
+feed_url="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$app_path/Contents/Info.plist")"
+public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$app_path/Contents/Info.plist")"
+if [[ "$feed_url" != "https://github.com/mahype/TorroMail/releases/latest/download/appcast.xml" ]]; then
+    echo "error: unexpected Sparkle feed URL: $feed_url" >&2
+    exit 1
+fi
+if [[ -z "$public_key" || "$public_key" == __* ]]; then
+    echo "error: release bundle carries no Sparkle public key" >&2
+    exit 1
+fi
+if ! otool -L "$app_path/Contents/MacOS/TorroMail" | grep -Fq '@rpath/Sparkle.framework/'; then
+    echo "error: TorroMail is not linked to the embedded Sparkle.framework" >&2
+    exit 1
+fi
+
 echo "-> codesign --verify --deep --strict"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 

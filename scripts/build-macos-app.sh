@@ -26,6 +26,20 @@ pkg="apps/TorroMailApp"
 entitlements="$pkg/Resources/TorroMail.entitlements"
 info_plist_src="$pkg/Resources/Info.plist"
 
+if [[ "${REQUIRE_SPARKLE_KEY:-0}" == "1" && -z "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+    echo "error: SPARKLE_ED_PUBLIC_KEY is required for a release build" >&2
+    exit 1
+fi
+if [[ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+    if ! sparkle_key_bytes="$(printf '%s' "$SPARKLE_ED_PUBLIC_KEY" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')"; then
+        sparkle_key_bytes="invalid"
+    fi
+    if [[ "$sparkle_key_bytes" != "32" ]]; then
+        echo "error: SPARKLE_ED_PUBLIC_KEY must be a base64-encoded 32-byte Ed25519 key" >&2
+        exit 1
+    fi
+fi
+
 # --- Version ------------------------------------------------------------------
 
 # No `--always`: on a repo with no tags yet, `git describe --always` returns a
@@ -142,6 +156,22 @@ cp -R "$bin_dir/TorroMailApp_TorroMailApp.bundle" "$app/Contents/Resources/"
 
 cp "$pkg/Icon/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
+# SwiftPM links the executable against @rpath/Sparkle.framework but does not
+# copy binary targets into a hand-assembled .app. Embed the universal framework
+# and give dyld the conventional app-bundle search path.
+sparkle_framework_src="$pkg/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ ! -d "$sparkle_framework_src" ]]; then
+    echo "error: Sparkle.framework not found at $sparkle_framework_src" >&2
+    echo "       run 'swift package --package-path $pkg resolve' first" >&2
+    exit 1
+fi
+echo "==> Embedding Sparkle.framework"
+mkdir -p "$app/Contents/Frameworks"
+cp -R "$sparkle_framework_src" "$app/Contents/Frameworks/"
+if ! otool -l "$app/Contents/MacOS/TorroMail" | grep -Fq '@executable_path/../Frameworks'; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/TorroMail"
+fi
+
 # --- Info.plist with injected version ----------------------------------------
 
 cp "$info_plist_src" "$app/Contents/Info.plist"
@@ -152,6 +182,21 @@ BUNDLE_VERSION="$(printf '%s' "$VERSION" | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?
     -c "Set :CFBundleShortVersionString $VERSION" \
     -c "Set :CFBundleVersion $BUNDLE_VERSION" \
     "$app/Contents/Info.plist"
+
+# Every shipped updater needs its own Ed25519 public key. Local ad-hoc release
+# builds may omit it and remain runnable, but CI refuses to publish such a
+# bundle. Keeping the public key in a secret lets the one-time key ceremony stay
+# outside the repository alongside its private half.
+if [[ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]]; then
+    /usr/libexec/PlistBuddy \
+        -c "Set :SUPublicEDKey $SPARKLE_ED_PUBLIC_KEY" \
+        "$app/Contents/Info.plist"
+else
+    /usr/libexec/PlistBuddy \
+        -c "Add :TorroMailDisableUpdates bool true" \
+        "$app/Contents/Info.plist"
+    echo "==> note: Sparkle disabled (SPARKLE_ED_PUBLIC_KEY is unset)"
+fi
 
 # --- Sign ---------------------------------------------------------------------
 # The MCP server is a second Mach-O in Contents/MacOS; `codesign --deep` does

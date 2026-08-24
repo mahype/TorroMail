@@ -491,6 +491,7 @@ struct TorroMailApp: App {
     @NSApplicationDelegateAdaptor(TorroMailPresence.self) private var presence
     @StateObject private var model = TorroMailModel.stored()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
+    @StateObject private var updaterController = UpdaterController()
     @State private var auditWatcher = AuditWatcher()
     /// The same file watcher, pointed at `connections.jsonl` — the server
     /// appends there on every client handshake, so watching it keeps each
@@ -529,6 +530,7 @@ struct TorroMailApp: App {
                 .environmentObject(model)
                 .environmentObject(mcpSupervisor)
                 .environmentObject(presence)
+                .environmentObject(updaterController)
                 .frame(minWidth: 1080, minHeight: 660)
                 .tint(.torroRed)
                 .task {
@@ -646,6 +648,12 @@ struct TorroMailApp: App {
                 }
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button(L("Check for Updates…")) {
+                    updaterController.checkForUpdates()
+                }
+                .disabled(!updaterController.isAvailable)
+            }
             CommandGroup(replacing: .newItem) {
                 Button(L("New Account")) {
                     model.beginAccountWizard()
@@ -2202,6 +2210,7 @@ private struct ConnectionStatusBadge: View {
 
 private struct SettingsView: View {
     @EnvironmentObject private var model: TorroMailModel
+    @EnvironmentObject private var updaterController: UpdaterController
 
     var body: some View {
         Form {
@@ -2229,6 +2238,40 @@ private struct SettingsView: View {
                 Text(L("MCP Clients"))
             } footer: {
                 Text(L("The assistants connected to TorroMail live in the MCP Clients section."))
+            }
+
+            Section {
+                Toggle(
+                    L("Automatically check for updates"),
+                    isOn: $updaterController.automaticallyChecksForUpdates
+                )
+                .disabled(!updaterController.isAvailable)
+
+                Button(L("Check for updates now")) {
+                    updaterController.checkForUpdates()
+                }
+                .disabled(!updaterController.isAvailable)
+
+                if updaterController.isAvailable {
+                    HStack(spacing: 4) {
+                        Text(L("Last checked:"))
+                        if let date = updaterController.lastUpdateCheckDate {
+                            Text(date, format: .dateTime.day().month().year().hour().minute())
+                        } else {
+                            Text(L("Never"))
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text(L("Updates"))
+            } footer: {
+                if updaterController.isAvailable {
+                    Text(L("TorroMail checks for new versions at launch and then every 24 hours. Updates download in the background and install when you restart."))
+                } else {
+                    Text(L("Updates are available in signed release builds."))
+                }
             }
         }
         .formStyle(.grouped)

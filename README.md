@@ -55,6 +55,7 @@ For a runnable dev bundle, use `scripts/make-app-bundle.sh`.
 
 Pushing a `v*` tag triggers [.github/workflows/release.yml](.github/workflows/release.yml),
 which builds a universal `TorroMail.app`, signs and notarizes it, packages a
-`.dmg`, and publishes it as a GitHub Release asset. See
+`.dmg`, signs a Sparkle appcast, and publishes all artifacts as one GitHub
+Release. Installed copies can check that feed automatically or on demand. See
 [docs/RELEASING.md](docs/RELEASING.md) for versioning rules, the required
 signing secrets, and how to build a release locally.
