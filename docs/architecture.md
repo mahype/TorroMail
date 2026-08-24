@@ -69,6 +69,21 @@ Read-only admin tools:
 - `mail_get_policy`
 - `mail_get_cache_status`
 
+## MCP Client Compatibility
+
+Automatic client setup is limited to assistants that execute local MCP servers
+over stdio and publish a stable, user-owned configuration file or CLI. TorroMail
+merges only its own entry into those configurations and never treats a file edit
+as proof of a connection.
+
+The official Grok Bot desktop app is intentionally not listed as a TorroMail
+client. Grok Bot runs its tools on a persistent cloud computer and accepts
+custom MCP connectors by public HTTP URL; it does not load a local stdio server
+from the desktop app's Application Support directory. Exposing TorroMail through
+a tunnel would cross the local-only mail boundary and require a new authenticated
+Streamable HTTP transport, lifecycle, and consent design. Until that exists, an
+"automatic" Grok Bot card would claim a connection that cannot work.
+
 ## Service Boundary
 
 `torromail-core` owns the policy-checked mail path. `MailProvider` is the
