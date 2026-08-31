@@ -285,6 +285,10 @@
 "Google will warn that TorroMail is not verified — that is expected while it is in testing. Choose “Advanced” and continue." = "Google warnt, TorroMail sei nicht verifiziert — das ist im Testbetrieb normal. Wähle „Erweitert“ und fahre fort.";
 "This build has no %@ client registered, so the OAuth login is unavailable." = "In dieser Version ist kein %@-Client hinterlegt, die OAuth-Anmeldung ist deshalb nicht verfügbar.";
 "%@ needs an app password." = "%@ braucht ein App-Passwort.";
+"Enter the server details instead" = "Stattdessen Serverdaten eingeben";
+/* Steht auf dem Passwort-Schritt, wenn eigentlich OAuth vorgesehen wäre. Beide
+   %@ sind derselbe Anbietername („Microsoft 365“). */
+"The one-click sign-in with %@ is not available in this version yet. Use the password for this mailbox — with %@ that only works if your administrator still allows it." = "Die Ein-Klick-Anmeldung bei %@ ist in dieser Version noch nicht verfügbar. Nimm das Passwort dieses Postfachs — bei %@ funktioniert das nur, wenn deine Administration es noch erlaubt.";
 "The one-click sign-in is not available in this version yet. An app password works just as well and needs two-factor to be on." = "Die Ein-Klick-Anmeldung ist in dieser Version noch nicht verfügbar. Ein App-Passwort funktioniert genauso gut — dafür muss die Zwei-Faktor-Anmeldung aktiv sein.";
 "Your normal password will not work for mail apps. Create an app password and paste it here — it is a password just for TorroMail, and you can revoke it any time." = "Dein normales Passwort funktioniert bei Mail-Programmen nicht. Erstelle ein App-Passwort und füge es hier ein — es gilt nur für TorroMail und du kannst es jederzeit widerrufen.";
 "Create an app password…" = "App-Passwort erstellen …";

@@ -21,6 +21,7 @@ public enum DNSResolver {
     }
 
     private static let typeMX: UInt16 = 15
+    private static let typeTXT: UInt16 = 16
     private static let typeSRV: UInt16 = 33
     private static let classIN: UInt16 = 1
 
@@ -34,6 +35,31 @@ public enum DNSResolver {
             return MXRecord(preference: preference, host: host)
         }
         return records.sorted { $0.preference < $1.preference }
+    }
+
+    /// TXT records for a domain. Only one is interesting here — SPF, which
+    /// names the services allowed to send for the domain and so reveals a
+    /// hyperscaler that the MX record hides behind a filtering gateway.
+    ///
+    /// TXT rdata is not a name but a run of length-prefixed strings, and a
+    /// long SPF record is split across several of them — RFC 1035 §3.3.14
+    /// caps each at 255 bytes. They are concatenated with nothing between,
+    /// which is what the spec says and what every SPF parser does.
+    static func textRecords(for domain: String, timeout: TimeInterval = 2) -> [String] {
+        query(name: domain, type: typeTXT, timeout: timeout).compactMap { data -> String? in
+            var text = ""
+            var index = 0
+            while index < data.count {
+                let length = Int(data[index])
+                let from = index + 1
+                let to = from + length
+                guard to <= data.count else { return nil }
+                guard let chunk = String(bytes: data[from..<to], encoding: .utf8) else { return nil }
+                text += chunk
+                index = to
+            }
+            return text.isEmpty ? nil : text
+        }
     }
 
     /// RFC 6186 service location: `_imaps._tcp.<domain>` names the IMAP server

@@ -31,6 +31,12 @@ struct AccountSetupWizard: View {
     @State private var permissions = PermissionSet()
     @State private var failure: String?
     @State private var showManualDetails = false
+    /// Set when the user leaves the OAuth step for the server fields. The
+    /// escape hatch for a tenant that only filters inbound mail through
+    /// Microsoft while the mailboxes sit somewhere else — the MX says
+    /// Microsoft either way, so detection cannot tell the two apart and the
+    /// user has to be able to.
+    @State private var overrodeOAuth = false
 
     /// The candidate's identity, fixed up front so the keychain entry and the
     /// trial document agree on who is being set up.
@@ -175,27 +181,33 @@ struct AccountSetupWizard: View {
     }
 
     /// The path the flow actually takes, which is not always the one discovery
-    /// named. A Gmail account is meant to use OAuth — but if this build has no
-    /// client registered, OAuth cannot start, and a dead end is worse than an
-    /// app password. So it quietly falls back rather than trapping the user.
-    /// Once a client is hinterlegt, `isConfigured` is true and OAuth returns as
-    /// the primary path with no further change here.
+    /// named. An account at Google or Microsoft is meant to use OAuth — but if
+    /// this build has no client registered, OAuth cannot start, and a dead end
+    /// is worse than a password field. So it falls back rather than trapping
+    /// the user: to an app password where the provider issues them, and to the
+    /// plain server fields otherwise. Once a client is hinterlegt,
+    /// `isConfigured` is true and OAuth returns as the primary path with no
+    /// further change here.
     private var effectiveAuth: AuthPath? {
         guard let config = discovered else { return discovered?.auth }
-        if case .oauth(let issuer) = config.auth, !ProviderCatalog.isConfigured(issuer) {
-            return ProviderCatalog.appPasswordFallback(for: config) ?? config.auth
-        }
-        return config.auth
+        guard case .oauth(let issuer) = config.auth else { return config.auth }
+        if overrodeOAuth { return .password }
+        if ProviderCatalog.isConfigured(issuer) { return config.auth }
+        // Microsoft issues no app passwords for a tenant with modern auth, so
+        // there is nothing to fall back *to* except the server fields — which
+        // discovery has already filled in.
+        return ProviderCatalog.appPasswordFallback(for: config) ?? .password
     }
 
-    /// True when the app-password step is standing in for OAuth — so the step
-    /// can say why it is asking for one, instead of looking like Gmail simply
-    /// never supported OAuth.
+    /// True when this step is standing in for OAuth — so it can say why it is
+    /// asking for a password, instead of looking like the provider simply
+    /// never supported anything better.
     private var isOAuthFallback: Bool {
-        guard case .oauth = discovered?.auth, case .appPassword = effectiveAuth else {
-            return false
+        guard !overrodeOAuth, case .oauth = discovered?.auth else { return false }
+        switch effectiveAuth {
+        case .appPassword, .password: return true
+        case .oauth, .none: return false
         }
-        return true
     }
 
     /// One button. The provider's own page does the rest, which is the whole
@@ -236,6 +248,17 @@ struct AccountSetupWizard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+
+            // Detection reads the domain's DNS, and a company can point its
+            // MX at Microsoft purely for spam filtering while the mailboxes
+            // stay on its own server. No lookup can tell that apart — only
+            // the person setting the account up can, so the way out is here
+            // rather than in a support thread.
+            Button(L("Enter the server details instead")) {
+                overrodeOAuth = true
+                showManualDetails = true
+            }
+            .torroButton()
             Spacer()
         }
     }
@@ -284,6 +307,23 @@ struct AccountSetupWizard: View {
                     systemImage: "questionmark.circle"
                 )
                 .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Why a password for a provider whose whole point is that it does
+            // not want one: this build carries no client yet. Said plainly, so
+            // the step reads as a stopgap rather than as the intended way in.
+            if isOAuthFallback {
+                Label(
+                    String(
+                        format: L("The one-click sign-in with %@ is not available in this version yet. Use the password for this mailbox — with %@ that only works if your administrator still allows it."),
+                        discovered?.providerLabel ?? "",
+                        discovered?.providerLabel ?? ""
+                    ),
+                    systemImage: "info.circle"
+                )
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }

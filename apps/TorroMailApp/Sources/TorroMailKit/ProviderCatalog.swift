@@ -309,7 +309,7 @@ public enum ProviderCatalog {
     /// MX hostname → the provider hosting it. This is what makes a company
     /// domain work: `firma.de` with MX at Google is a Workspace mailbox and
     /// must be offered OAuth, never a password field.
-    static func fromMXHost(_ mxHost: String) -> DiscoveredConfig? {
+    public static func fromMXHost(_ mxHost: String) -> DiscoveredConfig? {
         let host = mxHost.lowercased()
         if host.hasSuffix("google.com") || host.hasSuffix("googlemail.com") {
             var config = gmail
@@ -322,6 +322,33 @@ public enum ProviderCatalog {
             var config = microsoft
             config.providerLabel = "Microsoft 365"
             config.source = "mx"
+            return config
+        }
+        return nil
+    }
+
+    /// SPF → the provider hosting the domain. The record names who may send
+    /// for it, which is a weaker claim than the MX — but it is the only one
+    /// left when inbound mail runs through a filtering gateway and the MX
+    /// points at Proofpoint or Hornetsecurity rather than at the mailbox.
+    ///
+    /// Only the two hyperscalers are read out of it. Anything else on the
+    /// line is somebody's newsletter sender, which says nothing about where
+    /// the mailbox is.
+    public static func fromSPF(_ record: String) -> DiscoveredConfig? {
+        let line = record.lowercased()
+        guard line.hasPrefix("v=spf1") else { return nil }
+
+        if line.contains("include:spf.protection.outlook.com") {
+            var config = microsoft
+            config.providerLabel = "Microsoft 365"
+            config.source = "spf"
+            return config
+        }
+        if line.contains("include:_spf.google.com") {
+            var config = gmail
+            config.providerLabel = "Google Workspace"
+            config.source = "spf"
             return config
         }
         return nil

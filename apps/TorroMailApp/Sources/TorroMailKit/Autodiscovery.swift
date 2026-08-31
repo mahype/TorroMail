@@ -45,39 +45,61 @@ public enum Autodiscovery {
             return known
         }
 
-        // 2/3. The domain's own autoconfig. A provider publishing this knows
-        // its servers better than any guess of ours.
-        for url in autoconfigURLs(domain: domain, email: email) {
-            if let config = await fetchAutoconfig(url: url, source: "autoconfig") {
-                return config
-            }
-        }
-
-        // 4. Mozilla's ISPDB — a shared table for the long tail of ISPs.
-        let ispdb = URL(string: "https://autoconfig.thunderbird.net/v1.1/\(domain)")!
-        if let config = await fetchAutoconfig(url: ispdb, source: "ispdb") {
-            return config
-        }
-
-        // 5. MX. This is the one that matters for company domains: the address
-        // says firma.de, the mail actually sits at Google or Microsoft, and
-        // only OAuth will ever get in. Guessing imap.firma.de here would hand
-        // the user a password field that cannot work.
+        // 2. Where the mail actually goes. This runs before any published
+        // configuration because the two disagree far more often than they
+        // should: a shared hoster (Plesk, cPanel) serves a generated
+        // autoconfig for every domain on the box, advertising the webspace's
+        // own IMAP with a password — and keeps serving it long after the
+        // mailboxes moved to Microsoft 365 or Google Workspace. That file
+        // looks authoritative and is stale. The MX record is the domain
+        // owner's own statement of where the mail lives, and when it names a
+        // hyperscaler, only a token will ever get in. Letting the stale XML
+        // win means handing the user a password field that cannot work.
         let exchangers = DNSResolver.mailExchangers(for: domain)
         for exchanger in exchangers {
             if let config = ProviderCatalog.fromMXHost(exchanger.host) {
                 return config
             }
         }
-        // A third-party MX often shares the mail host's domain — try its
-        // autoconfig before falling back to guesswork.
+
+        // 3/4. The domain's own autoconfig. No hyperscaler claimed the domain
+        // above, so a provider publishing this knows its servers better than
+        // any guess of ours.
+        for url in autoconfigURLs(domain: domain, email: email) {
+            if let config = await fetchAutoconfig(url: url, source: "autoconfig") {
+                return config
+            }
+        }
+
+        // 5. Mozilla's ISPDB — a shared table for the long tail of ISPs.
+        let ispdb = URL(string: "https://autoconfig.thunderbird.net/v1.1/\(domain)")!
+        if let config = await fetchAutoconfig(url: ispdb, source: "ispdb") {
+            return config
+        }
+
+        // 6. The SPF record, for the tenants the MX cannot see: mail filtered
+        // through a gateway (Proofpoint, Hornetsecurity, Mimecast) carries the
+        // gateway in its MX, while the domain still authorizes the hyperscaler
+        // behind it. Deliberately down here and not next to the MX check: SPF
+        // says who may *send* for the domain, which is a weaker claim than
+        // where the mail arrives — a domain relaying its newsletters through
+        // Google is not a Workspace mailbox. So it only ever rescues a domain
+        // that published nothing of its own.
+        for record in DNSResolver.textRecords(for: domain) {
+            if let config = ProviderCatalog.fromSPF(record) {
+                return config
+            }
+        }
+
+        // 7. A third-party MX often shares the mail host's domain — try the
+        // table on that before falling back to guesswork.
         if let base = exchangers.first.map({ baseDomain(of: $0.host) }),
            base != domain,
            let known = ProviderCatalog.lookup(domain: base) {
             return known
         }
 
-        // 6. RFC 6186: the domain naming its own IMAP server.
+        // 8. RFC 6186: the domain naming its own IMAP server.
         if let srv = DNSResolver.imapService(for: domain), !srv.target.isEmpty {
             return DiscoveredConfig(
                 imapHost: srv.target,
@@ -89,7 +111,7 @@ public enum Autodiscovery {
             )
         }
 
-        // 7. The guess, but only if something actually answers on 993. An
+        // 9. The guess, but only if something actually answers on 993. An
         // unreachable host in the field is worse than an empty one.
         for candidate in ["imap.\(domain)", "mail.\(domain)"] where await probe(host: candidate) {
             return DiscoveredConfig(
@@ -201,8 +223,8 @@ final class NWConnectionProbe: @unchecked Sendable {
 
 /// Reads Mozilla's client-config XML — the format both a domain's own
 /// autoconfig and the ISPDB speak.
-enum AutoconfigParser {
-    static func parse(_ data: Data, source: String) -> DiscoveredConfig? {
+public enum AutoconfigParser {
+    public static func parse(_ data: Data, source: String) -> DiscoveredConfig? {
         let delegate = Delegate()
         let parser = XMLParser(data: data)
         parser.delegate = delegate

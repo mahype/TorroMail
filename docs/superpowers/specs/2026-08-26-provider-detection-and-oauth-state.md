@@ -1,6 +1,7 @@
 # Provider Detection and the State of Google/Microsoft Sign-In
 
-Status: current. Written 2026-08-26. Context: issue #1
+Status: current. Written 2026-08-26; fixes 1 and 3 implemented the same day,
+fix 2 outstanding. Context: issue #1
 ("Microsoft 365 wird nicht automatisch erkannt", frank@staude.net).
 
 ## The problem
@@ -79,46 +80,53 @@ token path exists and is tested:
 Missing is the front of the funnel: recognising the provider, and having a
 client id to sign in with.
 
-## Fix 1: MX and the provider probes decide before a generic autoconfig
+## Fix 1: MX decides before a generic autoconfig — done
 
-Reorder and widen the chain so a hyperscaler-hosted domain is recognised
-before anyone's default XML gets a vote.
-
-New order:
+The chain now reads:
 
 1. `ProviderCatalog.lookup(domain:)` — unchanged, no network.
-2. **Hyperscaler detection** (new position, widened):
-   - MX → `fromMXHost` (already implemented, just moved up).
-   - **SPF**: `TXT <domain>` containing `include:spf.protection.outlook.com`
-     → Microsoft 365; `include:_spf.google.com` → Google Workspace. Catches
-     tenants whose MX points at a filtering gateway (Proofpoint, Hornetsecurity,
-     Mimecast, Securepoint) — a case MX alone silently misses.
-   - **Microsoft Autodiscover v2** as the decisive confirmation:
-     `https://autodiscover-s.outlook.com/autodiscover/autodiscover.json/v1.0/
-     <email>?Protocol=ActiveSync&RedirectCount=3`. Verified against the issue's
-     address: it answers
-     `{"Protocol":"ActiveSync","Url":"https://outlook.office365.com/..."}`
-     for a tenant mailbox and an error body otherwise. Note `Protocol=IMAP` is
-     *not* supported by that endpoint — ActiveSync is the probe that works.
-     This one sends the full address to Microsoft, so it runs only after MX or
-     SPF already pointed at Microsoft, never as a blind first step.
-3. The domain's own autoconfig, then ISPDB — as today, but now only for
+2. **MX → `fromMXHost`**, moved up from step 5. Already implemented; it was
+   only ever unreachable. Where the mail arrives is the domain owner's own
+   statement, and a stale hoster XML does not get to overrule it.
+3./4. The domain's own autoconfig, then ISPDB — as before, but now only for
    domains no hyperscaler claimed.
-4. SRV, then the 993 probe — unchanged.
+5. **SPF** (new): a `TXT` record containing `include:spf.protection.outlook.com`
+   → Microsoft 365, `include:_spf.google.com` → Google Workspace. This catches
+   tenants whose MX points at a filtering gateway (Proofpoint, Hornetsecurity,
+   Mimecast), which the MX check silently misses.
+6. SRV, then the 993 probe — unchanged.
 
-Guard rails:
+The one non-obvious placement is SPF, and it is deliberate: it sits *below*
+the autoconfig rather than next to the MX check. SPF says who may **send** for
+a domain, which is a weaker claim than where mail arrives — a company relaying
+its newsletters through Google is not a Workspace mailbox. So SPF only ever
+rescues a domain that published nothing of its own, while the MX, which is a
+statement about the mailbox itself, outranks everything.
 
-- A domain whose MX is at Microsoft only for inbound filtering (Exchange
-  Online Protection in front of a self-hosted server) will now be offered
-  OAuth wrongly. That is why fix 3 (an escape hatch on the OAuth step) is part
-  of this and not optional.
-- All of step 2 stays inside the existing 8 s budget; MX and TXT come from the
-  system resolver's cache, the HTTPS probe gets the same 3 s timeout as
-  autoconfig.
+Verified live against the reported address after the change:
 
-`DNSResolver` needs a TXT query (type 16) alongside the existing MX (15) and
-SRV (33) — same `query` helper, the rdata is length-prefixed character strings
-rather than a name.
+    frank@staude.net → Microsoft 365 | imap outlook.office365.com:993
+                     | auth oauth(microsoft) | source mx
+
+`DNSResolver` gained a TXT query (type 16) alongside MX (15) and SRV (33) —
+same `query` helper, but the rdata is a run of length-prefixed strings that has
+to be concatenated, because a long SPF record is split at 255 bytes
+(RFC 1035 §3.3.14).
+
+Guard rail: a domain whose MX is at Microsoft only for inbound filtering
+(Exchange Online Protection in front of a self-hosted server) is now offered
+OAuth wrongly. No lookup can tell that case apart — which is why fix 3 is part
+of this and not optional.
+
+**Not implemented, and deliberately so: Microsoft's Autodiscover v2.**
+`https://autodiscover-s.outlook.com/autodiscover/autodiscover.json/v1.0/<email>?Protocol=ActiveSync&RedirectCount=3`
+answers `{"Protocol":"ActiveSync","Url":"https://outlook.office365.com/..."}`
+for a tenant mailbox — verified against the issue's address — and an error
+body otherwise. `Protocol=IMAP` is *not* supported there; ActiveSync is the
+probe that works. It would confirm a tenant that neither MX nor SPF reveals,
+but it sends the full address to Microsoft before the user has chosen a
+provider. Worth adding only behind an MX/SPF hint, and only if a real case
+turns up that the two records miss.
 
 ## Fix 2: register the two OAuth clients
 
@@ -154,31 +162,37 @@ but an unregistered scheme is an unclaimed one, and any other app may take it.
 Client ids are not secrets — PKCE is what protects the exchange — so they may
 live in the repository the way every open-source mail client ships them.
 
-## Fix 3: the wizard must never dead-end
+## Fix 3: the wizard must never dead-end — done
 
-- Extend `appPasswordFallback` (or the wizard's `effectiveAuth`) so an
-  unconfigured *Microsoft* issuer falls back to the password/manual step with
-  the discovered `outlook.office365.com` / `smtp.office365.com` settings
-  pre-filled, instead of a disabled Sign In button.
-- Show the `manualDetails` disclosure on the OAuth step too, as "set the
-  server up by hand instead" — the escape hatch for a wrongly detected tenant
-  (see the EOP case above) and for an unconfigured build.
-- All new user-facing strings need German counterparts in
-  `Resources/de.lproj/Localizable.strings`.
+- `effectiveAuth` now falls back for *any* unconfigured issuer: to an app
+  password where the provider issues them (Google), and to the plain server
+  fields otherwise. Microsoft issues none for a tenant with modern auth, so
+  there was nothing to fall back to and the step simply had no way forward.
+  The discovered `outlook.office365.com` / `smtp.office365.com` settings are
+  already seeded into those fields.
+- The OAuth step carries an "Enter the server details instead" button that
+  sets `overrodeOAuth` and switches to the manual path. This is the escape
+  hatch for the EOP case above: detection reads DNS, and only the person
+  setting the account up knows whether the tenant is real.
+- `isOAuthFallback` now also covers the password step, which says why it is
+  asking — with the caveat that a Microsoft password only works while the
+  tenant still allows basic auth.
+- German strings added in `Resources/de.lproj/Localizable.strings`.
 
 ## Tests
 
-There are none for `Autodiscovery` or `ProviderCatalog` today — the contract
-target does not mention them. This work adds:
+There were none for `Autodiscovery` or `ProviderCatalog` — the contract target
+did not mention them. `TorroMailKitContract` now covers:
 
 - `fromMXHost` against `staude-net.mail.protection.outlook.com`,
-  `aspmx.l.google.com`, `smtp.google.com` and a hoster's own MX.
-- SPF classification from a TXT record set including the exact record the
-  issue's domain publishes (`v=spf1 include:spf.protection.outlook.com -all`).
-- `AutoconfigParser` against the Plesk XML above: it must parse, and must
-  *lose* to a Microsoft MX.
-- A wizard-level check that no discovered configuration can produce a step
-  with neither a usable sign-in nor an editable server field.
+  `aspmx.l.google.com`, `smtp.google.com`, and a hoster's own MX (which must
+  claim nothing).
+- `fromSPF` against the exact record the issue's domain publishes
+  (`v=spf1 include:spf.protection.outlook.com -all`), its Google counterpart,
+  a third party's include, and a non-SPF TXT record.
+- `AutoconfigParser` against the Plesk XML above: it must parse *and* lose to
+  a Microsoft MX.
 
-The network-dependent steps stay out of CI; the classification functions they
-feed are what gets tested.
+`fromMXHost` and `fromSPF` had to become `public` for the contract target to
+see them. The network-dependent steps stay out of CI; the classification
+functions they feed are what gets tested.

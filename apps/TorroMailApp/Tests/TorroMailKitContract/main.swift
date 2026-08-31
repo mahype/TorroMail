@@ -1362,4 +1362,68 @@ require(
     "the published cache block carries the level and nothing legacy"
 )
 
+// Provider detection. The address says firma.de; only DNS says whether the
+// mail is really at Google or Microsoft, and getting that wrong hands the user
+// a password field no tenant will accept (issue #1).
+require(
+    ProviderCatalog.fromMXHost("staude-net.mail.protection.outlook.com")?.provider == .microsoft,
+    "a Microsoft 365 MX is recognised as Microsoft"
+)
+require(
+    ProviderCatalog.fromMXHost("aspmx.l.google.com")?.provider == .gmail
+        && ProviderCatalog.fromMXHost("smtp.google.com")?.provider == .gmail,
+    "both of Google's MX shapes are recognised"
+)
+require(
+    ProviderCatalog.fromMXHost("mx01.kundenserver.de") == nil,
+    "a hoster's own MX claims nothing"
+)
+require(
+    ProviderCatalog.fromSPF("v=spf1 include:spf.protection.outlook.com -all")?.provider == .microsoft,
+    "SPF finds a tenant whose MX hides behind a filtering gateway"
+)
+require(
+    ProviderCatalog.fromSPF("v=spf1 include:_spf.google.com ~all")?.provider == .gmail,
+    "SPF finds a Workspace domain the same way"
+)
+require(
+    ProviderCatalog.fromSPF("v=spf1 include:_spf.mailingservice.de -all") == nil
+        && ProviderCatalog.fromSPF("google-site-verification=abc") == nil,
+    "only SPF records, and only the two hyperscalers, are read out of TXT"
+)
+
+// The Plesk default: every domain on a shared hoster gets this file, and it
+// keeps advertising the webspace's IMAP long after the mailboxes moved. It has
+// to parse — and it has to lose to the MX record, which is why the chain asks
+// DNS first.
+let pleskAutoconfig = Data(#"""
+<clientConfig version="1.1">
+  <emailProvider id="staude.net">
+    <domain>staude.net</domain>
+    <displayName>staude.net</displayName>
+    <incomingServer type="imap">
+      <hostname>staude.net</hostname>
+      <port>993</port>
+      <socketType>SSL</socketType>
+      <authentication>password-cleartext</authentication>
+    </incomingServer>
+    <outgoingServer type="smtp">
+      <hostname>staude.net</hostname>
+      <port>465</port>
+      <socketType>SSL</socketType>
+      <authentication>password-cleartext</authentication>
+    </outgoingServer>
+  </emailProvider>
+</clientConfig>
+"""#.utf8)
+let parsedPlesk = AutoconfigParser.parse(pleskAutoconfig, source: "autoconfig")
+require(
+    parsedPlesk?.imapHost == "staude.net" && parsedPlesk?.auth == .password,
+    "the hoster's generated autoconfig still parses"
+)
+require(
+    ProviderCatalog.fromMXHost("staude-net.mail.protection.outlook.com")?.auth == .oauth(.microsoft),
+    "and the MX record outranks it with a token path"
+)
+
 print("TorroMailKit control-surface contract passed")
