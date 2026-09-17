@@ -104,6 +104,63 @@ pub(crate) struct DocumentClient {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) token_sha256: String,
+    pub(crate) account_access: ClientAccountAccess,
+}
+
+/// Omission in legacy documents preserves access; new documents state the
+/// choice explicitly. An empty selection grants no accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientAccountAccess {
+    All,
+    Selected(Vec<String>),
+}
+
+impl ParsedDocument {
+    /// Apply the token's account grants before any metadata, cache, credential
+    /// or connection lookup. An unmatched key never receives accounts.
+    pub(crate) fn restrict_accounts(&mut self, presented_hash: Option<&str>) {
+        let Some(clients) = &self.clients else { return };
+        let client = clients
+            .iter()
+            .find(|client| Some(client.token_sha256.as_str()) == presented_hash);
+        self.accounts.retain(
+            |account| match client.map(|client| &client.account_access) {
+                Some(ClientAccountAccess::All) => true,
+                Some(ClientAccountAccess::Selected(ids)) => ids
+                    .iter()
+                    .any(|id| id == account.policy.account_id().as_str()),
+                None => false,
+            },
+        );
+    }
+}
+
+fn parse_account_access(client: &Value) -> Result<ClientAccountAccess, String> {
+    let Some(access) = client.get("account_access") else {
+        return Ok(ClientAccountAccess::All);
+    };
+    match access["mode"].as_str() {
+        Some("all") if access.get("account_ids").is_none() => Ok(ClientAccountAccess::All),
+        Some("selected") => {
+            let ids = access["account_ids"]
+                .as_array()
+                .ok_or("policy document invalid: selected account_access requires account_ids")?;
+            let ids = ids
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            "policy document invalid: account_ids must contain nonempty strings"
+                                .to_owned()
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ClientAccountAccess::Selected(ids))
+        }
+        _ => Err("policy document invalid: account_access must specify all or selected".to_owned()),
+    }
 }
 
 pub(crate) fn parse_policy_document(text: &str) -> Result<ParsedDocument, String> {
@@ -148,6 +205,7 @@ fn parse_clients(document: &Value) -> Result<Option<Vec<DocumentClient>>, String
                 // no name still guards its key.
                 name: client["name"].as_str().unwrap_or(id).to_owned(),
                 token_sha256: token_sha256.to_ascii_lowercase(),
+                account_access: parse_account_access(client)?,
             })
         })
         .collect::<Result<_, _>>()

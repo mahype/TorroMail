@@ -1426,4 +1426,50 @@ require(
     "and the MX record outranks it with a token path"
 )
 
+
+// Shared accounts persist independently of client keys. Migration runs only
+// once; a newly paired client cannot acquire all accounts implicitly.
+do {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("torromail-account-access-\(UUID().uuidString)")
+    let url = directory.appendingPathComponent("grants.json")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let migrated = try ClientAccountAccessStore.load(from: url, legacyClientIDs: ["existing"])
+    require(migrated["existing"] == .all, "existing clients preserve account access on migration")
+    var grants = try ClientAccountAccessStore.load(from: url, legacyClientIDs: ["existing", "new"])
+    require(grants["new"] == nil, "migration never implicitly grants later clients all accounts")
+    grants["existing"] = .selected(["work", "shared"])
+    grants["other"] = .selected(["personal", "shared"])
+    grants["empty"] = .selected([])
+    try ClientAccountAccessStore.save(grants, to: url)
+    let restored = try ClientAccountAccessStore.load(from: url)
+    require(restored == grants, "overlapping and empty selections survive reloading")
+
+    let pairings = ["existing", "other", "empty", "new", MCPClientKeyStore.appClientID].map {
+        MCPClientKeyStore.Pairing(clientID: $0, name: $0, tokenSHA256: "rotated-key-hash")
+    }
+    let applied = ClientAccountAccessStore.applying(restored, to: pairings)
+    require(applied[0].accountAccess == .selected(["work", "shared"]), "key renewal preserves selected accounts")
+    require(applied[1].accountAccess == .selected(["personal", "shared"]), "accounts may be shared with multiple clients")
+    require(applied[2].accountAccess == .selected([]) && applied[3].accountAccess == .selected([]), "empty selections and new clients grant nothing")
+    require(applied[4].accountAccess == .all, "the app can still check and manage every account")
+    let data = try PolicyDocument.data(for: model.accounts, clients: applied)
+    let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    let clients = object["clients"] as! [[String: Any]]
+    let selection = clients[0]["account_access"] as! [String: Any]
+    require(selection["mode"] as? String == "selected" && selection["account_ids"] as? [String] == ["shared", "work"], "the policy publishes the exact selected IDs in stable order")
+    let all = clients[4]["account_access"] as! [String: Any]
+    require(all["mode"] as? String == "all" && all["account_ids"] == nil, "all accounts is an explicit mode, not a snapshot")
+
+    let invalid = Data(#"{"existing":{"mode":"selected"}}"#.utf8)
+    try invalid.write(to: url)
+    do {
+        _ = try ClientAccountAccessStore.load(from: url, legacyClientIDs: ["existing"])
+        require(false, "malformed access must fail instead of migrating to all accounts")
+    } catch { }
+    let unchanged = try Data(contentsOf: url)
+    require(unchanged == invalid, "malformed grants are not silently overwritten")
+} catch {
+    require(false, "account access persistence: \(error)")
+}
+
 print("TorroMailKit control-surface contract passed")

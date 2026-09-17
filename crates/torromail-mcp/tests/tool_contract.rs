@@ -2618,3 +2618,321 @@ fn a_summary_row_never_serves_a_message_read() {
     assert!(cached.contains(r#"\"from_cache\":true"#), "got: {cached}");
     assert!(cached.contains("maerz.pdf"), "got: {cached}");
 }
+
+// --- Per-client shared accounts ------------------------------------------
+
+fn shared_accounts_document(path: &std::path::Path, access: serde_json::Value) {
+    let document = serde_json::json!({
+        "version": 1,
+        "accounts": (["work", "personal", "shared"].map(|id| serde_json::json!({
+            "id": id, "name": id, "email": format!("{id}@example.com"),
+            "read": "with_attachments", "write": {"drafts": true, "move": true, "trash": true},
+            "send": true, "per_folder": false, "folder_rules": {}, "cache": {"level": "attachments"}
+        }))),
+        "clients": [
+            {"id": "first", "token_sha256": TEST_KEY_SHA256, "account_access": access},
+            {"id": "second", "token_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+             "account_access": {"mode": "selected", "account_ids": ["personal", "shared"]}},
+            {"id": "all", "token_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+             "account_access": {"mode": "all"}}
+        ]
+    });
+    std::fs::write(path, document.to_string()).unwrap();
+}
+
+fn shared_call(
+    server: &LineMcpServer,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let response = server.handle_line(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}
+    }).to_string()).unwrap();
+    serde_json::from_str(&response).unwrap()
+}
+
+fn shared_payload(response: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("successful tool result"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn clients_see_overlapping_account_selections_and_all_includes_new_accounts() {
+    let path = isolated_policy_path("account-sharing-overlap");
+    shared_accounts_document(
+        &path,
+        serde_json::json!({"mode": "selected", "account_ids": ["work", "shared"]}),
+    );
+    let first = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some(TEST_KEY));
+    let second = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+        .with_presented_token(Some("abc"));
+    let all =
+        LineMcpServer::with_policy_path_and_fixtures(path.clone()).with_presented_token(Some(""));
+    for (server, expected) in [
+        (&first, vec!["work", "shared"]),
+        (&second, vec!["personal", "shared"]),
+        (&all, vec!["work", "personal", "shared"]),
+    ] {
+        for tool in ["mail_list_accounts", "mail_get_cache_status"] {
+            let response = shared_payload(&shared_call(server, tool, serde_json::json!({})));
+            let ids: Vec<_> = response["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["account_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, expected);
+        }
+    }
+    let mut document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut added = document["accounts"][0].clone();
+    added["id"] = serde_json::json!("new-account");
+    document["accounts"].as_array_mut().unwrap().push(added);
+    std::fs::write(&path, document.to_string()).unwrap();
+    assert_eq!(
+        shared_payload(&shared_call(
+            &all,
+            "mail_list_accounts",
+            serde_json::json!({})
+        ))["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        shared_payload(&shared_call(
+            &first,
+            "mail_list_accounts",
+            serde_json::json!({})
+        ))["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    remove_isolated_dir(&path);
+}
+
+#[test]
+fn unshared_accounts_are_unknown_to_every_account_tool_before_connecting() {
+    let path = isolated_policy_path("account-sharing-unknown");
+    shared_accounts_document(
+        &path,
+        serde_json::json!({"mode": "selected", "account_ids": ["personal"]}),
+    );
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_| {
+        panic!("must not connect to an unshared account")
+    })
+    .with_presented_token(Some(TEST_KEY));
+    for tool in [
+        "mail_search",
+        "mail_get_message",
+        "mail_get_attachment",
+        "mail_get_thread",
+        "mail_list_mailboxes",
+        "mail_mark",
+        "mail_create_draft",
+        "mail_prepare_move",
+        "mail_prepare_delete",
+        "mail_get_policy",
+        "mail_get_cache_status",
+    ] {
+        let response = shared_call(
+            &server,
+            tool,
+            serde_json::json!({
+                "account_id": "work", "message_id": "INBOX/7", "message_ids": ["INBOX/7"],
+                "thread_id": "t1", "attachment_id": "2", "target_mailbox": "Archive",
+                "to": ["recipient@example.com"], "subject": "Draft", "body": "Text"
+            }),
+        );
+        assert_eq!(response["error"]["code"], -32000, "{tool}: {response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("account not found"),
+            "{tool}: {response}"
+        );
+    }
+    assert!(health_records(path.parent().unwrap(), "work").is_empty());
+    remove_isolated_dir(&path);
+}
+
+#[test]
+fn withdrawing_sharing_blocks_cached_reads_pooled_connections_refinement_and_confirm() {
+    let path = isolated_policy_path("account-sharing-revoke");
+    shared_accounts_document(
+        &path,
+        serde_json::json!({"mode": "selected", "account_ids": ["work"]}),
+    );
+    let connections = Rc::new(Cell::new(0));
+    let count = connections.clone();
+    let server = LineMcpServer::with_connect_override(path.clone(), true, move |_| {
+        count.set(count.get() + 1);
+        Ok(Box::new(imap_shaped_mailbox().with_attachment(
+            "INBOX/7",
+            "2",
+            "maerz.pdf",
+            "application/pdf",
+            b"%PDF-1.4".to_vec(),
+        )) as Box<dyn MailProvider>)
+    })
+    .with_presented_token(Some(TEST_KEY));
+    let get =
+        serde_json::json!({"account_id": "work", "message_id": "INBOX/7", "include_body": true});
+    assert!(
+        shared_call(&server, "mail_get_message", get.clone())
+            .get("error")
+            .is_none()
+    );
+    assert_eq!(
+        shared_payload(&shared_call(&server, "mail_get_message", get.clone()))["from_cache"],
+        true
+    );
+    let search = shared_payload(&shared_call(
+        &server,
+        "mail_search",
+        serde_json::json!({"account_id": "work", "query": ""}),
+    ));
+    let prepared = shared_payload(&shared_call(
+        &server,
+        "mail_prepare_move",
+        serde_json::json!({"account_id": "work", "message_ids": ["INBOX/7"], "target_mailbox": "Archive"}),
+    ));
+    let attachment = serde_json::json!({"account_id": "work", "message_id": "INBOX/7", "attachment_id": "2", "include_content": true});
+    assert!(
+        shared_call(&server, "mail_get_attachment", attachment.clone())
+            .get("error")
+            .is_none()
+    );
+    assert_eq!(
+        shared_payload(&shared_call(
+            &server,
+            "mail_get_attachment",
+            attachment.clone()
+        ))["from_cache"],
+        true
+    );
+    let draft = shared_payload(&shared_call(
+        &server,
+        "mail_create_draft",
+        serde_json::json!({"account_id": "work", "to": ["recipient@example.com"], "subject": "Draft", "body": "Text"}),
+    ));
+    let send_args = serde_json::json!({"account_id": "work", "draft_id": draft["draft_id"]});
+    let send = shared_payload(&shared_call(
+        &server,
+        "mail_prepare_send",
+        send_args.clone(),
+    ));
+    let delete = shared_payload(&shared_call(
+        &server,
+        "mail_prepare_delete",
+        serde_json::json!({"account_id": "work", "message_ids": ["INBOX/7"]}),
+    ));
+    shared_accounts_document(
+        &path,
+        serde_json::json!({"mode": "selected", "account_ids": []}),
+    );
+    for (tool, args) in [
+        ("mail_get_message", get),
+        ("mail_get_attachment", attachment),
+        ("mail_prepare_send", send_args),
+        (
+            "mail_confirm_action",
+            serde_json::json!({"pending_action_id": send["pending_action_id"], "confirmation_code": send["confirmation_code"]}),
+        ),
+        (
+            "mail_confirm_action",
+            serde_json::json!({"pending_action_id": delete["pending_action_id"], "confirmation_code": delete["confirmation_code"]}),
+        ),
+        (
+            "mail_list_mailboxes",
+            serde_json::json!({"account_id": "work"}),
+        ),
+        (
+            "mail_search",
+            serde_json::json!({"account_id": "work", "query": ""}),
+        ),
+        (
+            "mail_refine_search",
+            serde_json::json!({"result_set_id": search["result_set_id"], "refinement": ""}),
+        ),
+        (
+            "mail_confirm_action",
+            serde_json::json!({"pending_action_id": prepared["pending_action_id"], "confirmation_code": prepared["confirmation_code"]}),
+        ),
+    ] {
+        let response = shared_call(&server, tool, args);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("account not found"),
+            "{tool}: {response}"
+        );
+        assert!(!response.to_string().contains("Rechnung"));
+    }
+    assert_eq!(connections.get(), 1);
+    assert_eq!(
+        shared_payload(&shared_call(
+            &server,
+            "mail_list_accounts",
+            serde_json::json!({})
+        ))["accounts"],
+        serde_json::json!([])
+    );
+    remove_isolated_dir(&path);
+}
+
+#[test]
+fn malformed_account_grants_fail_closed() {
+    let path = isolated_policy_path("account-sharing-invalid");
+    for access in [
+        serde_json::json!(null),
+        serde_json::json!("all"),
+        serde_json::json!({"mode": "everything"}),
+        serde_json::json!({"mode": "selected"}),
+        serde_json::json!({"mode": "selected", "account_ids": [1]}),
+        serde_json::json!({"mode": "all", "account_ids": []}),
+    ] {
+        shared_accounts_document(&path, access);
+        let server = LineMcpServer::with_policy_path_and_fixtures(path.clone())
+            .with_presented_token(Some(TEST_KEY));
+        let response = shared_call(&server, "mail_list_accounts", serde_json::json!({}));
+        assert_eq!(response["error"]["code"], -32000, "{response}");
+    }
+    remove_isolated_dir(&path);
+}
+
+#[test]
+fn account_checks_rebuilds_and_startup_sweeps_respect_shared_accounts() {
+    let path = isolated_policy_path("account-sharing-cli");
+    shared_accounts_document(
+        &path,
+        serde_json::json!({"mode": "selected", "account_ids": []}),
+    );
+    // A real config would reach the keychain if the grant check were missing.
+    let mut document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    document["accounts"][0]["imap"] = serde_json::json!({"host": "imap.example.com", "port": 993, "username": "work", "secret_ref": "keychain://TorroMail/torromail-absent-test-account"});
+    std::fs::write(&path, document.to_string()).unwrap();
+    let (_, error) = torromail_mcp::check_account("work", Some(path.clone()), Some(TEST_KEY));
+    assert!(error.contains("account not found"), "{error}");
+    let error =
+        torromail_mcp::rebuild_cache("work", Some(path.clone()), Some(TEST_KEY), &mut |_| {
+            panic!("no rebuild progress")
+        })
+        .unwrap_err();
+    assert!(error.contains("account not found"), "{error}");
+    torromail_mcp::sweep_account_health(Some(path.clone()), Some(TEST_KEY));
+    assert!(health_records(path.parent().unwrap(), "work").is_empty());
+    remove_isolated_dir(&path);
+}

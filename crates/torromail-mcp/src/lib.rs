@@ -1165,15 +1165,24 @@ impl LineMcpServer {
     }
 
     /// Narrow a prior search by its id. The stored hits already passed the
-    /// policy when the search ran, and refining only removes hits, so this
-    /// needs neither a connection nor a fresh authorization.
+    /// policy when the search ran; account access is checked again because
+    /// a grant may have been withdrawn since then. No connection is needed.
     fn handle_mail_refine_search(&self, arguments: &Value, id: &Value) -> String {
         let result_set_id = arguments["result_set_id"].as_str().unwrap_or_default();
         let refinement = arguments["refinement"].as_str().unwrap_or_default();
 
         let mut sessions = self.sessions.borrow_mut();
         match sessions.refine(result_set_id, refinement, 100) {
-            Ok(result_set) => json_rpc_text_result(id, &result_set_payload(&result_set, "live")),
+            Ok(result_set) => {
+                let (engine, _) = match self.runtime_for(result_set.account_id()) {
+                    Ok(runtime) => runtime,
+                    Err(message) => return json_rpc_error(id, -32000, &message),
+                };
+                if let Err(error) = engine.authorize(result_set.account_id(), Capability::Search) {
+                    return json_rpc_error(id, -32000, &error.to_string());
+                }
+                json_rpc_text_result(id, &result_set_payload(&result_set, "live"))
+            }
             Err(error) => json_rpc_error(id, -32000, &error.to_string()),
         }
     }
@@ -1195,7 +1204,10 @@ impl LineMcpServer {
     /// The accounts the document describes. An empty list is a different
     /// answer than `None`: a document that names no accounts grants nothing.
     fn document_accounts(&self) -> Result<Option<Vec<DocumentAccount>>, String> {
-        Ok(self.document()?.map(|document| document.accounts))
+        Ok(self.document()?.map(|mut document| {
+            document.restrict_accounts(self.presented_token_hash.as_deref());
+            document.accounts
+        }))
     }
 
     /// Whether the client that spawned this process may call tools. Three
@@ -1759,16 +1771,24 @@ pub fn rebuild_cache(
     presented_token: Option<&str>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    let (path, account, level) = document_account_for_cli(account_id, &policy_path)?;
-    if level == CacheLevel::Off {
-        return Err("the cache is off for this account".to_owned());
-    }
+    let path = policy_path.ok_or("no policy document path available")?;
     // The rebuild logs into the real mailbox, so it sits behind the same
     // pairing gate as the tools and the account check.
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("policy document unreadable: {error}"))?;
-    let document = parse_policy_document(&text)?;
+    let mut document = parse_policy_document(&text)?;
     pairing_gate(document.clients.as_deref(), presented_token).map_err(str::to_owned)?;
+    document.restrict_accounts(presented_token.map(sha256_hex).as_deref());
+    let account = document
+        .accounts
+        .iter()
+        .find(|account| account.policy.account_id().as_str() == account_id)
+        .ok_or_else(|| CoreError::AccountNotFound(AccountId::new(account_id)).to_string())?;
+
+    let level = effective_cache_level(account.cache.level, account.policy.permissions().read);
+    if level == CacheLevel::Off {
+        return Err("the cache is off for this account".to_owned());
+    }
 
     let config = account
         .imap
@@ -1776,15 +1796,14 @@ pub fn rebuild_cache(
         .ok_or_else(|| unconfigured(account.policy.account_id()).to_string())?;
     let secret =
         resolve_credential(config, account.oauth.as_ref()).map_err(|error| error.to_string())?;
-    let provider = torromail_imap_tls::connect_account(config, &secret)
-        .map_err(|error| error.to_string())?;
+    let provider =
+        torromail_imap_tls::connect_account(config, &secret).map_err(|error| error.to_string())?;
 
     let cache_dir = path
         .parent()
         .ok_or("policy path has no parent directory")?
         .join("cache");
-    let store =
-        CacheStore::open(&cache_dir, account_id).map_err(|error| error.to_string())?;
+    let store = CacheStore::open(&cache_dir, account_id).map_err(|error| error.to_string())?;
     // A rebuild starts clean: whatever was cached is rebuilt from scratch.
     store
         .trim(CacheLevel::Off)
@@ -1841,7 +1860,15 @@ pub fn rebuild_cache(
                 provider.get_message(aid, hit.message_id()),
                 split_imap_id(hit.message_id()),
             ) {
-                write_through_message(&store, level, mailbox, uid, inbox_generation, &message, true);
+                write_through_message(
+                    &store,
+                    level,
+                    mailbox,
+                    uid,
+                    inbox_generation,
+                    &message,
+                    true,
+                );
             }
             if (index + 1) % 10 == 0 || index + 1 == total {
                 progress(
@@ -1881,12 +1908,13 @@ fn check_account_inner(
     let path = policy_path.ok_or_else(|| unreachable("no policy document path available"))?;
     let text = std::fs::read_to_string(&path)
         .map_err(|error| unreachable(format!("policy document unreadable: {error}")))?;
-    let document = parse_policy_document(&text).map_err(unreachable)?;
+    let mut document = parse_policy_document(&text).map_err(unreachable)?;
 
     // The check logs into the real mailbox, so it sits behind the same
     // pairing gate as the tools. The app passes its own key; a foreign
     // process invoking the flag gets the same refusal a tool call would.
     pairing_gate(document.clients.as_deref(), presented_token).map_err(unreachable)?;
+    document.restrict_accounts(presented_token.map(sha256_hex).as_deref());
 
     // Found by the account's own id, not by whether it has a connection, so an
     // account whose setup is unfinished is told apart from one nobody has ever
@@ -2031,7 +2059,7 @@ pub fn sweep_account_health(policy_path: Option<PathBuf>, presented_token: Optio
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
-    let Ok(document) = parse_policy_document(&text) else {
+    let Ok(mut document) = parse_policy_document(&text) else {
         return;
     };
     // Judged once here rather than per account. An unpaired client's server
@@ -2042,6 +2070,7 @@ pub fn sweep_account_health(policy_path: Option<PathBuf>, presented_token: Optio
         return;
     }
 
+    document.restrict_accounts(presented_token.map(sha256_hex).as_deref());
     let records = health::load(&health_path);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

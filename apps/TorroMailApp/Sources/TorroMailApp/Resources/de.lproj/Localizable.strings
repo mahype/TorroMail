@@ -325,3 +325,14 @@
    to it are not: they come from the mail server or from the Rust side and are
    shown in their own words. */
 "Last checked %@" = "Zuletzt geprüft %@";
+
+/* Per-client account sharing */
+"Shared accounts" = "Freigegebene Konten";
+"Account access" = "Kontozugriff";
+"All accounts" = "Alle Konten";
+"Selected accounts" = "Ausgewählte Konten";
+"No accounts are shared with this client." = "Für diesen Client sind keine Konten freigegeben.";
+"This client can access all accounts, including accounts added later. Account permissions still apply." = "Dieser Client erhält Zugriff auf alle Konten, auch auf künftig hinzugefügte. Die Kontoberechtigungen gelten weiterhin.";
+"Only selected accounts are shared. New accounts require a separate selection. Account permissions still apply." = "Nur ausgewählte Konten sind freigegeben. Neue Konten müssen einzeln ausgewählt werden. Die Kontoberechtigungen gelten weiterhin.";
+"Could not apply account sharing. Please try again." = "Die Kontofreigaben konnten nicht angewendet werden. Bitte versuche es erneut.";
+"Try again" = "Erneut versuchen";
