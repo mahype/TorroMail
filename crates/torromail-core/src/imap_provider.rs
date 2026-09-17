@@ -11,8 +11,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::{
-    find_drafts_mailbox, AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider,
-    MarkChange, MessageHeader, MessageHeaders, SearchHit, SearchWindow, StoredMessage,
+    find_special_mailbox, AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider,
+    MarkChange, MessageHeader, MessageHeaders, SearchHit, SearchWindow, SpecialMailboxRole,
+    StoredMessage,
 };
 
 /// A pointer to a credential in the platform keychain — never the
@@ -508,6 +509,14 @@ impl<T: ImapTransport> ImapClient<T> {
             .collect())
     }
 
+    pub fn selectable_mailboxes(&mut self) -> CoreResult<Vec<String>> {
+        Ok(self.list_mailbox_entries("LIST \"\" \"*\"")?
+            .into_iter()
+            .filter(|entry| entry.selectable())
+            .map(|entry| entry.name)
+            .collect())
+    }
+
     fn list_mailbox_entries(&mut self, command: &str) -> CoreResult<Vec<MailboxListEntry>> {
         Ok(self.command(command)?.iter().filter_map(parse_list_mailbox).collect())
     }
@@ -516,8 +525,12 @@ impl<T: ImapTransport> ImapClient<T> {
     /// exact wire name (including modified UTF-7). Some servers expose
     /// \Drafts in ordinary LIST; others need SPECIAL-USE or XLIST.
     pub fn drafts_mailbox(&mut self) -> CoreResult<String> {
+        self.special_mailbox(SpecialMailboxRole::Drafts)
+    }
+
+    pub fn special_mailbox(&mut self, role: SpecialMailboxRole) -> CoreResult<String> {
         let listed = self.list_mailbox_entries("LIST \"\" \"*\"")?;
-        if let Some(entry) = listed.iter().find(|entry| entry.is_drafts()) {
+        if let Some(entry) = listed.iter().find(|entry| entry.is_role(role)) {
             return Ok(entry.name.clone());
         }
 
@@ -542,7 +555,7 @@ impl<T: ImapTransport> ImapClient<T> {
             // A tagged refusal means this extension is unavailable despite
             // CAPABILITY. A broken connection still propagates as an error.
             if let Ok(lines) = self.command_or_refusal(command)? {
-                if let Some(entry) = lines.iter().filter_map(parse_list_mailbox).find(MailboxListEntry::is_drafts) {
+                if let Some(entry) = lines.iter().filter_map(parse_list_mailbox).find(|entry| entry.is_role(role)) {
                     return Ok(entry.name);
                 }
             }
@@ -552,8 +565,8 @@ impl<T: ImapTransport> ImapClient<T> {
             .filter(|entry| entry.selectable())
             .map(|entry| entry.name)
             .collect::<Vec<_>>();
-        find_drafts_mailbox(&names).ok_or_else(|| CoreError::ProviderFailure(
-            "no drafts mailbox found: LIST returned no selectable \\Drafts folder or known drafts folder name".to_owned(),
+        find_special_mailbox(&names, role).ok_or_else(|| CoreError::ProviderFailure(
+            format!("no {} mailbox found: LIST returned no selectable {} folder or known folder name", role.as_str(), role.imap_attribute()),
         ))
     }
 
@@ -1142,9 +1155,14 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         self.client.borrow_mut().list_mailboxes()
     }
 
-    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+    fn selectable_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
         self.guard(account_id)?;
-        self.client.borrow_mut().drafts_mailbox()
+        self.client.borrow_mut().selectable_mailboxes()
+    }
+
+    fn special_mailbox(&self, account_id: &AccountId, role: SpecialMailboxRole) -> CoreResult<String> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().special_mailbox(role)
     }
 
     fn append_draft(
@@ -1155,6 +1173,16 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     ) -> CoreResult<()> {
         self.guard(account_id)?;
         self.client.borrow_mut().append(mailbox, "\\Draft", message)
+    }
+
+    fn append_sent(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().append(mailbox, "\\Seen", message)
     }
 
     fn move_messages(
@@ -1326,8 +1354,8 @@ impl MailboxListEntry {
         !self.flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
     }
 
-    fn is_drafts(&self) -> bool {
-        self.selectable() && self.flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Drafts"))
+    fn is_role(&self, role: SpecialMailboxRole) -> bool {
+        self.selectable() && self.flags.iter().any(|flag| flag.eq_ignore_ascii_case(role.imap_attribute()))
     }
 }
 

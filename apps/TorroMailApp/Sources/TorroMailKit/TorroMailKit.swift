@@ -1952,6 +1952,10 @@ public enum PolicyDocument {
                 "level": account.searchCache.level.rawValue
             ]
         ]
+        let overrides = account.specialMailboxes.policyOverrides
+        if !overrides.isEmpty {
+            object["mailbox_overrides"] = overrides
+        }
         // Connection facts travel once the account has them, whatever the
         // login method — the secret itself stays in the keychain, only the
         // reference moves. An account without this block has no mail to give:
@@ -2524,6 +2528,42 @@ public struct SearchCacheSettings: Hashable, Sendable, Codable {
     }
 }
 
+/// Per-account manual choices for the five IMAP special-use folders. An empty
+/// name keeps that role automatic even while the manual section is open.
+public struct SpecialMailboxSettings: Hashable, Sendable, Codable {
+    public var manual: Bool
+    public var drafts: String
+    public var sent: String
+    public var archive: String
+    public var junk: String
+    public var trash: String
+
+    public init(
+        manual: Bool = false,
+        drafts: String = "",
+        sent: String = "",
+        archive: String = "",
+        junk: String = "",
+        trash: String = ""
+    ) {
+        self.manual = manual
+        self.drafts = drafts
+        self.sent = sent
+        self.archive = archive
+        self.junk = junk
+        self.trash = trash
+    }
+
+    public var policyOverrides: [String: String] {
+        guard manual else { return [:] }
+        let choices = [
+            "drafts": drafts, "sent": sent, "archive": archive,
+            "junk": junk, "trash": trash
+        ]
+        return choices.filter { !$0.value.isEmpty }
+    }
+}
+
 public struct PendingAction: Identifiable, Hashable, Sendable {
     public var id: String
     public var accountID: String
@@ -2602,6 +2642,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
     /// later automatically follow the account-wide standard.
     public var knownMailboxes: [String]
     public var permissions: PermissionSet
+    public var specialMailboxes: SpecialMailboxSettings
     public var searchCache: SearchCacheSettings
     public var pendingActions: [PendingAction]
 
@@ -2622,6 +2663,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         connectionState: ConnectionState = .notConfigured,
         knownMailboxes: [String] = ["INBOX"],
         permissions: PermissionSet = PermissionSet(),
+        specialMailboxes: SpecialMailboxSettings = SpecialMailboxSettings(),
         searchCache: SearchCacheSettings = SearchCacheSettings(),
         pendingActions: [PendingAction] = []
     ) {
@@ -2641,6 +2683,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         self.connectionState = connectionState
         self.knownMailboxes = knownMailboxes
         self.permissions = permissions
+        self.specialMailboxes = specialMailboxes
         self.searchCache = searchCache
         self.pendingActions = pendingActions
     }
@@ -2670,7 +2713,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
 extension MailAccount: Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, email, provider, loginMethod, imapHost, smtpHost
-        case username, knownMailboxes, permissions, searchCache, isVerified
+        case username, knownMailboxes, permissions, specialMailboxes, searchCache, isVerified
         case imapPort, smtpPort, oauthIssuer
         case imapSecurity, smtpSecurity
     }
@@ -2715,6 +2758,7 @@ extension MailAccount: Codable {
             ),
             knownMailboxes: try container.decode([String].self, forKey: .knownMailboxes),
             permissions: try container.decode(PermissionSet.self, forKey: .permissions),
+            specialMailboxes: try container.decodeIfPresent(SpecialMailboxSettings.self, forKey: .specialMailboxes) ?? SpecialMailboxSettings(),
             searchCache: try container.decode(SearchCacheSettings.self, forKey: .searchCache)
         )
     }
@@ -2736,6 +2780,7 @@ extension MailAccount: Codable {
         try container.encode(username, forKey: .username)
         try container.encode(knownMailboxes, forKey: .knownMailboxes)
         try container.encode(permissions, forKey: .permissions)
+        try container.encode(specialMailboxes, forKey: .specialMailboxes)
         try container.encode(searchCache, forKey: .searchCache)
         try container.encode(connectionState == .connected, forKey: .isVerified)
     }

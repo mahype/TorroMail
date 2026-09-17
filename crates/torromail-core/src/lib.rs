@@ -1377,13 +1377,53 @@ fn append_wrapped_base64(message: &mut String, content: &[u8]) {
     }
 }
 
-/// Prefer an existing folder over asking IMAP to append to an invented name.
-/// The modified UTF-7 spelling is kept for servers that report it on the wire.
-fn find_drafts_mailbox(mailboxes: &[String]) -> Option<String> {
-    const NAMES: &[&str] = &[
-        "Drafts", "Draft", "Entwürfe", "Entw&APw-rfe", "Brouillons", "Borradores", "Bozze",
-    ];
-    for name in NAMES {
+/// The five folders users may map in account setup. INBOX is the reserved
+/// IMAP name and needs no mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialMailboxRole {
+    Drafts,
+    Sent,
+    Archive,
+    Junk,
+    Trash,
+}
+
+impl SpecialMailboxRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Drafts => "drafts",
+            Self::Sent => "sent",
+            Self::Archive => "archive",
+            Self::Junk => "junk",
+            Self::Trash => "trash",
+        }
+    }
+
+    pub fn imap_attribute(self) -> &'static str {
+        match self {
+            Self::Drafts => "\\Drafts",
+            Self::Sent => "\\Sent",
+            Self::Archive => "\\Archive",
+            Self::Junk => "\\Junk",
+            Self::Trash => "\\Trash",
+        }
+    }
+
+    fn common_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Drafts => &["Drafts", "Draft", "Entwürfe", "Entw&APw-rfe", "Brouillons", "Borradores", "Bozze"],
+            Self::Sent => &["Sent", "Sent Mail", "Sent Messages", "Gesendet", "Gesendete Elemente", "Envoyés", "Enviados"],
+            Self::Archive => &["Archive", "Archives", "Archiv", "Archiviert"],
+            Self::Junk => &["Junk", "Spam", "Junk E-mail", "Junk Email", "Unerwünscht"],
+            Self::Trash => &["Trash", "Deleted Items", "Deleted Messages", "Bin", "Papierkorb", "Gelöschte Elemente", "Gel&APY-schte Elemente", "Corbeille"],
+        }
+    }
+}
+
+/// Prefer an existing folder over asking IMAP to append or move into an
+/// invented name. Names are kept in their exact server spelling on the wire.
+fn find_special_mailbox(mailboxes: &[String], role: SpecialMailboxRole) -> Option<String> {
+    for name in role.common_names() {
         if let Some(mailbox) = mailboxes.iter().find(|mailbox| mailbox.eq_ignore_ascii_case(name)) {
             return Some(mailbox.clone());
         }
@@ -1463,13 +1503,21 @@ pub trait MailProvider {
 
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>>;
 
-    /// Resolve the account's existing drafts folder. IMAP providers inspect
-    /// special-use flags; simple providers can use a known folder name.
-    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+    fn selectable_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        self.list_mailboxes(account_id)
+    }
+
+    /// Resolve an existing special folder. IMAP providers inspect the
+    /// server's special-use attributes before trying known names.
+    fn special_mailbox(&self, account_id: &AccountId, role: SpecialMailboxRole) -> CoreResult<String> {
         let mailboxes = self.list_mailboxes(account_id)?;
-        find_drafts_mailbox(&mailboxes).ok_or_else(|| CoreError::ProviderFailure(
-            "no drafts mailbox found in the account's folder list".to_owned(),
+        find_special_mailbox(&mailboxes, role).ok_or_else(|| CoreError::ProviderFailure(
+            format!("no {} mailbox found in the account's folder list", role.as_str()),
         ))
+    }
+
+    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+        self.special_mailbox(account_id, SpecialMailboxRole::Drafts)
     }
 
     /// Store a ready-made message in `mailbox` as a draft — an IMAP APPEND
@@ -1480,6 +1528,17 @@ pub trait MailProvider {
         mailbox: &str,
         message: &str,
     ) -> CoreResult<()>;
+
+    /// Store a copy of a message already accepted by SMTP in Sent. A failure
+    /// here must never cause callers to submit the message again.
+    fn append_sent(
+        &mut self,
+        _account_id: &AccountId,
+        _mailbox: &str,
+        _message: &str,
+    ) -> CoreResult<()> {
+        Err(CoreError::ProviderFailure("storing a sent copy is unavailable".to_owned()))
+    }
 
     /// Move each message to `target`. A soft delete is one of these — a move
     /// to the Trash folder.
@@ -1556,6 +1615,14 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         (**self).list_mailboxes(account_id)
     }
 
+    fn selectable_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        (**self).selectable_mailboxes(account_id)
+    }
+
+    fn special_mailbox(&self, account_id: &AccountId, role: SpecialMailboxRole) -> CoreResult<String> {
+        (**self).special_mailbox(account_id, role)
+    }
+
     fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
         (**self).drafts_mailbox(account_id)
     }
@@ -1567,6 +1634,15 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         message: &str,
     ) -> CoreResult<()> {
         (**self).append_draft(account_id, mailbox, message)
+    }
+
+    fn append_sent(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        (**self).append_sent(account_id, mailbox, message)
     }
 
     fn move_messages(
@@ -1744,9 +1820,19 @@ impl MailProvider for FixtureMailProvider {
         Ok(mailboxes)
     }
 
-    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+    fn special_mailbox(&self, account_id: &AccountId, role: SpecialMailboxRole) -> CoreResult<String> {
         let mailboxes = self.list_mailboxes(account_id)?;
-        Ok(find_drafts_mailbox(&mailboxes).unwrap_or_else(|| "Drafts".to_owned()))
+        let fixture_default = match role {
+            SpecialMailboxRole::Drafts => Some("Drafts"),
+            SpecialMailboxRole::Sent => Some("Sent"),
+            SpecialMailboxRole::Trash => Some("Trash"),
+            _ => None,
+        };
+        find_special_mailbox(&mailboxes, role)
+            .or_else(|| fixture_default.map(str::to_owned))
+            .ok_or_else(|| CoreError::ProviderFailure(
+                format!("no {} mailbox found in the account's folder list", role.as_str()),
+            ))
     }
 
     /// The fixture keeps the appended draft so a later search or list can see
@@ -1767,6 +1853,19 @@ impl MailProvider for FixtureMailProvider {
             "",
             "",
             message,
+        ));
+        Ok(())
+    }
+
+    fn append_sent(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        let id = format!("sent-{}", self.messages.len() + 1);
+        self.messages.push(StoredMessage::new(
+            account_id.clone(), mailbox, id.clone(), id, "Sent", "", "", message,
         ));
         Ok(())
     }
@@ -2006,9 +2105,34 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
     /// Resolve the drafts folder only after the account-wide drafting check.
     /// Folder read rules do not hide a drafts destination from a client that
     /// has been granted the drafting right.
+    pub fn special_mailbox(
+        &self,
+        account_id: &AccountId,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+    ) -> CoreResult<String> {
+        let capability = match role {
+            SpecialMailboxRole::Drafts => Capability::Draft,
+            SpecialMailboxRole::Sent => Capability::Send,
+            SpecialMailboxRole::Archive | SpecialMailboxRole::Junk => Capability::Move,
+            SpecialMailboxRole::Trash => Capability::DeleteSoft,
+        };
+        self.policy_engine.authorize(account_id, capability)?;
+        if let Some(chosen) = chosen {
+            // Manual choices are published by the setup app, never supplied
+            // by an MCP caller. Re-check them against this live connection.
+            if self.provider.selectable_mailboxes(account_id)?.iter().any(|name| name == chosen) {
+                return Ok(chosen.to_owned());
+            }
+            return Err(CoreError::ProviderFailure(format!(
+                "configured {} mailbox {chosen:?} no longer exists", role.as_str()
+            )));
+        }
+        self.provider.special_mailbox(account_id, role)
+    }
+
     pub fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
-        self.policy_engine.authorize(account_id, Capability::Draft)?;
-        self.provider.drafts_mailbox(account_id)
+        self.special_mailbox(account_id, SpecialMailboxRole::Drafts, None)
     }
 
     /// Store a composed message as a draft, if the account may draft at all.

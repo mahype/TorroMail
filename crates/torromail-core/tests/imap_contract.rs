@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use torromail_core::{
     AccountId, CoreError, CoreResult, ImapAuth, ImapClient, ImapMailProvider, ImapTransport,
-    MailProvider, MarkChange, SearchHit, SearchWindow, StreamImapTransport,
+    MailProvider, MarkChange, SearchHit, SearchWindow, SpecialMailboxRole, StreamImapTransport,
 };
 
 #[derive(Debug)]
@@ -159,6 +159,46 @@ fn drafts_use_the_special_use_flag_and_keep_the_imap_wire_name() {
         4,
         "a flagged LIST needs no CAPABILITY round trip"
     );
+}
+
+#[test]
+fn sent_uses_special_use_and_saves_a_seen_copy() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Noselect \\Sent) \"/\" \"Old Sent\""),
+        line("* LIST (\\Sent) \"/\" \"Gesendet\""),
+        line("t2 OK LIST completed"),
+        line("+ OK go ahead"),
+        line("t3 OK APPEND completed"),
+    ]);
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    ).unwrap();
+    let account = AccountId::new("work");
+    let mut provider = ImapMailProvider::new(account.clone(), client);
+    let mailbox = provider.special_mailbox(&account, SpecialMailboxRole::Sent).unwrap();
+    provider.append_sent(&account, &mailbox, "sent body").unwrap();
+    assert_eq!(mailbox, "Gesendet");
+    assert_eq!(log.lines()[2], "t3 APPEND \"Gesendet\" (\\Seen) {9}");
+}
+
+#[test]
+fn setup_lists_only_selectable_folders() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Noselect) \"/\" \"Folders\""),
+        line("* LIST () \"/\" \"Folders/Archive\""),
+        line("t2 OK LIST completed"),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    ).unwrap();
+    assert_eq!(client.selectable_mailboxes().unwrap(), ["Folders/Archive"]);
 }
 
 #[test]

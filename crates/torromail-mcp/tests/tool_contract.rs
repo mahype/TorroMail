@@ -1148,6 +1148,25 @@ fn a_prepared_move_executes_only_after_confirmation() {
 }
 
 #[test]
+fn a_role_move_uses_the_accounts_existing_archive_choice() {
+    let path = temp_policy_path("archive-role");
+    std::fs::write(&path, r#"{"version":1,"accounts":[{"id":"work","read":"full_message","write":{"move":true},"send":false,"per_folder":false,"folder_rules":{},"mailbox_overrides":{"archive":"My Archive"}}]}"#).unwrap();
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([
+            StoredMessage::new(AccountId::new("work"), "INBOX", "m1", "thread-1", "Subject", "s@example.com", "", ""),
+            StoredMessage::new(AccountId::new("work"), "My Archive", "old", "thread-2", "Old", "s@example.com", "", ""),
+        ])) as Box<dyn MailProvider>)
+    });
+    let prepare = server.handle_line(r#"{"jsonrpc":"2.0","id":180,"method":"tools/call","params":{"name":"mail_prepare_move","arguments":{"account_id":"work","message_ids":["m1"],"target_role":"archive"}}}"#).unwrap();
+    let pending_id = payload_field(&prepare, "pending_action_id");
+    let code = payload_field(&prepare, "confirmation_code");
+    let confirm = server.handle_line(&format!(r#"{{"jsonrpc":"2.0","id":181,"method":"tools/call","params":{{"name":"mail_confirm_action","arguments":{{"pending_action_id":"{pending_id}","confirmation_code":"{code}"}}}}}}"#)).unwrap();
+    std::fs::remove_file(&path).ok();
+    assert!(confirm.contains("My Archive"), "got: {confirm}");
+    assert!(confirm.contains("moved"), "got: {confirm}");
+}
+
+#[test]
 fn a_wrong_confirmation_code_is_refused() {
     let path = temp_policy_path("wrong-code");
     tidy_up_document(&path);
@@ -1529,6 +1548,16 @@ fn paired_fixture_document(path: &std::path::Path) {
 }
 
 const LIST_ACCOUNTS: &str = r#"{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"mail_list_accounts","arguments":{}}}"#;
+
+#[test]
+fn folder_setup_listing_is_reserved_for_the_app_pairing() {
+    let path = temp_policy_path("folder-setup-pairing");
+    paired_fixture_document(&path);
+    let error = torromail_mcp::list_account_mailboxes("work", Some(path.clone()), Some(TEST_KEY))
+        .unwrap_err();
+    std::fs::remove_file(&path).ok();
+    assert!(error.contains("only to the TorroMail app"), "got: {error}");
+}
 
 #[test]
 fn an_unpaired_client_is_refused_every_tool_call() {

@@ -1544,6 +1544,10 @@ private struct AccountDetailView: View {
         Form {
             identitySection
             connectionSection
+            SpecialMailboxesSection(
+                account: $account,
+                executableName: model.generalSettings.mcpExecutable
+            )
             permissionsSection
             foldersSection
             cacheSection

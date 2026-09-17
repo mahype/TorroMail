@@ -216,6 +216,20 @@ new folder name or create one; it reports when no destination is found. With
 attachments the message is `multipart/mixed`; every binary
 part uses base64 transfer encoding and an RFC 2231 UTF-8 filename.
 
+The same lookup applies to Sent, Archive, Junk, and Trash using their IMAP
+special-use attributes and existing common folder names. An account can
+override each of these five roles in the setup app by selecting an existing,
+selectable folder from the server's live list. The server checks that exact
+choice again when the action runs. `INBOX` is reserved by IMAP and has no
+manual mapping. Neither discovery nor setup creates server folders.
+
+Before submitting a prepared send, TorroMail resolves the Sent folder. After
+SMTP accepts the message, it appends a `\Seen` copy there. If that append
+fails, the tool still reports the message as sent and separately reports the
+missing Sent copy, so a client has no reason to resubmit it. Archive and Junk
+can be selected as `target_role` in `mail_prepare_move`; soft delete resolves
+Trash automatically.
+
 The MCP contract accepts `filename`, optional `media_type`, and
 `content_base64`. It deliberately accepts neither filesystem paths nor URLs:
 the paired client supplies bytes it can already access, while TorroMail does
