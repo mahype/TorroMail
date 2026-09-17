@@ -336,3 +336,12 @@
 "Only selected accounts are shared. New accounts require a separate selection. Account permissions still apply." = "Nur ausgewählte Konten sind freigegeben. Neue Konten müssen einzeln ausgewählt werden. Die Kontoberechtigungen gelten weiterhin.";
 "Could not apply account sharing. Please try again." = "Die Kontofreigaben konnten nicht angewendet werden. Bitte versuche es erneut.";
 "Try again" = "Erneut versuchen";
+
+/* App-wide text size */
+"Larger Text" = "Schrift größer";
+"Smaller Text" = "Schrift kleiner";
+"Default Text Size" = "Standardgröße";
+"Text size" = "Schriftgröße";
+"Appearance" = "Darstellung";
+"%d%% (Default)" = "%d%% (Standard)";
+"Change text size with ⌘+ and ⌘−. ⌘0 restores the default size." = "Mit ⌘+ und ⌘− die Schriftgröße ändern. ⌘0 stellt die Standardgröße wieder her.";

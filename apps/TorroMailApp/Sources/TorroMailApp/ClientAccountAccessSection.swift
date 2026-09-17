@@ -34,7 +34,7 @@ struct ClientAccountAccessSection: View {
                     )) {
                         VStack(alignment: .leading) {
                             Text(verbatim: account.name)
-                            Text(verbatim: account.email).foregroundStyle(.secondary).font(.caption)
+                            Text(verbatim: account.email).foregroundStyle(.secondary).scaledFont(.caption)
                         }
                     }
                     .toggleStyle(.checkbox)

@@ -29,6 +29,7 @@ func label(for security: ConnectionSecurity) -> String {
 /// cleared mid-edit stays empty instead of snapping to 0; the number only
 /// travels once it parses.
 struct PortField: View {
+    @Environment(\.textScale) private var textScale
     let title: String
     @Binding var port: Int
     @Binding var security: ConnectionSecurity
@@ -37,14 +38,14 @@ struct PortField: View {
 
     var body: some View {
         LabeledContent(title) {
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * textScale) {
                 TextField("", text: $text)
                     .labelsHidden()
                     // Right-aligned and only as wide as a port needs to be, so
                     // the number sits against the picker instead of floating
                     // in the middle of the row.
                     .multilineTextAlignment(.trailing)
-                    .frame(width: 56)
+                    .frame(width: 56 * textScale)
                     .onChange(of: text) { _, typed in
                         if let value = Int(typed), (1...65535).contains(value) {
                             port = value
@@ -265,22 +266,24 @@ private struct TorroHorn: Shape {
 /// horns flaring out either side of the name, set in the display cut, the
 /// brand half white and the product half silver, all on the red ground.
 private struct TorroWordmark: View {
+    @Environment(\.textScale) private var textScale
     /// Height of the capitals. Everything else is derived from it, the same
     /// proportions the original wordmark uses.
     var capHeight: CGFloat = 10
 
-    private var hornHeight: CGFloat { capHeight * 2.0 }
+    private var scaledCapHeight: CGFloat { capHeight * textScale }
+    private var hornHeight: CGFloat { scaledCapHeight * 2.0 }
     private var hornWidth: CGFloat { hornHeight * 55.765624 / 68.832031 }
 
     var body: some View {
-        HStack(alignment: .lastTextBaseline, spacing: capHeight * 0.14) {
+        HStack(alignment: .lastTextBaseline, spacing: scaledCapHeight * 0.14) {
             horn(mirrored: false)
             Text(verbatim: "TORRO").foregroundStyle(.white)
                 + Text(verbatim: "MAIL").foregroundStyle(Color.torroSilver)
             horn(mirrored: true)
         }
         // Frutiger's capitals sit at ~0.7 em.
-        .font(.torroDisplay(size: capHeight / 0.7))
+        .font(.torroDisplay(size: scaledCapHeight / 0.7))
         .lineLimit(1)
         .fixedSize()
         .accessibilityElement()
@@ -301,10 +304,23 @@ private struct TorroWordmark: View {
 /// mark sits quietly on the sidebar material and leaves the red to the
 /// dashboard.
 private struct SidebarBrandFooter: View {
+    @Environment(\.textScale) private var textScale
+
     var body: some View {
-        TorroWordmark(capHeight: 11)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+        VStack(spacing: 4 * textScale) {
+            TorroWordmark(capHeight: 11 * min(textScale, 1.25) / textScale)
+            Text(verbatim: "\(L("Version")) \(Self.installedVersion)")
+                .scaledFont(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity)
+        .scaledPadding(.vertical, 12)
+    }
+
+    private static var installedVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? L("Unknown")
     }
 }
 
@@ -314,11 +330,12 @@ private struct SidebarBrandFooter: View {
 /// cast one too, which just smears the text.
 private struct TorroCard: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.textScale) private var textScale
     var cornerRadius: CGFloat = 12
     var isHighlighted = false
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius * textScale, style: .continuous)
         return content
             .background {
                 shape
@@ -529,6 +546,7 @@ struct TorroMailApp: App {
     var body: some Scene {
         WindowGroup(id: Self.mainWindowID) {
             TorroMailRootView()
+                .preferredTextSize()
                 .environmentObject(model)
                 .environmentObject(mcpSupervisor)
                 .environmentObject(presence)
@@ -650,6 +668,7 @@ struct TorroMailApp: App {
                 }
         }
         .commands {
+            TextSizeCommands()
             CommandGroup(after: .appInfo) {
                 Button(L("Check for Updates…")) {
                     updaterController.checkForUpdates()
@@ -745,6 +764,7 @@ private struct TorroMailRootView: View {
                 Label(L("Help"), systemImage: "questionmark.circle")
                     .tag(TorroMailSidebarSelection.help)
             }
+            .labelStyle(ScaledSidebarLabelStyle())
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
             .navigationTitle("TorroMail")
@@ -767,6 +787,7 @@ private struct TorroMailRootView: View {
         }
         .sheet(isPresented: $model.showAccountWizard) {
             AccountSetupWizard()
+                .preferredTextSize()
                 .environmentObject(model)
         }
         // The Dock tile and the menu bar item both need to reopen the window,
@@ -843,12 +864,13 @@ private struct TorroMailRootView: View {
 /// anything need me, what happened lately — and, while nothing is set up yet,
 /// what this app is for.
 private struct DashboardView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 16 * textScale) {
                 if model.health == .notConfigured {
                     GettingStartedCard()
                 } else {
@@ -862,8 +884,8 @@ private struct DashboardView: View {
                 }
                 NewsCard()
             }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .top)
+            .scaledPadding(20)
+            .readableContentWidth()
             .frame(maxWidth: .infinity)
         }
         .background(.background.secondary)
@@ -885,8 +907,9 @@ private struct DashboardView: View {
 /// detail pane, not a card: the text column mirrors the card column below so
 /// wordmark and content share a left edge.
 private struct BrandHero: View {
+    @Environment(\.textScale) private var textScale
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * textScale) {
             TorroWordmark(capHeight: 15)
             // No `.fixedSize(horizontal: false, vertical: true)` here: outside
             // a ScrollView it drives the window's fitting-size negotiation
@@ -894,15 +917,15 @@ private struct BrandHero: View {
             // out collapsed and clipped. Plain wrapping needs no help in this
             // stack anyway.
             Text(L("Your mailboxes for AI assistants — nothing leaves without your say-so."))
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.white.opacity(0.92))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .frame(maxWidth: 720)
+        .scaledPadding(.horizontal, 20)
+        .readableContentWidth()
         .frame(maxWidth: .infinity)
-        .padding(.top, 6)
-        .padding(.bottom, 16)
+        .scaledPadding(.top, 6)
+        .scaledPadding(.bottom, 16)
         .background {
             // Diagonal, top-left to bottom-right, as torro-design specifies:
             // the red still reaches the window's top edge unbroken — the
@@ -937,18 +960,19 @@ private struct BrandHero: View {
 /// Is the app doing its job right now? Phrased as the user's question, not as
 /// process state — the mechanics belong in the log.
 private struct ServiceStatusCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * textScale) {
             Text(L("Status"))
-                .font(.subheadline.weight(.semibold))
+                .scaledFont(.subheadline, weight: .semibold)
                 .foregroundStyle(.secondary)
             // Two independent services, so two boxes side by side rather than a
             // stacked list: each tile is one service and its own state, and the
             // pair costs a fraction of the height the list did.
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: 10 * textScale) {
                 StatusTile(
                     color: mcpSupervisor.status.isRunning ? .green : .red,
                     title: mcpSupervisor.status.isRunning
@@ -978,6 +1002,7 @@ private struct ServiceStatusCard: View {
 }
 
 private struct StatusTile: View {
+    @Environment(\.textScale) private var textScale
     var color: Color
     var title: String
     var detail: String
@@ -985,26 +1010,26 @@ private struct StatusTile: View {
     var body: some View {
         // The dot gets its own column so title and detail share one left edge —
         // as siblings under the dot, the detail would hang out to its left.
-        HStack(alignment: .top, spacing: 7) {
+        HStack(alignment: .top, spacing: 7 * textScale) {
             Circle()
                 .fill(color)
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
+                .frame(width: 8 * textScale, height: 8 * textScale)
+                .scaledPadding(.top, 5)
                 .help(title)
                 .accessibilityLabel(title)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 3 * textScale) {
                 Text(title)
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .scaledPadding(.horizontal, 12)
+        .scaledPadding(.vertical, 10)
         .torroCard()
     }
 }
@@ -1012,6 +1037,7 @@ private struct StatusTile: View {
 /// The only card that asks for a decision, so it leads with the buttons and
 /// says plainly what it is about to do.
 private struct PendingApprovalsCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
@@ -1022,17 +1048,17 @@ private struct PendingApprovalsCard: View {
             VStack(spacing: 0) {
                 ForEach(Array(model.pendingActions.enumerated()), id: \.element.id) { index, action in
                     if index > 0 { Divider() }
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(action.subject).font(.headline).lineLimit(1)
+                    HStack(spacing: 12 * textScale) {
+                        VStack(alignment: .leading, spacing: 2 * textScale) {
+                            Text(action.subject).scaledFont(.headline).lineLimit(1)
                             Text(sentence(for: action))
-                                .font(.subheadline)
+                                .scaledFont(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 8)
                         Text(action.expiresIn)
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                         Button(L("Reject"), role: .destructive) {}
@@ -1040,7 +1066,7 @@ private struct PendingApprovalsCard: View {
                         Button(L("Approve")) {}
                             .torroButton()
                     }
-                    .padding(.vertical, 10)
+                    .scaledPadding(.vertical, 10)
                 }
             }
         }
@@ -1064,6 +1090,7 @@ private struct PendingApprovalsCard: View {
 /// re-entering a password, correcting a host. It is the same destination a
 /// health notification opens, so both routes land on the same screen.
 private struct BrokenAccountsCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
@@ -1075,7 +1102,7 @@ private struct BrokenAccountsCard: View {
             ) {
                 VStack(spacing: 0) {
                     ForEach(Array(broken.enumerated()), id: \.element.id) { index, account in
-                        if index > 0 { Divider().padding(.leading, 38) }
+                        if index > 0 { Divider().scaledPadding(.leading, 38) }
                         Button {
                             model.openAccount(id: account.id)
                         } label: {
@@ -1083,12 +1110,12 @@ private struct BrokenAccountsCard: View {
                             // sentence and can run to two or three lines, and
                             // the badge and chevron belong beside its first
                             // one rather than floating in the middle.
-                            HStack(alignment: .top, spacing: 10) {
+                            HStack(alignment: .top, spacing: 10 * textScale) {
                                 MailBadge(size: 26)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(account.name).font(.body)
+                                VStack(alignment: .leading, spacing: 2 * textScale) {
+                                    Text(account.name).scaledFont(.body)
                                     Text(reason(for: account))
-                                        .font(.subheadline)
+                                        .scaledFont(.subheadline)
                                         .foregroundStyle(.secondary)
                                         // Full sentence or nothing: the tail of
                                         // these messages is the half that says
@@ -1099,12 +1126,12 @@ private struct BrokenAccountsCard: View {
                                 }
                                 Spacer(minLength: 8)
                                 Image(systemName: "chevron.right")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .scaledSymbolFont(size: 11, weight: .semibold)
                                     .foregroundStyle(.tertiary)
-                                    .padding(.top, 4)
+                                    .scaledPadding(.top, 4)
                             }
                             .contentShape(.rect)
-                            .padding(.vertical, 8)
+                            .scaledPadding(.vertical, 8)
                         }
                         .buttonStyle(.plain)
                     }
@@ -1126,32 +1153,33 @@ private struct BrokenAccountsCard: View {
 /// The accounts at a glance. Clicking through lands on the same detail view
 /// the account list leads to.
 private struct AccountsOverviewCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         DashboardCard(title: L("Mail Accounts")) {
             VStack(spacing: 0) {
                 ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
-                    if index > 0 { Divider().padding(.leading, 38) }
+                    if index > 0 { Divider().scaledPadding(.leading, 38) }
                     Button {
                         model.openAccount(id: account.id)
                     } label: {
-                        HStack(spacing: 10) {
+                        HStack(spacing: 10 * textScale) {
                             MailBadge(size: 26)
-                            Text(account.name).font(.body)
+                            Text(account.name).scaledFont(.body)
                             Spacer(minLength: 8)
                             Text(account.email)
-                                .font(.subheadline)
+                                .scaledFont(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             CredentialStatusDot(state: account.connectionState)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
+                                .scaledSymbolFont(size: 11, weight: .semibold)
                                 .foregroundStyle(.tertiary)
                         }
                         .contentShape(.rect)
-                        .padding(.vertical, 8)
+                        .scaledPadding(.vertical, 8)
                     }
                     .buttonStyle(.plain)
                 }
@@ -1163,45 +1191,46 @@ private struct AccountsOverviewCard: View {
 /// A glance at what assistants have been doing, with the full story one click
 /// away in the log.
 private struct RecentActivityCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         DashboardCard(title: L("Recent Activity")) {
             if model.audit.isEmpty {
                 Text(L("No activity yet. It appears here the moment an assistant does something."))
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 7)
+                    .scaledPadding(.vertical, 7)
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(model.audit.suffix(4).reversed().enumerated()), id: \.element.id) { index, entry in
                         if index > 0 { Divider() }
-                        HStack(spacing: 10) {
+                        HStack(spacing: 10 * textScale) {
                             Text(entry.time)
-                                .font(.caption)
+                                .scaledFont(.caption)
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                             Text(entry.client)
                             Text(auditEventLabel(entry.event))
-                                .font(.subheadline)
+                                .scaledFont(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .layoutPriority(1)
                             if !entry.detail.isEmpty {
                                 Text(entry.detail)
-                                    .font(.caption)
+                                    .scaledFont(.caption)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
                             Spacer(minLength: 8)
                             Text(auditResultLabel(entry.result))
-                                .font(.caption)
+                                .scaledFont(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 7)
+                        .scaledPadding(.vertical, 7)
                     }
                 }
             }
@@ -1210,7 +1239,7 @@ private struct RecentActivityCard: View {
                 model.selectedSidebarItem = .log
             }
             .buttonStyle(.plain)
-            .font(.subheadline)
+            .scaledFont(.subheadline)
             .foregroundStyle(Color.torroRed)
         }
     }
@@ -1219,11 +1248,12 @@ private struct RecentActivityCard: View {
 /// Shown instead of the status cards while there is nothing to show a status
 /// for. Explains the app and offers the single next step.
 private struct GettingStartedCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         DashboardCard(title: L("Getting started")) {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 14 * textScale) {
                 StepRow(
                     number: 1,
                     title: L("Add a mail account"),
@@ -1249,22 +1279,23 @@ private struct GettingStartedCard: View {
 }
 
 private struct StepRow: View {
+    @Environment(\.textScale) private var textScale
     var number: Int
     var title: String
     var detail: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 10 * textScale) {
             Text(number.formatted())
-                .font(.caption.bold())
+                .scaledFont(.caption, weight: .bold)
                 .monospacedDigit()
                 .foregroundStyle(.white)
-                .frame(width: 18, height: 18)
+                .frame(width: 18 * textScale, height: 18 * textScale)
                 .background(Color.torroRed, in: Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.headline)
+            VStack(alignment: .leading, spacing: 1 * textScale) {
+                Text(title).scaledFont(.headline)
                 Text(detail)
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1274,6 +1305,7 @@ private struct StepRow: View {
 }
 
 private struct NewsCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
@@ -1281,33 +1313,33 @@ private struct NewsCard: View {
             DashboardCard(title: L("News from Torro")) {
                 VStack(spacing: 0) {
                     ForEach(Array(model.news.enumerated()), id: \.element.id) { index, item in
-                        if index > 0 { Divider().padding(.leading, 34) }
-                        HStack(alignment: .top, spacing: 10) {
+                        if index > 0 { Divider().scaledPadding(.leading, 34) }
+                        HStack(alignment: .top, spacing: 10 * textScale) {
                             Image(systemName: item.symbol)
-                                .font(.system(size: 13))
+                                .scaledSymbolFont(size: 13)
                                 .foregroundStyle(Color.torroRed)
-                                .frame(width: 24, height: 24)
+                                .frame(width: 24 * textScale, height: 24 * textScale)
                                 .background(Color.torroRed.opacity(0.12), in: Circle())
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 6) {
-                                    Text(item.title).font(.headline)
+                            VStack(alignment: .leading, spacing: 1 * textScale) {
+                                HStack(spacing: 6 * textScale) {
+                                    Text(item.title).scaledFont(.headline)
                                     if item.isNew {
                                         Text(L("New"))
-                                            .font(.caption2.bold())
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 1)
+                                            .scaledFont(.caption2, weight: .bold)
+                                            .scaledPadding(.horizontal, 5)
+                                            .scaledPadding(.vertical, 1)
                                             .background(Color.torroRed, in: Capsule())
                                             .foregroundStyle(.white)
                                     }
                                 }
                                 Text(item.detail)
-                                    .font(.subheadline)
+                                    .scaledFont(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 0)
                         }
-                        .padding(.vertical, 9)
+                        .scaledPadding(.vertical, 9)
                     }
                 }
             }
@@ -1317,16 +1349,17 @@ private struct NewsCard: View {
 
 /// A titled panel on the shared card surface.
 private struct DashboardCard<Content: View, Accessory: View>: View {
+    @Environment(\.textScale) private var textScale
     var title: String
     var footer: String?
     @ViewBuilder var content: Content
     @ViewBuilder var accessory: Accessory
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * textScale) {
             HStack {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .scaledFont(.subheadline, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Spacer()
                 accessory
@@ -1334,15 +1367,15 @@ private struct DashboardCard<Content: View, Accessory: View>: View {
             VStack(alignment: .leading, spacing: 0) {
                 content
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 4)
+            .scaledPadding(.horizontal, 14)
+            .scaledPadding(.vertical, 4)
             .torroCard()
 
             if let footer {
                 Text(footer)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 2)
+                    .scaledPadding(.horizontal, 2)
             }
         }
     }
@@ -1355,13 +1388,14 @@ extension DashboardCard where Accessory == EmptyView {
 }
 
 private struct AccountListView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 10) {
+            LazyVStack(spacing: 10 * textScale) {
                 MCPServerStatusCard()
-                    .padding(.bottom, 6)
+                    .scaledPadding(.bottom, 6)
                 ForEach(model.accounts) { account in
                     NavigationLink(value: account.id) {
                         AccountCard(account: account)
@@ -1369,8 +1403,8 @@ private struct AccountListView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .top)
+            .scaledPadding(20)
+            .readableContentWidth()
             .frame(maxWidth: .infinity)
         }
         .background(.background.secondary)
@@ -1389,19 +1423,20 @@ private struct AccountListView: View {
 }
 
 private struct AccountCard: View {
+    @Environment(\.textScale) private var textScale
     var account: MailAccount
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 12 * textScale) {
             MailBadge()
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 1 * textScale) {
                 Text(account.name)
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .lineLimit(1)
                 Text(account.email)
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1411,10 +1446,10 @@ private struct AccountCard: View {
 
             if !account.pendingActions.isEmpty {
                 Text(account.pendingActions.count.formatted())
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .monospacedDigit()
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
+                    .scaledPadding(.horizontal, 7)
+                    .scaledPadding(.vertical, 2)
                     .background(.tint, in: Capsule())
                     .foregroundStyle(.white)
             }
@@ -1422,11 +1457,11 @@ private struct AccountCard: View {
             CredentialStatusDot(state: account.connectionState)
 
             Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSymbolFont(size: 12, weight: .semibold)
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .scaledPadding(.horizontal, 14)
+        .scaledPadding(.vertical, 11)
         .torroCard(isHighlighted: isHovering)
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovering)
@@ -1435,15 +1470,16 @@ private struct AccountCard: View {
 
 /// The red envelope tile that stands for a mail account.
 private struct MailBadge: View {
+    @Environment(\.textScale) private var textScale
     var size: CGFloat = 34
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+        RoundedRectangle(cornerRadius: size * textScale * 0.24, style: .continuous)
             .fill(Color.torroRed.gradient)
-            .frame(width: size, height: size)
+            .frame(width: size * textScale, height: size * textScale)
             .overlay {
                 Image(systemName: "envelope.fill")
-                    .font(.system(size: size * 0.41, weight: .semibold))
+                    .scaledSymbolFont(size: size * 0.41, weight: .semibold)
                     .foregroundStyle(.white)
             }
             .shadow(color: .black.opacity(0.2), radius: 1.5, y: 1)
@@ -1453,12 +1489,13 @@ private struct MailBadge: View {
 /// Green when the credentials are known good, red when they are broken,
 /// orange while the connection has not been verified yet.
 private struct CredentialStatusDot: View {
+    @Environment(\.textScale) private var textScale
     var state: ConnectionState
 
     var body: some View {
         Circle()
             .fill(color)
-            .frame(width: 9, height: 9)
+            .frame(width: 9 * textScale, height: 9 * textScale)
             .help(helpText)
             .accessibilityLabel(helpText)
     }
@@ -1479,6 +1516,7 @@ private struct CredentialStatusDot: View {
 }
 
 private struct AccountDetailView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     @Binding var account: MailAccount
     // Held only for the moment of saving; the keychain is the home.
@@ -1598,11 +1636,11 @@ private struct AccountDetailView: View {
             // line: a rejected credential brings the server's own sentence
             // with it, which wraps to two or three lines here.
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 3 * textScale) {
                     ConnectionStatusBadge(state: account.connectionState)
                     if let lastChecked {
                         Text(lastChecked)
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -1717,10 +1755,10 @@ private struct AccountDetailView: View {
             }
         } header: {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 2 * textScale) {
                     Text(L("Permissions"))
                     Text(L("What connected assistants may do with this account."))
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1737,29 +1775,29 @@ private struct AccountDetailView: View {
         subtitle: String,
         @ViewBuilder trailing: () -> some View
     ) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 12 * textScale) {
             Image(systemName: icon)
-                .font(.system(size: 15))
+                .scaledSymbolFont(size: 15)
                 .foregroundStyle(.secondary)
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 1) {
+                .frame(width: 20 * textScale)
+            VStack(alignment: .leading, spacing: 1 * textScale) {
                 Text(title)
                 Text(subtitle)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             trailing()
         }
-        .padding(.vertical, 2)
+        .scaledPadding(.vertical, 2)
     }
 
     /// A sub-right beneath its group, indented to the group's text column,
     /// with an optional muted annotation after the name.
     private func subToggle(_ title: String, annotation: String? = nil, isOn: Binding<Bool>) -> some View {
         Toggle(isOn: isOn) {
-            HStack(spacing: 4) {
+            HStack(spacing: 4 * textScale) {
                 Text(title)
                 if let annotation {
                     Text(verbatim: "– \(annotation)")
@@ -1767,7 +1805,7 @@ private struct AccountDetailView: View {
                 }
             }
         }
-        .padding(.leading, 32)
+        .scaledPadding(.leading, 32)
     }
 
     private var readSummary: String {
@@ -1791,18 +1829,18 @@ private struct AccountDetailView: View {
 
     private var foldersSection: some View {
         Section {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 12 * textScale) {
+                VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L("Per-folder permissions"))
                     Text(L("Off: all folders use the permissions above."))
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Toggle(L("Per-folder permissions"), isOn: $account.permissions.perFolder)
                     .labelsHidden()
             }
-            .padding(.vertical, 2)
+            .scaledPadding(.vertical, 2)
             if account.permissions.perFolder {
                 folderColumnHeader
                 standardFolderRow
@@ -1823,11 +1861,11 @@ private struct AccountDetailView: View {
         HStack {
             Text(L("Folder"))
             Spacer()
-            Text(L("Read")).frame(width: 64)
-            Text(L("Write")).frame(width: 64)
-            Color.clear.frame(width: 74, height: 1)
+            Text(L("Read")).frame(width: 64 * textScale)
+            Text(L("Write")).frame(width: 64 * textScale)
+            Color.clear.frame(width: 74 * textScale, height: 1)
         }
-        .font(.caption)
+        .scaledFont(.caption)
         .foregroundStyle(.secondary)
     }
 
@@ -1843,14 +1881,14 @@ private struct AccountDetailView: View {
             Spacer()
             standardMark(account.permissions.read != .none)
             standardMark(!account.permissions.write.isEmpty)
-            Color.clear.frame(width: 74, height: 1)
+            Color.clear.frame(width: 74 * textScale, height: 1)
         }
     }
 
     private func standardMark(_ allowed: Bool) -> some View {
         Image(systemName: allowed ? "checkmark" : "minus")
             .foregroundStyle(allowed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-            .frame(width: 64)
+            .frame(width: 64 * textScale)
     }
 
     private func folderRow(_ name: String) -> some View {
@@ -1858,11 +1896,11 @@ private struct AccountDetailView: View {
         let accessible = account.permissions.canAccess(name)
         return HStack {
             Label {
-                HStack(spacing: 4) {
+                HStack(spacing: 4 * textScale) {
                     Text(name)
                     if !accessible {
                         Text(verbatim: "· \(L("no access"))")
-                            .font(.caption)
+                            .scaledFont(.caption)
                     }
                 }
             } icon: {
@@ -1887,15 +1925,15 @@ private struct AccountDetailView: View {
                     folderChip(L("Standard"), prominent: false)
                 }
             }
-            .frame(width: 74, alignment: .trailing)
+            .frame(width: 74 * textScale, alignment: .trailing)
         }
     }
 
     private func folderChip(_ text: String, prominent: Bool) -> some View {
         Text(text)
-            .font(.caption2)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
+            .scaledFont(.caption2)
+            .scaledPadding(.horizontal, 7)
+            .scaledPadding(.vertical, 2)
             .background(
                 prominent ? Color.orange.opacity(0.16) : Color.primary.opacity(0.06),
                 in: Capsule()
@@ -1909,7 +1947,7 @@ private struct AccountDetailView: View {
             .toggleStyle(.checkbox)
             .labelsHidden()
             .disabled(!enabled)
-            .frame(width: 64)
+            .frame(width: 64 * textScale)
     }
 
     private var readEnabled: Binding<Bool> {
@@ -1990,7 +2028,7 @@ private struct AccountDetailView: View {
                         label(for: effectiveCacheLevel)
                     )
                 )
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
             }
             if account.searchCache.level != .off {
@@ -2013,7 +2051,7 @@ private struct AccountDetailView: View {
             }
             if let failure = rebuildFailure {
                 Text(failure)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.red)
             }
         } header: {
@@ -2099,16 +2137,16 @@ private struct AccountDetailView: View {
         Section {
             ForEach(account.pendingActions) { action in
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 2 * textScale) {
                         Text(action.subject)
                             .fontWeight(.medium)
                         Text(verbatim: "\(action.toolCall) → \(action.recipient)")
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Text(action.expiresIn)
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     Button(L("Reject"), role: .destructive) {}
@@ -2116,7 +2154,7 @@ private struct AccountDetailView: View {
                     Button(L("Approve")) {}
                         .torroButton()
                 }
-                .padding(.vertical, 2)
+                .scaledPadding(.vertical, 2)
             }
         } header: {
             Text(L("Pending Actions"))
@@ -2133,15 +2171,16 @@ private struct AccountDetailView: View {
 /// Shared with the setup wizard: the same control in both places, so the
 /// choice made during setup is the one the user finds again later.
 struct PresetChips: View {
+    @Environment(\.textScale) private var textScale
     @Binding var permissions: PermissionSet
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 2 * textScale) {
             ForEach(PermissionPreset.allCases) { preset in
                 chip(preset)
             }
         }
-        .padding(2)
+        .scaledPadding(2)
         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
@@ -2151,9 +2190,9 @@ struct PresetChips: View {
             permissions.apply(preset)
         } label: {
             Text(label(for: preset))
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+                .scaledFont(.caption)
+                .scaledPadding(.horizontal, 8)
+                .scaledPadding(.vertical, 3)
                 .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .background {
                     if isActive {
@@ -2172,6 +2211,7 @@ struct PresetChips: View {
 }
 
 private struct ConnectionStatusBadge: View {
+    @Environment(\.textScale) private var textScale
     var state: ConnectionState
 
     /// For a failure the badge's text *is* the reason, and those reasons are no
@@ -2184,11 +2224,11 @@ private struct ConnectionStatusBadge: View {
     /// the text wraps here on its own, but it stops the row's other content
     /// from ever compressing it into a truncated line.
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .top, spacing: 6 * textScale) {
             Circle()
                 .fill(color)
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
+                .frame(width: 8 * textScale, height: 8 * textScale)
+                .scaledPadding(.top, 5)
             Text(text)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2219,6 +2259,8 @@ private struct SettingsView: View {
 
     var body: some View {
         Form {
+            TextSizeSection()
+
             Section {
                 Toggle(L("Start at login"), isOn: $model.generalSettings.launchAtLogin)
             } footer: {
@@ -2266,6 +2308,7 @@ private struct SettingsView: View {
 /// that TorroMail can update itself, and the pane answers the only two
 /// questions worth asking — which version am I on, and is there a newer one.
 private struct UpdatesView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var updaterController: UpdaterController
 
     var body: some View {
@@ -2284,7 +2327,7 @@ private struct UpdatesView: View {
                 .disabled(!updaterController.isAvailable)
 
                 if updaterController.isAvailable {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 4 * textScale) {
                         Text(L("Last checked:"))
                         if let date = updaterController.lastUpdateCheckDate {
                             Text(date, format: .dateTime.day().month().year().hour().minute())
@@ -2292,7 +2335,7 @@ private struct UpdatesView: View {
                             Text(L("Never"))
                         }
                     }
-                    .font(.callout)
+                    .scaledFont(.callout)
                     .foregroundStyle(.secondary)
                 }
             } header: {
@@ -2306,12 +2349,12 @@ private struct UpdatesView: View {
             }
 
             Section {
-                HStack(spacing: 4) {
+                HStack(spacing: 4 * textScale) {
                     Text(L("Installed version:"))
                     Text(Self.installedVersion)
                         .monospacedDigit()
                 }
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.secondary)
             }
         }
@@ -2327,6 +2370,7 @@ private struct UpdatesView: View {
 
 private struct LogView: View {
     @EnvironmentObject private var model: TorroMailModel
+    @Environment(\.textScale) private var textScale
     // Newest first by default. Ordering keys off the real timestamp, never the
     // rendered `time` string (which is not orderable across days); clicking any
     // header re-sorts by that column.
@@ -2334,14 +2378,20 @@ private struct LogView: View {
 
     var body: some View {
         Table(model.audit.sorted(using: sortOrder), sortOrder: $sortOrder) {
-            TableColumn(L("Time"), value: \.timestamp) { Text($0.time).monospacedDigit() }
-            TableColumn(L("Client"), value: \.client) { Text($0.client) }
-            TableColumn(L("Account"), value: \.account) { Text($0.account) }
-            TableColumn(L("Event"), value: \.event) { Text(auditEventLabel($0.event)) }
+            TableColumn(L("Time"), value: \.timestamp) { cell($0.time).monospacedDigit() }
+                .width(min: 90 * textScale, ideal: 105 * textScale)
+            TableColumn(L("Client"), value: \.client) { cell($0.client) }
+                .width(min: 95 * textScale, ideal: 110 * textScale)
+            TableColumn(L("Account"), value: \.account) { cell($0.account) }
+                .width(min: 100 * textScale, ideal: 115 * textScale)
+            TableColumn(L("Event"), value: \.event) { cell(auditEventLabel($0.event)) }
+                .width(min: 130 * textScale, ideal: 145 * textScale)
             TableColumn(L("Details"), value: \.detail) { entry in
-                Text(entry.detail).textSelection(.enabled)
+                cell(entry.detail).textSelection(.enabled)
             }
-            TableColumn(L("Result"), value: \.result) { Text(auditResultLabel($0.result)) }
+                .width(min: 150 * textScale, ideal: 220 * textScale)
+            TableColumn(L("Result"), value: \.result) { cell(auditResultLabel($0.result)) }
+                .width(min: 70 * textScale, ideal: 80 * textScale)
         }
         .overlay {
             if model.audit.isEmpty {
@@ -2361,12 +2411,21 @@ private struct LogView: View {
             .tint(nil)
         }
     }
+
+    private func cell(_ value: String) -> some View {
+        Text(value)
+            .scaledFont(.body)
+            .lineLimit(1)
+            .frame(minHeight: 22 * textScale, alignment: .leading)
+            .help(value)
+    }
 }
 
 /// Where the app says which version it is, and where to go when something is
 /// wrong. Built like TorroWhisper's help page so the two apps answer "what am
 /// I running?" in the same place and the same words.
 private struct HelpView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
 
     /// The repository is the whole support surface: releases, docs, issues.
@@ -2375,20 +2434,20 @@ private struct HelpView: View {
     var body: some View {
         Form {
             Section {
-                HStack(spacing: 12) {
+                HStack(spacing: 12 * textScale) {
                     AppIconTile(size: 40)
 
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 2 * textScale) {
                         Text(verbatim: "TorroMail")
-                            .font(.title3.weight(.semibold))
+                            .scaledFont(.title3, weight: .semibold)
                         Text(L("Your mailboxes for AI assistants"))
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer(minLength: 0)
                 }
-                .padding(.vertical, 2)
+                .scaledPadding(.vertical, 2)
 
                 LabeledContent(L("Version")) {
                     Text(verbatim: appVersion).monospacedDigit().textSelection(.enabled)
@@ -2465,6 +2524,7 @@ private struct HelpView: View {
 /// than a redrawn lookalike, so it cannot drift from what the Dock shows. The
 /// red signet stands in while running unbundled, where there is no icon.
 private struct AppIconTile: View {
+    @Environment(\.textScale) private var textScale
     var size: CGFloat = 40
 
     var body: some View {
@@ -2483,11 +2543,11 @@ private struct AppIconTile: View {
                     .overlay {
                         TorroSignet()
                             .fill(.white)
-                            .frame(width: size * 0.62, height: size * 0.35)
+                            .frame(width: size * textScale * 0.62, height: size * textScale * 0.35)
                     }
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: size * textScale, height: size * textScale)
         .accessibilityHidden(true)
     }
 }
