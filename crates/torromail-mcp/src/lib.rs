@@ -123,7 +123,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"result_set_id":{"type":"string"},"refinement":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["result_set_id","refinement"]}"#
             }
             ToolName::MailGetMessage => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"include_body":{"type":"boolean"}},"required":["account_id","message_id"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"include_body":{"type":"boolean"},"include_headers":{"type":"boolean","description":"Include all top-level message headers in original order, including repeated fields. Requires the 'Message and attachments' read level."}},"required":["account_id","message_id"]}"#
             }
             ToolName::MailGetAttachment => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_id":{"type":"string"},"attachment_id":{"type":"string","description":"From the attachments list of mail_get_message."},"include_content":{"type":"boolean","description":"Also inline the bytes as base64 when the file is 2 MiB or smaller."}},"required":["account_id","message_id","attachment_id"]}"#
@@ -1363,6 +1363,11 @@ impl LineMcpServer {
         id: &Value,
     ) -> Option<String> {
         let message_id = arguments["message_id"].as_str().unwrap_or_default();
+        // Complete RFC 5322 headers are deliberately not held in the search
+        // cache; a header request must be answered by the live provider.
+        if arguments["include_headers"].as_bool().unwrap_or(false) {
+            return None;
+        }
         let include_body = arguments["include_body"].as_bool().unwrap_or(false);
         let (mailbox, uid) = split_imap_id(message_id)?;
         let (store, _level) = self.cache_context(account_id)?;
@@ -2367,6 +2372,7 @@ fn handle_mail_get_message(
 ) -> ToolResult {
     let message_id = arguments["message_id"].as_str().unwrap_or_default();
     let include_body = arguments["include_body"].as_bool().unwrap_or(false);
+    let include_headers = arguments["include_headers"].as_bool().unwrap_or(false);
 
     // The generation is asked while the provider is still free — the service
     // below borrows it for the fetch.
@@ -2393,7 +2399,17 @@ fn handle_mail_get_message(
             include_body,
         );
     }
-    Ok(message_json(&message, download_allowed))
+    let mut payload = message_json(&message, download_allowed);
+    if include_headers {
+        let fields = service
+            .get_headers(account_id, message_id)
+            .map_err(ToolFailure::Core)?;
+        payload["headers"] = json!(fields
+            .iter()
+            .map(|field| json!({"name": field.name, "value": field.value}))
+            .collect::<Vec<_>>());
+    }
+    Ok(payload)
 }
 
 /// Keep what a read fetched anyway, as deep as the level allows. Best-effort
@@ -3390,7 +3406,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
         ),
         read(
             ToolName::MailGetMessage,
-            "Fetch one message according to the account policy.",
+            "Fetch one message according to the account policy. Optionally include all top-level headers with the 'Message and attachments' read level.",
         ),
         read(
             ToolName::MailGetAttachment,

@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::{
-    AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider, MarkChange, SearchHit,
-    SearchWindow, StoredMessage,
+    AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider, MarkChange, MessageHeader,
+    MessageHeaders, SearchHit, SearchWindow, StoredMessage,
 };
 
 /// A pointer to a credential in the platform keychain — never the
@@ -588,6 +588,24 @@ impl<T: ImapTransport> ImapClient<T> {
         })
     }
 
+    /// Fetch the entire top-level header block only when explicitly asked.
+    /// BODY.PEEK leaves the message's Seen flag alone.
+    pub fn uid_fetch_headers(&mut self, mailbox: &str, uid: u32) -> CoreResult<Vec<MessageHeader>> {
+        self.select(mailbox)?;
+        let lines = self.command(&format!("UID FETCH {uid} (UID BODY.PEEK[HEADER])"))?;
+        let fetch = lines
+            .iter()
+            .find(|line| parse_fetch_uid(&line.text) == Some(uid))
+            .ok_or_else(|| {
+                CoreError::ProviderFailure(format!("no FETCH response for uid {uid}"))
+            })?;
+        let bytes = fetch
+            .literals
+            .first()
+            .ok_or_else(|| CoreError::ProviderFailure(format!("no header block for uid {uid}")))?;
+        Ok(parse_message_headers(&String::from_utf8_lossy(bytes)))
+    }
+
     /// Just the headers a search hit shows — no `BODY[TEXT]`, so a search over
     /// many mailboxes stops pulling every match in full.
     pub fn uid_fetch_summary(&mut self, mailbox: &str, uid: u32) -> CoreResult<FetchedSummary> {
@@ -959,6 +977,16 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         Ok(message)
     }
 
+    fn get_headers(&self, account_id: &AccountId, message_id: &str) -> CoreResult<MessageHeaders> {
+        self.guard(account_id)?;
+        let (mailbox, uid) = self.split_message_id(message_id)?;
+        let fields = self.client.borrow_mut().uid_fetch_headers(mailbox, uid)?;
+        Ok(MessageHeaders {
+            mailbox: mailbox.to_owned(),
+            fields,
+        })
+    }
+
     fn mailbox_generation(&self, account_id: &AccountId, mailbox: &str) -> Option<u32> {
         if self.guard(account_id).is_err() {
             return None;
@@ -1301,6 +1329,36 @@ fn header_field(headers: &str, name: &str) -> Option<String> {
         return Some(decode_encoded_words(&value));
     }
     None
+}
+
+/// Preserve field order, duplicates, original names and folded value lines.
+/// Only the separator whitespace after ':' is removed; continuation lines
+/// remain exactly as delivered (apart from UTF-8 replacement for invalid
+/// bytes in the IMAP literal).
+fn parse_message_headers(block: &str) -> Vec<MessageHeader> {
+    let mut fields: Vec<MessageHeader> = Vec::new();
+    for raw_line in block.split_terminator('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with([' ', '\t']) {
+            if let Some(last) = fields.last_mut() {
+                last.value.push_str("\r\n");
+                last.value.push_str(line);
+            }
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if !name.is_empty() && !name.contains(char::is_whitespace) {
+                fields.push(MessageHeader {
+                    name: name.to_owned(),
+                    value: value.trim_start_matches([' ', '\t']).to_owned(),
+                });
+            }
+        }
+    }
+    fields
 }
 
 /// RFC 2047 encoded-words to text.

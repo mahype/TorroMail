@@ -561,6 +561,54 @@ fn plain_headers_are_left_exactly_as_they_are() {
 }
 
 #[test]
+fn full_headers_keep_order_duplicates_and_folding_without_marking_seen() {
+    let headers = concat!(
+        "Return-Path: <bounce@example.com>\r\n",
+        "Received: from first.example\r\n\tby recipient.example\r\n",
+        "Authentication-Results: recipient.example; dkim=pass; spf=pass\r\n",
+        "Received: from second.example\r\n",
+        "List-Unsubscribe: <mailto:leave@example.com>\r\n",
+        "\r\n"
+    );
+    let mut script = login_script();
+    script.extend([line("* 1 EXISTS"), line("t2 OK SELECT completed")]);
+    script.extend([
+        line(&format!(
+            "* 1 FETCH (UID 101 BODY[HEADER] {{{}}}",
+            headers.len()
+        )),
+        Incoming::Bytes(headers.as_bytes().to_vec()),
+        line(")"),
+        line("t3 OK FETCH completed"),
+    ]);
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let provider = ImapMailProvider::new(AccountId::new("work"), client);
+    let result = provider
+        .get_headers(&AccountId::new("work"), "INBOX/101")
+        .expect("header fetch succeeds");
+
+    assert_eq!(result.mailbox, "INBOX");
+    assert_eq!(result.fields.len(), 5);
+    assert_eq!(result.fields[0].name, "Return-Path");
+    assert_eq!(result.fields[1].name, "Received");
+    assert_eq!(
+        result.fields[1].value,
+        "from first.example\r\n\tby recipient.example"
+    );
+    assert_eq!(result.fields[2].name, "Authentication-Results");
+    assert_eq!(result.fields[3].name, "Received");
+    assert_eq!(result.fields[3].value, "from second.example");
+    assert_eq!(result.fields[4].name, "List-Unsubscribe");
+    assert_eq!(log.lines()[2], "t3 UID FETCH 101 (UID BODY.PEEK[HEADER])");
+}
+
+#[test]
 fn an_empty_query_asks_the_server_for_everything_newest_first() {
     let mut script = login_script();
     script.extend([

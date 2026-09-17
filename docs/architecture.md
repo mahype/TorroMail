@@ -232,6 +232,13 @@ most 20 attachments, and the finished MIME message may contain at most 20 MiB.
 
 ## Incoming Attachments
 
+`mail_get_message` accepts `include_headers: true` to fetch every top-level
+message header as an ordered `headers` array of `{ "name", "value" }` pairs.
+Repeated fields (including `Received`) and folded value lines are preserved.
+The array is absent by default and requires the "Message and attachments"
+read level, including any mailbox-specific restriction. Full headers are read
+live on demand and are not retained in the search cache.
+
 `mail_get_message` lists a message's attachments (id, filename, media type,
 decoded size, inline flag) from the "Full message" read level; the bytes need
 "Message and attachments". `mail_get_attachment` writes the decoded file to
