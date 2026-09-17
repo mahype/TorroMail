@@ -3212,13 +3212,6 @@ extension TorroMailModel {
     static func releaseNotes() -> [NewsItem] {
         [
             NewsItem(
-                id: "news-oauth",
-                title: "Gmail und Microsoft 365 ohne Passwort",
-                detail: "Die Einrichtung findet den Anbieter selbst und meldet dich per OAuth direkt bei ihm an.",
-                symbol: "key.fill",
-                isNew: true
-            ),
-            NewsItem(
                 id: "product-whisper",
                 title: "TorroWhisper",
                 detail: "Diktieren in jedem Programm, lokal auf deinem Mac.",
@@ -3308,13 +3301,6 @@ extension TorroMailModel {
             ],
             connectedClients: ["Claude Desktop"],
             news: [
-                NewsItem(
-                    id: "news-oauth",
-                    title: "Gmail und Microsoft 365 ohne Passwort",
-                    detail: "Konten lassen sich jetzt per OAuth anmelden — kein App-Passwort mehr nötig.",
-                    symbol: "key.fill",
-                    isNew: true
-                ),
                 NewsItem(
                     id: "product-whisper",
                     title: "TorroWhisper",
