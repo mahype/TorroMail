@@ -845,6 +845,10 @@ pub struct SearchResultSet {
 }
 
 impl SearchResultSet {
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

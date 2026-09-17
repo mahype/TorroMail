@@ -334,11 +334,13 @@ public enum MCPClientKeyStore {
         public let clientID: String
         public let name: String
         public let tokenSHA256: String
+        public let accountAccess: ClientAccountAccess
 
-        public init(clientID: String, name: String, tokenSHA256: String) {
+        public init(clientID: String, name: String, tokenSHA256: String, accountAccess: ClientAccountAccess = .all) {
             self.clientID = clientID
             self.name = name
             self.tokenSHA256 = tokenSHA256
+            self.accountAccess = accountAccess
         }
     }
 
@@ -1898,7 +1900,8 @@ public enum PolicyDocument {
                 [
                     "id": pairing.clientID,
                     "name": pairing.name,
-                    "token_sha256": pairing.tokenSHA256
+                    "token_sha256": pairing.tokenSHA256,
+                    "account_access": pairing.accountAccess.policyObject
                 ]
             }
         ]

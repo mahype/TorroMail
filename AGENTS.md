@@ -173,6 +173,17 @@ assistant can relay. A document *without* a `clients` key (pre-pairing or
 hand-managed) enforces nothing; the app always publishes one. `--check-account`
 sits behind the same gate — the app presents its own key (`torromail-app`).
 
+Client settings expose **Shared accounts** / **Freigegebene Konten**: all
+accounts (including future additions), or an explicit, possibly empty selection.
+Selections may overlap. `client-account-access.json` persists choices separately
+from keys; `clients[].account_access` publishes `{"mode":"all"}` or
+`{"mode":"selected","account_ids":[...]}`. Existing pairings migrate to all;
+new clients start with none. The app's own pairing retains all accounts. Legacy
+policy entries without `account_access` retain all, but malformed values fail
+closed. The server filters accounts before metadata, cache or connection access
+and rechecks grants for search refinement and prepared-action execution. No
+client restart is required for grant changes. Account permissions still apply.
+
 Keychain items are scoped to the signing Team ID when they are created, and an
 existing item is refreshed in place, which leaves its access list alone. An item
 an older build wrote therefore stays unreadable, and the process disables the

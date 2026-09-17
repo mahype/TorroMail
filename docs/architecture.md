@@ -125,6 +125,45 @@ the UI applies immediately. A corrupt document fails closed, accounts missing
 from it are refused, and only when no document exists yet does the server fall
 back to the product default (read and drafts).
 
+## Shared Accounts Per Client
+
+The client settings expose **Shared accounts** (German: **Freigegebene
+Konten**): **All accounts** includes accounts added later; **Selected accounts**
+is an explicit set of account IDs. Selections may overlap between clients, and
+an empty selection grants no access. Account read, write and send permissions
+still apply on top of these grants.
+
+The app persists the choices in `client-account-access.json` beside the policy
+document, independently of access keys, so reconnecting or renewing a key
+preserves the selection. On the first migration, existing readable client
+pairings receive all accounts. New clients start with an empty selection.
+The app's own pairing retains all accounts for setup and connection checks.
+Malformed sharing settings are reported rather than replaced with all access.
+
+Each published client carries one of these explicit policy fields:
+
+```json
+{"account_access": {"mode": "all"}}
+```
+
+```json
+{"account_access": {"mode": "selected", "account_ids": ["work", "shared"]}}
+```
+
+A legacy client entry without `account_access` retains all accounts. A present
+but invalid value fails closed; `null` does not mean all accounts. Pairing
+itself remains unchanged, including support for hand-managed documents without
+`clients`.
+
+The server identifies the client by its token hash and filters accounts before
+metadata, cache, credentials or connection access. `mail_list_accounts` and
+aggregate cache status show only shared accounts. Requests for unshared IDs
+receive the same account-not-found error as unknown IDs. Every subsequent tool
+call reads current grants, including cached reads, pooled connections, search
+refinement and execution of prepared actions. Account checks, cache rebuilds
+and startup health sweeps use the same filter. Changing account sharing needs
+no client restart. It does not retract content already returned to a client.
+
 ## Search And Cache
 
 Each account has one cache decision, spoken in the language of the read

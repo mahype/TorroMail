@@ -470,7 +470,9 @@ func publishPolicyDocument(for accounts: [MailAccount]) {
         // the supervised instance) — minting here keeps it on every
         // allowlist this document will ever carry.
         _ = try MCPClientKeyStore.appToken()
-        try PolicyDocument.publish(accounts: accounts, clients: MCPClientKeyStore.pairings())
+        let pairings = MCPClientKeyStore.pairings()
+        let grants = try ClientAccountAccessStore.load(legacyClientIDs: pairings.map(\.clientID))
+        try PolicyDocument.publish(accounts: accounts, clients: ClientAccountAccessStore.applying(grants, to: pairings))
     } catch {
         NSLog("TorroMail: policy document write failed: %@", error.localizedDescription)
     }

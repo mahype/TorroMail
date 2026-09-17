@@ -260,6 +260,7 @@ struct MCPClientDetailView: View {
     var body: some View {
         Form {
             restartSection
+            ClientAccountAccessSection(clientID: descriptor.id)
             switch descriptor.kind {
             case .automatic:
                 connectionSection
@@ -667,6 +668,7 @@ struct MCPClientDetailView: View {
             // Key first, config second, allowlist last: the moment the
             // client restarts and presents the key, the document already
             // admits it.
+            _ = try ClientAccountAccessStore.load(legacyClientIDs: MCPClientKeyStore.pairings().map(\.clientID))
             let previousKey = MCPClientKeyStore.token(forClient: descriptor.id)
             let token = try MCPClientKeyStore.tokenCreatingIfNeeded(forClient: descriptor.id)
             try MCPClientSetup.add(to: client, commandPath: commandPath, token: token)
@@ -741,6 +743,15 @@ struct MCPClientDetailView: View {
         guard let commandPath = MCPClientSetup.serverCommandPath(
             executableName: model.generalSettings.mcpExecutable
         ) else {
+            realSnippet = nil
+            maskedSnippet = nil
+            return
+        }
+        do {
+            // Migrate existing pairings before this view can mint a new key.
+            _ = try ClientAccountAccessStore.load(legacyClientIDs: MCPClientKeyStore.pairings().map(\.clientID))
+        } catch {
+            note = L("Could not apply account sharing. Please try again.")
             realSnippet = nil
             maskedSnippet = nil
             return
