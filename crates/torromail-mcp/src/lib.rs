@@ -19,14 +19,15 @@ use torromail_core::{
     AccountId, AttachmentInfo, CacheLevel, Capability, CoreError, CoreResult, FixtureMailProvider,
     ImapAuth, ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
     PermissionSet, Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow,
-    StoredMessage, effective_cache_level,
+    SpecialMailboxRole, StoredMessage, effective_cache_level,
 };
 use torromail_oauth::TokenSet;
 
 // `health` itself is this file's own module, already in scope.
 use crate::health::{HealthOutcome, HealthThrottle};
 use crate::policy_document::{
-    DocumentAccount, DocumentClient, OAuthFacts, ParsedDocument, parse_policy_document,
+    DocumentAccount, DocumentClient, OAuthFacts, ParsedDocument, SpecialMailboxOverrides,
+    parse_policy_document,
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +145,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
             }
             ToolName::MailPrepareMove => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"}},"target_mailbox":{"type":"string"}},"required":["account_id","message_ids","target_mailbox"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"}},"target_mailbox":{"type":"string"},"target_role":{"type":"string","enum":["archive","junk"],"description":"Use the account's configured Archive or Junk folder."}},"required":["account_id","message_ids"]}"#
             }
             ToolName::MailPrepareDelete => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"}},"permanent":{"type":"boolean","default":false}},"required":["account_id","message_ids"]}"#
@@ -282,7 +283,8 @@ impl DraftCache {
 enum Operation {
     Move {
         message_ids: Vec<String>,
-        target: String,
+        target: Option<String>,
+        role: Option<SpecialMailboxRole>,
     },
     Trash {
         message_ids: Vec<String>,
@@ -634,9 +636,13 @@ impl LineMcpServer {
         }
         if name == ToolName::MailCreateDraft.as_str() {
             let from = self.account_email(&account_id).unwrap_or_default();
+            let overrides = match self.mailbox_overrides(&account_id) {
+                Ok(overrides) => overrides,
+                Err(message) => return json_rpc_error(id, -32000, &message),
+            };
             return self.run_with_connection(&account_id, id, &|provider, engine| {
                 let (mailbox, record) =
-                    compose_and_append(arguments, &account_id, provider, engine, &from)?;
+                    compose_and_append(arguments, &account_id, provider, engine, &from, overrides.get(SpecialMailboxRole::Drafts))?;
                 let attachments = attachment_summaries_json(&record.attachments);
                 let attachment_count = record.attachments.len();
                 let total_attachment_bytes = total_attachment_bytes(&record.attachments);
@@ -936,12 +942,18 @@ impl LineMcpServer {
     /// folder-scoped check runs again at execution.
     fn handle_mail_prepare_move(&self, arguments: &Value, account_id: &AccountId, id: &Value) -> String {
         let message_ids = string_array(&arguments["message_ids"]);
-        let target = arguments["target_mailbox"].as_str().unwrap_or_default();
+        let target = arguments["target_mailbox"].as_str().filter(|value| !value.is_empty());
+        let role = match arguments["target_role"].as_str() {
+            None => None,
+            Some("archive") => Some(SpecialMailboxRole::Archive),
+            Some("junk") => Some(SpecialMailboxRole::Junk),
+            Some(_) => return json_rpc_error(id, -32602, "target_role must be archive or junk"),
+        };
         if message_ids.is_empty() {
             return json_rpc_error(id, -32602, "message_ids must not be empty");
         }
-        if target.is_empty() {
-            return json_rpc_error(id, -32602, "target_mailbox is required");
+        if target.is_some() == role.is_some() {
+            return json_rpc_error(id, -32602, "provide exactly one of target_mailbox or target_role");
         }
 
         let engine = match self.runtime_for(account_id) {
@@ -952,13 +964,15 @@ impl LineMcpServer {
             return json_rpc_error(id, -32000, &error.to_string());
         }
 
-        let preview = format!("Move {} message(s) to {target}", message_ids.len());
+        let destination = target.unwrap_or_else(|| role.expect("one destination").as_str());
+        let preview = format!("Move {} message(s) to {destination}", message_ids.len());
         self.store_prepared(
             account_id,
             preview,
             Operation::Move {
                 message_ids,
-                target: target.to_owned(),
+                target: target.map(str::to_owned),
+                role,
             },
             id,
         )
@@ -1093,13 +1107,17 @@ impl LineMcpServer {
             Err(failure) => return failure.into_response(id),
         };
         let account_id = action.account_id.clone();
+        let overrides = match self.mailbox_overrides(&account_id) {
+            Ok(overrides) => overrides,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
 
         // Sending leaves the house over SMTP, not the pooled IMAP connection;
         // every other action mutates the mailbox and runs on that connection.
         match &action.operation {
             Operation::Send { record } => self.execute_send(&account_id, record, id),
             operation => self.run_with_connection(&account_id, id, &|provider, engine| {
-                execute_operation(operation, &account_id, provider, engine)
+                execute_operation(operation, &account_id, provider, engine, &overrides)
             }),
         }
     }
@@ -1115,8 +1133,8 @@ impl LineMcpServer {
         if &record.account_id != account_id {
             return json_rpc_error(id, -32000, "draft belongs to a different account");
         }
-        let engine = match self.runtime_for(account_id) {
-            Ok((engine, _facts)) => engine,
+        let (engine, facts) = match self.runtime_for(account_id) {
+            Ok(runtime) => runtime,
             Err(message) => return json_rpc_error(id, -32000, &message),
         };
         if let Err(error) = engine.authorize(account_id, Capability::Send) {
@@ -1130,16 +1148,45 @@ impl LineMcpServer {
             );
         };
 
+        let overrides = match self.mailbox_overrides(account_id) {
+            Ok(overrides) => overrides,
+            Err(message) => return json_rpc_error(id, -32000, &message),
+        };
+        // Resolve and verify Sent before SMTP accepts the message. A missing
+        // folder is then a setup error with no risk of a duplicate send.
+        let mut provider = match self.open_connection(account_id, facts) {
+            Ok(provider) => provider,
+            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+        };
+        let mut sessions = SearchSessionStore::default();
+        let sent_mailbox = match MailAccessService::new(provider.as_mut(), engine, &mut sessions)
+            .special_mailbox(account_id, SpecialMailboxRole::Sent, overrides.get(SpecialMailboxRole::Sent))
+        {
+            Ok(mailbox) => mailbox,
+            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
+        };
+
         match send_over_smtp(&config, oauth.as_ref(), record) {
-            Ok(()) => json_rpc_text_result(
-                id,
-                &json!({
+            Ok(()) => {
+                // SMTP success is final. If IMAP fails now, report that the
+                // message was sent and only its Sent copy is missing.
+                let copy = provider.append_sent(account_id, &sent_mailbox, &record.raw);
+                let mut payload = json!({
                     "status": "sent",
                     "recipients": record.recipients.len(),
                     "attachment_count": record.attachments.len(),
-                    "total_attachment_bytes": total_attachment_bytes(&record.attachments)
-                }),
-            ),
+                    "total_attachment_bytes": total_attachment_bytes(&record.attachments),
+                    "sent_copy_mailbox": sent_mailbox
+                });
+                match copy {
+                    Ok(()) => payload["sent_copy_status"] = json!("saved"),
+                    Err(error) => {
+                        payload["sent_copy_status"] = json!("failed");
+                        payload["warning"] = json!(format!("message was sent, but the Sent copy could not be saved: {error}"));
+                    }
+                }
+                json_rpc_text_result(id, &payload)
+            }
             Err(error) => json_rpc_error(id, -32000, &error.to_string()),
         }
     }
@@ -1208,6 +1255,16 @@ impl LineMcpServer {
             document.restrict_accounts(self.presented_token_hash.as_deref());
             document.accounts
         }))
+    }
+
+    fn mailbox_overrides(&self, account_id: &AccountId) -> Result<SpecialMailboxOverrides, String> {
+        let Some(accounts) = self.document_accounts()? else {
+            return Ok(SpecialMailboxOverrides::default());
+        };
+        accounts.into_iter()
+            .find(|account| account.policy.account_id() == account_id)
+            .map(|account| account.mailbox_overrides)
+            .ok_or_else(|| CoreError::AccountNotFound(account_id.clone()).to_string())
     }
 
     /// Whether the client that spawned this process may call tools. Three
@@ -1910,6 +1967,28 @@ fn check_account_inner(
     policy_path: Option<PathBuf>,
     presented_token: Option<&str>,
 ) -> Result<String, (HealthOutcome, String)> {
+    let mailboxes = list_account_mailboxes_inner(account_id, policy_path, presented_token, false)?;
+    Ok(format!("login ok, {} mailboxes visible", mailboxes.len()))
+}
+
+/// The setup app lists real folders for its manual role pickers. It uses the
+/// same pairing gate and credential path as Test Connection, and gives the
+/// app the server's exact wire names to publish back as overrides.
+pub fn list_account_mailboxes(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+) -> Result<Vec<String>, String> {
+    list_account_mailboxes_inner(account_id, policy_path, presented_token, true)
+        .map_err(|(_, message)| message)
+}
+
+fn list_account_mailboxes_inner(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+    app_only: bool,
+) -> Result<Vec<String>, (HealthOutcome, String)> {
     let path = policy_path.ok_or_else(|| unreachable("no policy document path available"))?;
     let text = std::fs::read_to_string(&path)
         .map_err(|error| unreachable(format!("policy document unreadable: {error}")))?;
@@ -1919,6 +1998,18 @@ fn check_account_inner(
     // pairing gate as the tools. The app passes its own key; a foreign
     // process invoking the flag gets the same refusal a tool call would.
     pairing_gate(document.clients.as_deref(), presented_token).map_err(unreachable)?;
+    if app_only {
+        if let Some(clients) = &document.clients {
+            let presented_hash = presented_token.map(sha256_hex);
+            let is_app = clients.iter().any(|client| {
+                client.id == "torromail-app"
+                    && Some(client.token_sha256.as_str()) == presented_hash.as_deref()
+            });
+            if !is_app {
+                return Err(unreachable("folder setup is available only to the TorroMail app"));
+            }
+        }
+    }
     document.restrict_accounts(presented_token.map(sha256_hex).as_deref());
 
     // Found by the account's own id, not by whether it has a connection, so an
@@ -1945,10 +2036,10 @@ fn check_account_inner(
     let provider =
         torromail_imap_tls::connect_account(config, &secret).map_err(|error| classify(&error))?;
     let mailboxes = provider
-        .list_mailboxes(&config.account_id)
+        .selectable_mailboxes(&config.account_id)
         .map_err(|error| classify(&error))?;
 
-    Ok(format!("login ok, {} mailboxes visible", mailboxes.len()))
+    Ok(mailboxes)
 }
 
 /// A failure that happened before the mailbox got a word in: a missing
@@ -2747,6 +2838,7 @@ fn compose_and_append(
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
     from: &str,
+    chosen_mailbox: Option<&str>,
 ) -> Result<(String, DraftRecord), ToolFailure> {
     let to = string_array(&arguments["to"]);
     let cc = string_array(&arguments["cc"]);
@@ -2787,10 +2879,8 @@ fn compose_and_append(
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
-    // The drafts folder is wherever the account keeps it — its name is the
-    // last path segment, so `INBOX.Drafts` and a plain `Drafts` both match.
-    let mailboxes = service.list_mailboxes(account_id).map_err(ToolFailure::Core)?;
-    let mailbox = drafts_mailbox(&mailboxes);
+    let mailbox = service.special_mailbox(account_id, SpecialMailboxRole::Drafts, chosen_mailbox)
+        .map_err(ToolFailure::Core)?;
     service
         .create_draft(account_id, &mailbox, &message)
         .map_err(ToolFailure::Core)?;
@@ -3031,33 +3121,6 @@ fn string_array(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The mailbox a draft belongs in: one whose final path segment is "Drafts",
-/// else the bare name for a server that will create it.
-fn drafts_mailbox(mailboxes: &[String]) -> String {
-    named_mailbox(mailboxes, "Drafts")
-}
-
-/// The Trash folder a soft delete moves into, by the same rule.
-fn trash_mailbox(mailboxes: &[String]) -> String {
-    named_mailbox(mailboxes, "Trash")
-}
-
-/// A mailbox whose final path segment matches `name` (so `INBOX.Trash` and a
-/// plain `Trash` both count), or the bare name as a fallback.
-fn named_mailbox(mailboxes: &[String], name: &str) -> String {
-    mailboxes
-        .iter()
-        .find(|mailbox| {
-            mailbox
-                .rsplit(['.', '/'])
-                .next()
-                .unwrap_or(mailbox)
-                .eq_ignore_ascii_case(name)
-        })
-        .cloned()
-        .unwrap_or_else(|| name.to_owned())
-}
-
 /// How long a prepared action waits for its confirmation.
 const PENDING_TTL_SECONDS: u64 = 300;
 
@@ -3067,6 +3130,7 @@ fn execute_operation(
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
+    overrides: &SpecialMailboxOverrides,
 ) -> ToolResult {
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
@@ -3075,15 +3139,21 @@ fn execute_operation(
         Operation::Move {
             message_ids,
             target,
+            role,
         } => {
+            let target = match role {
+                Some(role) => service.special_mailbox(account_id, *role, overrides.get(*role))
+                    .map_err(ToolFailure::Core)?,
+                None => target.clone().expect("prepared move has a destination"),
+            };
             service
-                .move_messages(account_id, message_ids, target)
+                .move_messages(account_id, message_ids, &target)
                 .map_err(ToolFailure::Core)?;
             Ok(json!({ "status": "moved", "moved": message_ids.len(), "target": target }))
         }
         Operation::Trash { message_ids } => {
-            let mailboxes = service.list_mailboxes(account_id).map_err(ToolFailure::Core)?;
-            let trash = trash_mailbox(&mailboxes);
+            let trash = service.special_mailbox(account_id, SpecialMailboxRole::Trash, overrides.get(SpecialMailboxRole::Trash))
+                .map_err(ToolFailure::Core)?;
             service
                 .trash_messages(account_id, message_ids, &trash)
                 .map_err(ToolFailure::Core)?;
@@ -3295,7 +3365,10 @@ fn audit_detail(name: &str, arguments: &Value, payload: Option<&Value>) -> Strin
         "mail_prepare_move" => format!(
             "{} → {}",
             count(&arguments["message_ids"]),
-            arguments["target_mailbox"].as_str().unwrap_or_default()
+            arguments["target_mailbox"]
+                .as_str()
+                .or_else(|| arguments["target_role"].as_str())
+                .unwrap_or_default()
         ),
         "mail_prepare_delete" => {
             let n = count(&arguments["message_ids"]);

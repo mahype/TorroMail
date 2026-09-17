@@ -28,6 +28,26 @@ require(TextSize.smaller(than: TextSize.defaultPercent) == 85 && TextSize.larger
 
 let model = TorroMailModel.preview()
 
+var mappedAccount = model.accounts[0]
+mappedAccount.specialMailboxes = SpecialMailboxSettings(
+    manual: true, drafts: "Entw&APw-rfe", sent: "Gesendet",
+    archive: "Archiv", junk: "Spam", trash: "Papierkorb"
+)
+let mappedData = try! PolicyDocument.data(for: [mappedAccount], clients: [])
+let mappedJSON = try! JSONSerialization.jsonObject(with: mappedData) as! [String: Any]
+let mappedFields = (mappedJSON["accounts"] as! [[String: Any]])[0]["mailbox_overrides"] as! [String: String]
+require(mappedFields["drafts"] == "Entw&APw-rfe" && mappedFields["sent"] == "Gesendet"
+        && mappedFields["archive"] == "Archiv" && mappedFields["junk"] == "Spam"
+        && mappedFields["trash"] == "Papierkorb", "all five folder choices reach the policy")
+mappedAccount.specialMailboxes.manual = false
+let automaticData = try! PolicyDocument.data(for: [mappedAccount], clients: [])
+let automaticJSON = try! JSONSerialization.jsonObject(with: automaticData) as! [String: Any]
+require((automaticJSON["accounts"] as! [[String: Any]])[0]["mailbox_overrides"] == nil,
+        "automatic mode does not publish stale choices")
+let restoredAccount = try! JSONDecoder().decode(MailAccount.self, from: JSONEncoder().encode(mappedAccount))
+require(restoredAccount.specialMailboxes.sent == "Gesendet", "folder choices survive account persistence")
+require(AccountMailboxList.displayName("Entw&APw-rfe") == "Entwürfe", "folder labels decode modified UTF-7")
+
 // Decisions, not options: every sidebar destination is something the user
 // decides — Overview, Mail Accounts, MCP Clients, Settings, Updates, Log, Help.
 // Individual accounts live one level deeper, as cards inside the accounts
@@ -678,7 +698,7 @@ require(
     Set(storedAccounts?.first?.keys ?? [:].keys) == [
         "id", "name", "email", "provider", "loginMethod", "imapHost",
         "imapPort", "imapSecurity", "smtpHost", "smtpPort", "smtpSecurity",
-        "username", "knownMailboxes", "permissions", "searchCache", "isVerified"
+        "username", "knownMailboxes", "permissions", "specialMailboxes", "searchCache", "isVerified"
     ],
     "the state file stores the configured facts and nothing else"
 )

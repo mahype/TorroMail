@@ -135,11 +135,16 @@ Prepared action tools:
   URLs are never accepted. At most 20 attachments and 20 MiB of finished MIME
   data are allowed.
 - `mail_prepare_move` — holds a move for confirmation; gated by the move right.
+  `target_role` can select the account's Archive or Junk folder instead of an
+  explicit `target_mailbox`.
 - `mail_prepare_delete` — holds a soft delete (move to Trash) or, with
   `permanent`, an expunge; gated by the matching right.
 - `mail_prepare_send` — holds a send of a draft composed this session; gated
   by the send right. Submission goes over SMTP (implicit TLS on 465, STARTTLS
-  otherwise); the account's SMTP facts travel in the policy document.
+  otherwise); the account's SMTP facts travel in the policy document. The
+  existing Sent folder is resolved before submission. After SMTP accepts the
+  message, TorroMail stores a Sent copy; a copy failure is reported separately
+  and must never trigger a second SMTP submission.
 - `mail_confirm_action` — runs a prepared action once, matched by its code
   and inside its TTL, re-checking the policy at execution.
 
@@ -148,6 +153,13 @@ confirmation code is the handshake tying a confirm to one preparation; the GUI
 is the intended place for a human to read the preview and approve.
 
 All fifteen catalog tools are implemented.
+
+Account setup can map Drafts, Sent, Archive, Junk, and Trash to exact existing
+IMAP folders. Automatic discovery uses special-use attributes, then common
+names; manual choices come from a live list of selectable folders. The app
+publishes choices in `mailbox_overrides`, and the server validates them at use.
+`INBOX` is reserved by IMAP and has no mapping. TorroMail never creates these
+folders on the server.
 
 Read-only admin tools. These are dispatched before any account lookup or
 connection — `mail_list_accounts` is where an `account_id` is learned, so

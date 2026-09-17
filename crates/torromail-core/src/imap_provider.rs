@@ -11,8 +11,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::{
-    AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider, MarkChange, MessageHeader,
-    MessageHeaders, SearchHit, SearchWindow, StoredMessage,
+    find_special_mailbox, AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider,
+    MarkChange, MessageHeader, MessageHeaders, SearchHit, SearchWindow, SpecialMailboxRole,
+    StoredMessage,
 };
 
 /// A pointer to a credential in the platform keychain — never the
@@ -502,11 +503,71 @@ impl<T: ImapTransport> ImapClient<T> {
     }
 
     pub fn list_mailboxes(&mut self) -> CoreResult<Vec<String>> {
-        let lines = self.command("LIST \"\" \"*\"")?;
-        Ok(lines
-            .iter()
-            .filter_map(|line| parse_list_mailbox(&line.text))
+        Ok(self.list_mailbox_entries("LIST \"\" \"*\"")?
+            .into_iter()
+            .map(|entry| entry.name)
             .collect())
+    }
+
+    pub fn selectable_mailboxes(&mut self) -> CoreResult<Vec<String>> {
+        Ok(self.list_mailbox_entries("LIST \"\" \"*\"")?
+            .into_iter()
+            .filter(|entry| entry.selectable())
+            .map(|entry| entry.name)
+            .collect())
+    }
+
+    fn list_mailbox_entries(&mut self, command: &str) -> CoreResult<Vec<MailboxListEntry>> {
+        Ok(self.command(command)?.iter().filter_map(parse_list_mailbox).collect())
+    }
+
+    /// Discover the destination from the authenticated server, preserving its
+    /// exact wire name (including modified UTF-7). Some servers expose
+    /// \Drafts in ordinary LIST; others need SPECIAL-USE or XLIST.
+    pub fn drafts_mailbox(&mut self) -> CoreResult<String> {
+        self.special_mailbox(SpecialMailboxRole::Drafts)
+    }
+
+    pub fn special_mailbox(&mut self, role: SpecialMailboxRole) -> CoreResult<String> {
+        let listed = self.list_mailbox_entries("LIST \"\" \"*\"")?;
+        if let Some(entry) = listed.iter().find(|entry| entry.is_role(role)) {
+            return Ok(entry.name.clone());
+        }
+
+        // A proxy may advertise only authentication before LOGIN. Ask on the
+        // logged-in session, after the ordinary LIST did not identify Drafts.
+        let capabilities = self.command_or_refusal("CAPABILITY")?.unwrap_or_default();
+        let supports = |name: &str| {
+            capabilities.iter().any(|line| {
+                let mut words = line.text.split_whitespace();
+                words.next() == Some("*")
+                    && words.next().is_some_and(|word| word.eq_ignore_ascii_case("CAPABILITY"))
+                    && words.any(|cap| cap.eq_ignore_ascii_case(name))
+            })
+        };
+        for (supported, command) in [
+            (supports("SPECIAL-USE"), "LIST (SPECIAL-USE) \"\" \"*\""),
+            (supports("XLIST"), "XLIST \"\" \"*\""),
+        ] {
+            if !supported {
+                continue;
+            }
+            // A tagged refusal means this extension is unavailable despite
+            // CAPABILITY. A broken connection still propagates as an error.
+            if let Ok(lines) = self.command_or_refusal(command)? {
+                if let Some(entry) = lines.iter().filter_map(parse_list_mailbox).find(|entry| entry.is_role(role)) {
+                    return Ok(entry.name);
+                }
+            }
+        }
+
+        let names = listed.into_iter()
+            .filter(|entry| entry.selectable())
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        find_special_mailbox(&names, role).ok_or_else(|| CoreError::ProviderFailure(
+            format!("no {} mailbox found: LIST returned no selectable {} folder or known folder name", role.as_str(), role.imap_attribute()),
+        ))
     }
 
     /// UIDs matching `query` within `window`, ascending — oldest first, as
@@ -734,7 +795,7 @@ impl<T: ImapTransport> ImapClient<T> {
         let continuation = self.transport.read_line()?;
         if !continuation.starts_with('+') {
             return Err(CoreError::ProviderFailure(format!(
-                "APPEND was refused: {continuation}"
+                "APPEND to {mailbox:?} was refused: {continuation}"
             )));
         }
 
@@ -749,7 +810,7 @@ impl<T: ImapTransport> ImapClient<T> {
                 if rest.starts_with("OK") {
                     return Ok(());
                 }
-                return Err(CoreError::ProviderFailure(format!("APPEND failed: {rest}")));
+                return Err(CoreError::ProviderFailure(format!("APPEND to {mailbox:?} failed: {rest}")));
             }
         }
     }
@@ -1094,6 +1155,16 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         self.client.borrow_mut().list_mailboxes()
     }
 
+    fn selectable_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().selectable_mailboxes()
+    }
+
+    fn special_mailbox(&self, account_id: &AccountId, role: SpecialMailboxRole) -> CoreResult<String> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().special_mailbox(role)
+    }
+
     fn append_draft(
         &mut self,
         account_id: &AccountId,
@@ -1102,6 +1173,16 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     ) -> CoreResult<()> {
         self.guard(account_id)?;
         self.client.borrow_mut().append(mailbox, "\\Draft", message)
+    }
+
+    fn append_sent(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        self.client.borrow_mut().append(mailbox, "\\Seen", message)
     }
 
     fn move_messages(
@@ -1263,15 +1344,40 @@ fn parse_uidvalidity(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-fn parse_list_mailbox(text: &str) -> Option<String> {
-    let rest = text.strip_prefix("* LIST ")?;
-    let after_flags = rest.split_once(')')?.1.trim_start();
+struct MailboxListEntry {
+    name: String,
+    flags: Vec<String>,
+}
+
+impl MailboxListEntry {
+    fn selectable(&self) -> bool {
+        !self.flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
+    }
+
+    fn is_role(&self, role: SpecialMailboxRole) -> bool {
+        self.selectable() && self.flags.iter().any(|flag| flag.eq_ignore_ascii_case(role.imap_attribute()))
+    }
+}
+
+fn parse_list_mailbox(line: &ResponseLine) -> Option<MailboxListEntry> {
+    let rest = line.text.strip_prefix("* LIST ").or_else(|| line.text.strip_prefix("* XLIST "))?;
+    let flags_end = rest.strip_prefix('(')?.find(')')?;
+    let flags = rest[1..flags_end + 1]
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let after_flags = rest[flags_end + 2..].trim_start();
     let name_part = if let Some(quoted) = after_flags.strip_prefix('"') {
         quoted.split_once('"')?.1.trim_start()
     } else {
         after_flags.split_once(' ')?.1.trim_start()
     };
-    Some(unquoted(name_part))
+    let name = if name_part.starts_with('{') {
+        String::from_utf8_lossy(line.literals.first()?).into_owned()
+    } else {
+        unquoted(name_part)
+    };
+    Some(MailboxListEntry { name, flags })
 }
 
 fn unquoted(value: &str) -> String {

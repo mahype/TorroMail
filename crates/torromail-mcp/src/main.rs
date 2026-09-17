@@ -41,6 +41,21 @@ fn main() -> io::Result<()> {
     // nothing inherits it.
     let presented_token = std::env::var("TORROMAIL_TOKEN").ok();
 
+    if let Some(position) = arguments.iter().position(|argument| argument == "--list-account-mailboxes") {
+        let Some(account_id) = arguments.get(position + 1) else {
+            eprintln!("--list-account-mailboxes needs an account id");
+            std::process::exit(2);
+        };
+        match torromail_mcp::list_account_mailboxes(account_id, policy_path(), presented_token.as_deref()) {
+            Ok(mailboxes) => println!("{}", serde_json::to_string(&mailboxes).expect("mailbox names are JSON strings")),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // The connection check behind the app's "Test Connection" button:
     // resolve the secret, log in over TLS, report — exit code carries the
     // verdict.

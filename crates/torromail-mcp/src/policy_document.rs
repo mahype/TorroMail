@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use torromail_core::{
     AccountId, CacheLevel, ConnectionSecurity, FolderRule, ImapAuth, ImapProviderConfig,
-    PermissionSet, Policy, ReadAccess, SecretRef, WriteAccess,
+    PermissionSet, Policy, ReadAccess, SecretRef, SpecialMailboxRole, WriteAccess,
 };
 
 /// One account as the document describes it: its permissions, how the admin
@@ -70,6 +70,49 @@ pub(crate) struct DocumentAccount {
     /// Present only for `xoauth2` accounts: what it takes to renew the token
     /// when the stored one has gone stale. Shared by IMAP and SMTP.
     pub(crate) oauth: Option<OAuthFacts>,
+    pub(crate) mailbox_overrides: SpecialMailboxOverrides,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpecialMailboxOverrides {
+    drafts: Option<String>,
+    sent: Option<String>,
+    archive: Option<String>,
+    junk: Option<String>,
+    trash: Option<String>,
+}
+
+impl SpecialMailboxOverrides {
+    pub(crate) fn get(&self, role: SpecialMailboxRole) -> Option<&str> {
+        match role {
+            SpecialMailboxRole::Drafts => self.drafts.as_deref(),
+            SpecialMailboxRole::Sent => self.sent.as_deref(),
+            SpecialMailboxRole::Archive => self.archive.as_deref(),
+            SpecialMailboxRole::Junk => self.junk.as_deref(),
+            SpecialMailboxRole::Trash => self.trash.as_deref(),
+        }
+    }
+}
+
+fn parse_mailbox_overrides(account: &Value) -> Result<SpecialMailboxOverrides, String> {
+    let Some(value) = account.get("mailbox_overrides") else {
+        return Ok(SpecialMailboxOverrides::default());
+    };
+    let object = value.as_object().ok_or("policy document invalid: mailbox_overrides must be an object")?;
+    let read = |name: &str| -> Result<Option<String>, String> {
+        match object.get(name) {
+            None => Ok(None),
+            Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+            _ => Err(format!("policy document invalid: mailbox_overrides.{name} must be a nonempty string")),
+        }
+    };
+    Ok(SpecialMailboxOverrides {
+        drafts: read("drafts")?,
+        sent: read("sent")?,
+        archive: read("archive")?,
+        junk: read("junk")?,
+        trash: read("trash")?,
+    })
 }
 
 /// What the app decided to keep on disk for this account: one level in the
@@ -256,6 +299,7 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
         imap,
         smtp,
         oauth,
+        mailbox_overrides: parse_mailbox_overrides(account)?,
     })
 }
 

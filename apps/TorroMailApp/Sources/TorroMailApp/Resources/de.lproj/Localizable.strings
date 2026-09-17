@@ -345,3 +345,17 @@
 "Appearance" = "Darstellung";
 "%d%% (Default)" = "%d%% (Standard)";
 "Change text size with ⌘+ and ⌘−. ⌘0 restores the default size." = "Mit ⌘+ und ⌘− die Schriftgröße ändern. ⌘0 stellt die Standardgröße wieder her.";
+
+/* Special mailbox assignment */
+"Special folders" = "Spezialordner";
+"Choose special folders manually" = "Spezialordner manuell zuordnen";
+"TorroMail recognizes these folders automatically. Choose an existing folder only when needed." = "TorroMail erkennt diese Ordner automatisch. Wähle nur bei Bedarf einen vorhandenen Ordner aus.";
+"Automatic" = "Automatisch";
+"Sent" = "Gesendet";
+"Archive" = "Archiv";
+"Junk" = "Spam";
+"Trash" = "Papierkorb";
+"Loading folders…" = "Ordner werden geladen …";
+"Could not load folders. Check the connection and try again." = "Ordner konnten nicht geladen werden. Prüfe die Verbindung und versuche es erneut.";
+"Retry" = "Erneut versuchen";
+"A selected folder is no longer available on this server." = "Ein ausgewählter Ordner ist auf diesem Server nicht mehr verfügbar.";
