@@ -208,8 +208,12 @@ names, media types, and byte sizes, but never their encoded content.
 ## Outgoing Attachments
 
 `mail_create_draft` composes the text body and all attachments atomically, then
-appends the complete RFC 5322 message to the account's Drafts mailbox with the
-`\Draft` flag. With attachments the message is `multipart/mixed`; every binary
+appends the complete RFC 5322 message with the `\Draft` flag. The destination
+comes from the server's `\Drafts` mailbox attribute in `LIST`,
+`LIST (SPECIAL-USE)`, or `XLIST`. If no attribute is reported, TorroMail uses
+an existing drafts folder with a common or localized name. It does not guess a
+new folder name or create one; it reports when no destination is found. With
+attachments the message is `multipart/mixed`; every binary
 part uses base64 transfer encoding and an RFC 2231 UTF-8 filename.
 
 The MCP contract accepts `filename`, optional `media_type`, and

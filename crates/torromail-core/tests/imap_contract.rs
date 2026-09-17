@@ -128,6 +128,142 @@ fn login_lists_mailboxes_and_quotes_credentials() {
 }
 
 #[test]
+fn drafts_use_the_special_use_flag_and_keep_the_imap_wire_name() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
+        line("* LIST (\\HasNoChildren \\Drafts) \"/\" \"Entw&APw-rfe\""),
+        line("t2 OK LIST completed"),
+        line("+ OK go ahead"),
+        line("t3 OK [APPENDUID 14 1] APPEND completed"),
+    ]);
+    let log = SentLog::default();
+    let client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+    let account_id = AccountId::new("work");
+    let mut provider = ImapMailProvider::new(account_id.clone(), client);
+
+    let mailbox = provider.drafts_mailbox(&account_id).expect("drafts found");
+    provider
+        .append_draft(&account_id, &mailbox, "draft body")
+        .expect("append succeeds");
+
+    assert_eq!(mailbox, "Entw&APw-rfe");
+    assert_eq!(log.lines()[2], "t3 APPEND \"Entw&APw-rfe\" (\\Draft) {10}");
+    assert_eq!(
+        log.lines().len(),
+        4,
+        "a flagged LIST needs no CAPABILITY round trip"
+    );
+}
+
+#[test]
+fn drafts_query_special_use_after_login_when_ordinary_list_has_no_flag() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"Drafts\""),
+        line("* LIST (\\HasNoChildren) \"/\" \"Entw&APw-rfe\""),
+        line("t2 OK LIST completed"),
+        line("* CAPABILITY IMAP4rev1 SPECIAL-USE XLIST"),
+        line("t3 OK CAPABILITY completed"),
+        line("* LIST (\\HasNoChildren \\Drafts) \"/\" \"Entw&APw-rfe\""),
+        line("t4 OK LIST completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .expect("login succeeds");
+
+    assert_eq!(client.drafts_mailbox().unwrap(), "Entw&APw-rfe");
+    assert_eq!(log.lines()[2], "t3 CAPABILITY");
+    assert_eq!(log.lines()[3], "t4 LIST (SPECIAL-USE) \"\" \"*\"");
+}
+
+#[test]
+fn drafts_use_xlist_then_an_existing_localized_name() {
+    let mut xlist_script = login_script();
+    xlist_script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"Entw&APw-rfe\""),
+        line("t2 OK LIST completed"),
+        line("* CAPABILITY IMAP4rev1 XLIST"),
+        line("t3 OK CAPABILITY completed"),
+        line("* XLIST (\\Drafts) \"/\" \"Entw&APw-rfe\""),
+        line("t4 OK XLIST completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(xlist_script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .unwrap();
+    assert_eq!(client.drafts_mailbox().unwrap(), "Entw&APw-rfe");
+    assert_eq!(log.lines()[3], "t4 XLIST \"\" \"*\"");
+
+    let mut fallback_script = login_script();
+    fallback_script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"INBOX/Entw&APw-rfe\""),
+        line("t2 OK LIST completed"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK CAPABILITY completed"),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(fallback_script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .unwrap();
+    assert_eq!(client.drafts_mailbox().unwrap(), "INBOX/Entw&APw-rfe");
+}
+
+#[test]
+fn missing_drafts_folder_fails_before_append_instead_of_guessing_drafts() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\HasNoChildren) \"/\" \"INBOX\""),
+        line("t2 OK LIST completed"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK CAPABILITY completed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "work@example.com",
+        "app-secret",
+    )
+    .unwrap();
+    let error = client.drafts_mailbox().unwrap_err().to_string();
+    assert!(error.contains("no drafts mailbox found"), "got: {error}");
+    assert!(log.lines().iter().all(|line| !line.contains("APPEND")));
+}
+
+#[test]
+fn append_trycreate_error_names_the_attempted_mailbox() {
+    let mut script = login_script();
+    script.push(line("t2 NO [TRYCREATE] folder does not exist"));
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "work@example.com",
+        "app-secret",
+    )
+    .unwrap();
+
+    let error = client
+        .append("Entw&APw-rfe", "\\Draft", "draft body")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Entw&APw-rfe"), "got: {error}");
+    assert!(error.contains("TRYCREATE"), "got: {error}");
+}
+
+#[test]
 fn a_refused_login_surfaces_the_server_answer() {
     let script = vec![
         line("* OK IMAP4rev1 server ready"),

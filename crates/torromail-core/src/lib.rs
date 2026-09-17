@@ -1377,6 +1377,25 @@ fn append_wrapped_base64(message: &mut String, content: &[u8]) {
     }
 }
 
+/// Prefer an existing folder over asking IMAP to append to an invented name.
+/// The modified UTF-7 spelling is kept for servers that report it on the wire.
+fn find_drafts_mailbox(mailboxes: &[String]) -> Option<String> {
+    const NAMES: &[&str] = &[
+        "Drafts", "Draft", "Entwürfe", "Entw&APw-rfe", "Brouillons", "Borradores", "Bozze",
+    ];
+    for name in NAMES {
+        if let Some(mailbox) = mailboxes.iter().find(|mailbox| mailbox.eq_ignore_ascii_case(name)) {
+            return Some(mailbox.clone());
+        }
+        if let Some(mailbox) = mailboxes.iter().find(|mailbox| {
+            mailbox.rsplit(['.', '/']).next().is_some_and(|segment| segment.eq_ignore_ascii_case(name))
+        }) {
+            return Some(mailbox.clone());
+        }
+    }
+    None
+}
+
 /// The boundary fixture-backed tests and real IMAP retrieval share: search
 /// and single-message fetch, nothing that smells like an inbox.
 pub trait MailProvider {
@@ -1443,6 +1462,15 @@ pub trait MailProvider {
     ) -> CoreResult<()>;
 
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>>;
+
+    /// Resolve the account's existing drafts folder. IMAP providers inspect
+    /// special-use flags; simple providers can use a known folder name.
+    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+        let mailboxes = self.list_mailboxes(account_id)?;
+        find_drafts_mailbox(&mailboxes).ok_or_else(|| CoreError::ProviderFailure(
+            "no drafts mailbox found in the account's folder list".to_owned(),
+        ))
+    }
 
     /// Store a ready-made message in `mailbox` as a draft — an IMAP APPEND
     /// with the `\Draft` flag, no sending involved.
@@ -1526,6 +1554,10 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 
     fn list_mailboxes(&self, account_id: &AccountId) -> CoreResult<Vec<String>> {
         (**self).list_mailboxes(account_id)
+    }
+
+    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+        (**self).drafts_mailbox(account_id)
     }
 
     fn append_draft(
@@ -1710,6 +1742,11 @@ impl MailProvider for FixtureMailProvider {
             }
         }
         Ok(mailboxes)
+    }
+
+    fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+        let mailboxes = self.list_mailboxes(account_id)?;
+        Ok(find_drafts_mailbox(&mailboxes).unwrap_or_else(|| "Drafts".to_owned()))
     }
 
     /// The fixture keeps the appended draft so a later search or list can see
@@ -1964,6 +2001,14 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
             visible.push(message);
         }
         Ok(visible)
+    }
+
+    /// Resolve the drafts folder only after the account-wide drafting check.
+    /// Folder read rules do not hide a drafts destination from a client that
+    /// has been granted the drafting right.
+    pub fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
+        self.policy_engine.authorize(account_id, Capability::Draft)?;
+        self.provider.drafts_mailbox(account_id)
     }
 
     /// Store a composed message as a draft, if the account may draft at all.

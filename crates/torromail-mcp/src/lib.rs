@@ -2787,10 +2787,7 @@ fn compose_and_append(
     let mut sessions = SearchSessionStore::default();
     let mut service = MailAccessService::new(provider, engine, &mut sessions);
 
-    // The drafts folder is wherever the account keeps it — its name is the
-    // last path segment, so `INBOX.Drafts` and a plain `Drafts` both match.
-    let mailboxes = service.list_mailboxes(account_id).map_err(ToolFailure::Core)?;
-    let mailbox = drafts_mailbox(&mailboxes);
+    let mailbox = service.drafts_mailbox(account_id).map_err(ToolFailure::Core)?;
     service
         .create_draft(account_id, &mailbox, &message)
         .map_err(ToolFailure::Core)?;
@@ -3029,12 +3026,6 @@ fn string_array(value: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// The mailbox a draft belongs in: one whose final path segment is "Drafts",
-/// else the bare name for a server that will create it.
-fn drafts_mailbox(mailboxes: &[String]) -> String {
-    named_mailbox(mailboxes, "Drafts")
 }
 
 /// The Trash folder a soft delete moves into, by the same rule.

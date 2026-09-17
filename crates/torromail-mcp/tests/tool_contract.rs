@@ -899,6 +899,34 @@ fn a_draft_is_composed_and_appended() {
 }
 
 #[test]
+fn create_draft_uses_an_existing_localized_folder() {
+    let path = temp_policy_path("localized-drafts");
+    fixture_account_document(&path);
+    let server = LineMcpServer::with_connect_override(path.clone(), true, |_account_id| {
+        Ok(Box::new(FixtureMailProvider::new([StoredMessage::new(
+            AccountId::new("work"),
+            "INBOX/Entwürfe",
+            "old-draft",
+            "draft-thread",
+            "Earlier draft",
+            "me@example.com",
+            "",
+            "",
+        )])) as Box<dyn MailProvider>)
+    });
+
+    let response = server
+        .handle_line(
+            r#"{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"mail_create_draft","arguments":{"account_id":"work","to":["someone@example.com"],"subject":"Hallo","body":"Text"}}}"#,
+        )
+        .expect("a response");
+    std::fs::remove_file(&path).ok();
+
+    assert!(response.contains("draft_created"), "got: {response}");
+    assert!(response.contains("INBOX/Entwürfe"), "got: {response}");
+}
+
+#[test]
 fn a_draft_accepts_base64_attachments_and_returns_only_safe_metadata() {
     let server = LineMcpServer::fixture();
     let response = server
