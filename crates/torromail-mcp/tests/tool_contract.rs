@@ -365,6 +365,79 @@ fn mcp_server_reads_single_messages_through_the_policy() {
 }
 
 #[test]
+fn full_headers_are_opt_in_and_require_attachment_level_access() {
+    let path = isolated_policy_path("full-headers-policy");
+    let make_server = || {
+        LineMcpServer::with_connect_override(path.clone(), true, |_account| {
+            Ok(Box::new(imap_shaped_mailbox().with_headers(
+                "INBOX/7",
+                vec![
+                    torromail_core::MessageHeader {
+                        name: "Received".into(),
+                        value: "from first.example".into(),
+                    },
+                    torromail_core::MessageHeader {
+                        name: "Received".into(),
+                        value: "from second.example".into(),
+                    },
+                    torromail_core::MessageHeader {
+                        name: "Authentication-Results".into(),
+                        value: "dkim=pass; spf=pass; dmarc=pass".into(),
+                    },
+                ],
+            )) as Box<dyn MailProvider>)
+        })
+    };
+    let plain = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_body":true}}}"#;
+    let requested = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mail_get_message","arguments":{"account_id":"work","message_id":"INBOX/7","include_headers":true}}}"#;
+
+    cached_account_document(&path, "full_message", "bodies");
+    let server = make_server();
+    let normal = server.handle_line(plain).expect("normal response");
+    let denied = server.handle_line(requested).expect("denied response");
+    assert!(!normal.contains(r#"\"headers\""#), "got: {normal}");
+    assert!(
+        denied.contains("DownloadAttachments is not allowed"),
+        "got: {denied}"
+    );
+
+    std::fs::write(
+        &path,
+        r#"{"version":1,"accounts":[{"id":"work","read":"with_attachments","write":{},"send":false,"per_folder":true,"folder_rules":{"INBOX":{"read":false,"write":false}}}]}"#,
+    )
+    .expect("folder policy written");
+    let folder_denied = make_server()
+        .handle_line(requested)
+        .expect("folder response");
+    assert!(
+        folder_denied.contains("ReadHeaders is not allowed"),
+        "got: {folder_denied}"
+    );
+
+    cached_account_document(&path, "with_attachments", "bodies");
+    let server = make_server();
+    let first = server.handle_line(plain).expect("cache warm-up");
+    let second = server.handle_line(plain).expect("cache hit");
+    let response = server.handle_line(requested).expect("header response");
+    remove_isolated_dir(&path);
+    assert!(!first.contains(r#"\"headers\""#), "got: {first}");
+    assert!(second.contains(r#"\"from_cache\":true"#), "got: {second}");
+    assert!(!response.contains(r#"\"from_cache\":true"#), "got: {response}");
+    let outer: serde_json::Value = serde_json::from_str(&response).expect("valid RPC");
+    let payload: serde_json::Value = serde_json::from_str(
+        outer["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text payload"),
+    )
+    .expect("valid message JSON");
+    assert_eq!(payload["headers"].as_array().unwrap().len(), 3);
+    assert_eq!(payload["headers"][0]["name"], "Received");
+    assert_eq!(payload["headers"][1]["name"], "Received");
+    assert_eq!(payload["headers"][1]["value"], "from second.example");
+    assert_eq!(payload["headers"][2]["name"], "Authentication-Results");
+}
+
+#[test]
 fn mcp_server_enforces_the_mark_permission() {
     let server = LineMcpServer::fixture();
     let response = server.handle_line(

@@ -1036,6 +1036,21 @@ pub struct AttachmentPayload {
     content: Vec<u8>,
 }
 
+/// One top-level RFC 5322 field. Values keep their original folding (CRLF
+/// and leading whitespace) so delivery diagnostics are not rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// Header fields plus the mailbox needed for the folder-specific read check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHeaders {
+    pub mailbox: String,
+    pub fields: Vec<MessageHeader>,
+}
+
 impl AttachmentPayload {
     pub fn new(
         mailbox: impl Into<String>,
@@ -1380,6 +1395,19 @@ pub trait MailProvider {
 
     fn get_message(&self, account_id: &AccountId, message_id: &str) -> CoreResult<StoredMessage>;
 
+    /// Fetch all top-level fields on demand; normal message reads do not
+    /// retrieve or retain them. Providers without this capability fail
+    /// explicitly instead of returning an incomplete header list.
+    fn get_headers(
+        &self,
+        _account_id: &AccountId,
+        _message_id: &str,
+    ) -> CoreResult<MessageHeaders> {
+        Err(CoreError::ProviderFailure(
+            "full message headers are unavailable".to_owned(),
+        ))
+    }
+
     /// The decoded bytes of one attachment, id as listed on the stored
     /// message. Providers answer `AttachmentNotFound` for an id no part
     /// carries.
@@ -1462,6 +1490,10 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         (**self).get_message(account_id, message_id)
     }
 
+    fn get_headers(&self, account_id: &AccountId, message_id: &str) -> CoreResult<MessageHeaders> {
+        (**self).get_headers(account_id, message_id)
+    }
+
     fn get_attachment(
         &self,
         account_id: &AccountId,
@@ -1526,6 +1558,7 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureMailProvider {
     messages: Vec<StoredMessage>,
+    headers: BTreeMap<String, Vec<MessageHeader>>,
     /// Attachment bytes by message id and attachment id: the fixture's stand-in
     /// for what a real provider extracts from the raw MIME body.
     attachment_payloads: BTreeMap<(String, String), (String, String, Vec<u8>)>,
@@ -1535,8 +1568,14 @@ impl FixtureMailProvider {
     pub fn new(messages: impl IntoIterator<Item = StoredMessage>) -> Self {
         Self {
             messages: messages.into_iter().collect(),
+            headers: BTreeMap::new(),
             attachment_payloads: BTreeMap::new(),
         }
+    }
+
+    pub fn with_headers(mut self, message_id: &str, fields: Vec<MessageHeader>) -> Self {
+        self.headers.insert(message_id.to_owned(), fields);
+        self
     }
 
     /// Seed the bytes behind one listed attachment.
@@ -1595,6 +1634,14 @@ impl MailProvider for FixtureMailProvider {
             .find(|message| &message.account_id == account_id && message.message_id == message_id)
             .cloned()
             .ok_or_else(|| CoreError::MessageNotFound(message_id.to_owned()))
+    }
+
+    fn get_headers(&self, account_id: &AccountId, message_id: &str) -> CoreResult<MessageHeaders> {
+        let message = self.get_message(account_id, message_id)?;
+        Ok(MessageHeaders {
+            mailbox: message.mailbox().to_owned(),
+            fields: self.headers.get(message_id).cloned().unwrap_or_default(),
+        })
     }
 
     fn get_attachment(
@@ -1851,6 +1898,25 @@ impl<'a, P: MailProvider> MailAccessService<'a, P> {
             Capability::DownloadAttachments,
         )?;
         Ok(payload)
+    }
+
+    /// Full top-level headers require the same read level as attachments.
+    /// Check the account before retrieval and the provider's mailbox before
+    /// releasing fields, including when a folder narrows account access.
+    pub fn get_headers(
+        &self,
+        account_id: &AccountId,
+        message_id: &str,
+    ) -> CoreResult<Vec<MessageHeader>> {
+        self.policy_engine
+            .authorize(account_id, Capability::DownloadAttachments)?;
+        let headers = self.provider.get_headers(account_id, message_id)?;
+        self.policy_engine.authorize_in(
+            account_id,
+            &headers.mailbox,
+            Capability::DownloadAttachments,
+        )?;
+        Ok(headers.fields)
     }
 
     /// Whether a download from `mailbox` would be allowed — the fact the
