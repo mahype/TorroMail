@@ -6,6 +6,7 @@ import TorroMailKit
 /// per-client setup screen — because the two are the app's twin control
 /// surfaces: mailboxes on one side, the assistants that reach them on the other.
 struct MCPServerListView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     /// Cheap install/config facts per client, refreshed on appear. The server
     /// self-test is left to the detail view — it launches a process, too heavy
@@ -14,17 +15,17 @@ struct MCPServerListView: View {
 
     /// Two equal columns. Each card is then "half the width, minus the gap" —
     /// the pairing the layout is built around.
-    private static let columns = [
-        GridItem(.flexible(), spacing: 10),
-        GridItem(.flexible(), spacing: 10)
-    ]
+    private var columns: [GridItem] {
+        let column = GridItem(.flexible(), spacing: 10 * textScale)
+        return textScale > 1.45 ? [column] : [column, column]
+    }
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
+            VStack(spacing: 12 * textScale) {
                 // Two columns: the cards go half-width and pair up, leaving room
                 // to grow the field of assistants without a taller scroll.
-                LazyVGrid(columns: Self.columns, spacing: 10) {
+                LazyVGrid(columns: columns, spacing: 10 * textScale) {
                     ForEach(MCPClientRegistry.catalog) { descriptor in
                         NavigationLink(value: descriptor.id) {
                             MCPClientRow(
@@ -38,13 +39,13 @@ struct MCPServerListView: View {
                 }
 
                 Text(L("Pick an assistant to connect it — TorroMail writes itself into the ones it knows, and hands you a snippet for the rest. Nothing is sent until you restart the assistant."))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 2)
+                    .scaledPadding(.horizontal, 2)
             }
-            .padding(20)
-            .frame(maxWidth: 720, alignment: .top)
+            .scaledPadding(20)
+            .readableContentWidth()
             .frame(maxWidth: .infinity)
         }
         .background(.background.secondary)
@@ -77,31 +78,32 @@ struct MCPServerListView: View {
 /// running? It serves the mail accounts, so it leads the accounts list rather
 /// than the client list here.
 struct MCPServerStatusCard: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 10 * textScale) {
+            HStack(spacing: 12 * textScale) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.torroRed.gradient)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 34 * textScale, height: 34 * textScale)
                     .overlay {
                         Image(systemName: "server.rack")
-                            .font(.system(size: 15, weight: .semibold))
+                            .scaledSymbolFont(size: 15, weight: .semibold)
                             .foregroundStyle(.white)
                     }
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L("TorroMail server"))
-                        .font(.headline)
+                        .scaledFont(.headline)
                     Text(statusText)
-                        .font(.subheadline)
+                        .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Circle()
                     .fill(statusColor)
-                    .frame(width: 9, height: 9)
+                    .frame(width: 9 * textScale, height: 9 * textScale)
                     .help(statusText)
                     .accessibilityLabel(statusText)
                 if mcpSupervisor.status.isRunning {
@@ -119,12 +121,12 @@ struct MCPServerStatusCard: View {
             // process message stays in the log.
             if let errorDetail {
                 Text(errorDetail)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .scaledPadding(.horizontal, 14)
+        .scaledPadding(.vertical, 12)
         .torroCard()
     }
 
@@ -160,6 +162,7 @@ struct MCPServerStatusCard: View {
 /// A client's card in the list. Mirrors `AccountCard`: badge, name, a summary
 /// line that reads as the current state, a status dot, and the chevron in.
 private struct MCPClientRow: View {
+    @Environment(\.textScale) private var textScale
     var descriptor: MCPClientDescriptor
     var status: MCPClientSetupStatus
     @State private var isHovering = false
@@ -167,14 +170,14 @@ private struct MCPClientRow: View {
     private var isManual: Bool { descriptor.kind == .manual }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 12 * textScale) {
             MCPClientBadge(symbol: descriptor.symbol, dimmed: !isManual && !status.isInstalled)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 1 * textScale) {
                 Text(L(descriptor.displayName))
-                    .font(.headline)
+                    .scaledFont(.headline)
                     .foregroundStyle(isManual || status.isInstalled ? .primary : .secondary)
                 Text(summary)
-                    .font(.subheadline)
+                    .scaledFont(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -182,16 +185,16 @@ private struct MCPClientRow: View {
             if let dotColor {
                 Circle()
                     .fill(dotColor)
-                    .frame(width: 9, height: 9)
+                    .frame(width: 9 * textScale, height: 9 * textScale)
                     .help(summary)
                     .accessibilityLabel(summary)
             }
             Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSymbolFont(size: 12, weight: .semibold)
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .scaledPadding(.horizontal, 14)
+        .scaledPadding(.vertical, 11)
         .torroCard(isHighlighted: isHovering)
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovering)
@@ -216,17 +219,18 @@ private struct MCPClientRow: View {
 /// badge, so the two lists read as siblings without the assistants borrowing
 /// the mailbox's brand colour.
 private struct MCPClientBadge: View {
+    @Environment(\.textScale) private var textScale
     var symbol: String
     var dimmed: Bool
     var size: CGFloat = 34
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+        RoundedRectangle(cornerRadius: size * textScale * 0.24, style: .continuous)
             .fill(.quaternary)
-            .frame(width: size, height: size)
+            .frame(width: size * textScale, height: size * textScale)
             .overlay {
                 Image(systemName: symbol)
-                    .font(.system(size: size * 0.42, weight: .semibold))
+                    .scaledSymbolFont(size: size * 0.42, weight: .semibold)
                     .foregroundStyle(dimmed ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
             }
     }
@@ -236,6 +240,7 @@ private struct MCPClientBadge: View {
 /// for the step TorroMail cannot see from here — read how to confirm inside the
 /// client itself.
 struct MCPClientDetailView: View {
+    @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     let descriptor: MCPClientDescriptor
 
@@ -291,24 +296,24 @@ struct MCPClientDetailView: View {
     private var restartSection: some View {
         if mustRestart {
             Section {
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: 12 * textScale) {
                     Image(systemName: "arrow.clockwise.circle.fill")
-                        .font(.title2)
+                        .scaledFont(.title2)
                         .foregroundStyle(Color.torroRed)
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 3 * textScale) {
                         Text(String(format: L("Restart %@ now"), L(descriptor.displayName)))
-                            .font(.headline)
+                            .scaledFont(.headline)
                         Text(String(
                             format: L("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail."),
                             L(descriptor.displayName)
                         ))
-                        .font(.subheadline)
+                        .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.vertical, 4)
+                .scaledPadding(.vertical, 4)
                 .accessibilityElement(children: .combine)
             }
         }
@@ -326,17 +331,17 @@ struct MCPClientDetailView: View {
     /// one-click path, so the snippet below is the way in.
     private var manualHeaderSection: some View {
         Section {
-            HStack(spacing: 12) {
+            HStack(spacing: 12 * textScale) {
                 MCPClientBadge(symbol: descriptor.symbol, dimmed: false)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(L(descriptor.displayName)).font(.headline)
+                VStack(alignment: .leading, spacing: 1 * textScale) {
+                    Text(L(descriptor.displayName)).scaledFont(.headline)
                     Text(L("Set up by hand"))
-                        .font(.subheadline)
+                        .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            .padding(.vertical, 2)
+            .scaledPadding(.vertical, 2)
         } header: {
             Text(L("Connection"))
         } footer: {
@@ -346,20 +351,20 @@ struct MCPClientDetailView: View {
 
     private var connectionSection: some View {
         Section {
-            HStack(spacing: 12) {
+            HStack(spacing: 12 * textScale) {
                 MCPClientBadge(symbol: descriptor.symbol, dimmed: !status.isInstalled)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(L(descriptor.displayName)).font(.headline)
+                VStack(alignment: .leading, spacing: 1 * textScale) {
+                    Text(L(descriptor.displayName)).scaledFont(.headline)
                     Text(stateText)
-                        .font(.subheadline)
+                        .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Circle().fill(dotColor).frame(width: 9, height: 9)
+                Circle().fill(dotColor).frame(width: 9 * textScale, height: 9 * textScale)
                     .help(stateText)
                     .accessibilityLabel(stateText)
             }
-            .padding(.vertical, 2)
+            .scaledPadding(.vertical, 2)
 
             if status.isInstalled {
                 HStack {
@@ -382,13 +387,13 @@ struct MCPClientDetailView: View {
                 }
             } else {
                 Text(String(format: L("%@ is not installed on this Mac. Install it, or set it up by hand with the snippet below."), descriptor.displayName))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
 
             if let note {
                 Text(note)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
         } header: {
@@ -437,23 +442,23 @@ struct MCPClientDetailView: View {
     @ViewBuilder
     private var connectionStatusRow: some View {
         if let connection = model.clientConnections[descriptor.id] {
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * textScale) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(String(format: L("%@ has connected to the server"), descriptor.displayName))
                     Text(connectedDetail(connection))
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
         } else {
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * textScale) {
                 Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L("Has not connected yet"))
                     Text(String(format: L("Restart %@ to connect — it turns green here once it has."), descriptor.displayName))
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -475,7 +480,7 @@ struct MCPClientDetailView: View {
     private var confirmSection: some View {
         Section {
             Text(L(descriptor.verificationHintKey))
-                .font(.callout)
+                .scaledFont(.callout)
                 .fixedSize(horizontal: false, vertical: true)
         } header: {
             Text(descriptor.kind == .manual
@@ -490,7 +495,7 @@ struct MCPClientDetailView: View {
             if let path = configFilePath {
                 LabeledContent(L("Config file")) {
                     Text(verbatim: path)
-                        .font(.caption.monospaced())
+                        .scaledFont(.caption, design: .monospaced)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                         .lineLimit(1)
@@ -522,18 +527,18 @@ struct MCPClientDetailView: View {
                     if snippetCopied {
                         Label(L("Copied to the clipboard."), systemImage: "checkmark")
                             .labelStyle(.titleAndIcon)
-                            .font(.caption)
+                            .scaledFont(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 if descriptor.kind == .manual, let note {
                     Text(note)
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             } else {
                 Text(L("The snippet appears here as soon as TorroMail finds its server."))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
         } header: {
@@ -548,9 +553,9 @@ struct MCPClientDetailView: View {
     private func codeBlock(_ text: String) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(verbatim: text)
-                .font(.system(.caption, design: .monospaced))
+                .scaledFont(.caption, design: .monospaced)
                 .textSelection(.enabled)
-                .padding(12)
+                .scaledPadding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(codeGround, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -568,7 +573,7 @@ struct MCPClientDetailView: View {
     // MARK: - Rows
 
     private func checkRow(ok: Bool, title: String, pending: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 8 * textScale) {
             Image(systemName: ok ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(ok ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
             Text(ok ? String(format: title, descriptor.displayName) : pending)
@@ -582,17 +587,17 @@ struct MCPClientDetailView: View {
         case .unknown:
             EmptyView()
         case let .responds(count):
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * textScale) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 Text(String(format: L("TorroMail server answers — %d tools"), count))
                 Spacer()
             }
         case let .failed(message):
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * textScale) {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L("TorroMail server did not answer"))
-                    Text(message).font(.caption).foregroundStyle(.secondary)
+                    Text(message).scaledFont(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
             }

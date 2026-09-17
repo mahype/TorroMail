@@ -10,6 +10,7 @@ import TorroMailKit
 /// chosen. Nothing half-configured reaches the account list: the trial runs
 /// against a throwaway policy document, and cancelling leaves nothing behind.
 struct AccountSetupWizard: View {
+    @Environment(\.textScale) private var textScale
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var model: TorroMailModel
 
@@ -73,30 +74,30 @@ struct AccountSetupWizard: View {
 
             footer
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 520 * max(1, textScale), height: 420 * max(1, textScale))
         .onDisappear(perform: discardLeftovers)
     }
 
     // MARK: - Chrome
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 10 * textScale) {
             Image(systemName: "envelope.badge.shield.half.filled")
-                .font(.title2)
+                .scaledFont(.title2)
                 .foregroundStyle(Color.torroRed)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 1 * textScale) {
                 Text(L("Add Account"))
-                    .font(.headline)
+                    .scaledFont(.headline)
                 if !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.caption)
+                        .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Spacer()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .scaledPadding(.horizontal, 20)
+        .scaledPadding(.vertical, 14)
     }
 
     private var subtitle: String {
@@ -112,7 +113,7 @@ struct AccountSetupWizard: View {
         HStack {
             if let failure {
                 Label(failure, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
@@ -137,8 +138,8 @@ struct AccountSetupWizard: View {
                 EmptyView()
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .scaledPadding(.horizontal, 20)
+        .scaledPadding(.vertical, 12)
     }
 
     // MARK: - Steps
@@ -151,7 +152,7 @@ struct AccountSetupWizard: View {
                 TextField(L("Sender Name"), text: $name, prompt: Text(verbatim: "Sven Wagener"))
             } footer: {
                 Text(L("The name and address anything you approve is sent as."))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -159,11 +160,11 @@ struct AccountSetupWizard: View {
     }
 
     private func waitingStep(_ format: String) -> some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 14 * textScale) {
             ProgressView()
                 .controlSize(.large)
             Text(String(format: format, Autodiscovery.domain(of: email) ?? email))
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.secondary)
         }
     }
@@ -213,18 +214,18 @@ struct AccountSetupWizard: View {
     /// One button. The provider's own page does the rest, which is the whole
     /// point — TorroMail never sees the password.
     private func oauthStep(_ issuer: OAuthIssuer) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 16 * textScale) {
             Spacer()
             Image(systemName: "lock.shield")
-                .font(.system(size: 34))
+                .scaledSymbolFont(size: 34)
                 .foregroundStyle(Color.torroRed)
             Text(String(format: L("%@ handles the login."), issuer.displayName))
-                .font(.headline)
+                .scaledFont(.headline)
             Text(String(format: L("You sign in on %@’s own page. TorroMail never sees your password."), issuer.displayName))
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
+                .scaledPadding(.horizontal, 40)
 
             // Google keeps unverified apps behind a warning screen. Saying so
             // first turns a scare into an expected step; saying nothing makes
@@ -234,10 +235,10 @@ struct AccountSetupWizard: View {
                     L("Google will warn that TorroMail is not verified — that is expected while it is in testing. Choose “Advanced” and continue."),
                     systemImage: "info.circle"
                 )
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
-                .padding(.horizontal, 40)
+                .scaledPadding(.horizontal, 40)
             }
 
             if !ProviderCatalog.isConfigured(issuer) {
@@ -245,7 +246,7 @@ struct AccountSetupWizard: View {
                     String(format: L("This build has no %@ client registered, so the OAuth login is unavailable."), issuer.displayName),
                     systemImage: "exclamationmark.triangle"
                 )
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
             }
 
@@ -264,11 +265,11 @@ struct AccountSetupWizard: View {
     }
 
     private func appPasswordStep(_ setupURL: URL) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12 * textScale) {
             Text(String(format: L("%@ needs an app password."), discovered?.providerLabel ?? ""))
-                .font(.headline)
+                .scaledFont(.headline)
             Text(L("Your normal password will not work for mail apps. Create an app password and paste it here — it is a password just for TorroMail, and you can revoke it any time."))
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -280,7 +281,7 @@ struct AccountSetupWizard: View {
                     L("The one-click sign-in is not available in this version yet. An app password works just as well and needs two-factor to be on."),
                     systemImage: "info.circle"
                 )
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -296,17 +297,17 @@ struct AccountSetupWizard: View {
             manualDetails
             Spacer()
         }
-        .padding(20)
+        .scaledPadding(20)
     }
 
     private var passwordStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12 * textScale) {
             if discovered == nil {
                 Label(
                     L("Nothing could be found for this domain — the server details have to come from you."),
                     systemImage: "questionmark.circle"
                 )
-                .font(.callout)
+                .scaledFont(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -323,7 +324,7 @@ struct AccountSetupWizard: View {
                     ),
                     systemImage: "info.circle"
                 )
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -334,7 +335,7 @@ struct AccountSetupWizard: View {
             manualDetails
             Spacer()
         }
-        .padding(20)
+        .scaledPadding(20)
     }
 
     /// Collapsed when discovery worked, open when it did not — the fields are
@@ -349,26 +350,26 @@ struct AccountSetupWizard: View {
                 TextField(L("Username"), text: $username)
             }
             .formStyle(.columns)
-            .padding(.top, 6)
+            .scaledPadding(.top, 6)
         }
     }
 
     private var permissionsStep: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 18 * textScale) {
             Spacer()
             Label(String(format: L("Connected as %@"), email), systemImage: "checkmark.circle.fill")
-                .font(.headline)
+                .scaledFont(.headline)
                 .foregroundStyle(.green)
 
-            VStack(spacing: 8) {
+            VStack(spacing: 8 * textScale) {
                 Text(L("What may connected assistants do with this account?"))
-                    .font(.callout)
+                    .scaledFont(.callout)
                 PresetChips(permissions: $permissions)
                 Text(L("Every send waits for your approval, whatever you pick here. You can change this any time."))
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
+                    .scaledPadding(.horizontal, 40)
             }
             Spacer()
         }

@@ -8,6 +8,24 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+// Typography defaults, invalid saved preferences and keyboard boundaries.
+require(TextSize.defaultPercent == 100, "text starts at the original system size")
+require(TextSize.normalized(0) == 100 && TextSize.normalized(999) == 100,
+        "invalid stored text sizes recover to the default")
+require(TextSize.smaller(than: 85) == 85 && TextSize.larger(than: 160) == 160,
+        "text size shortcuts stop at the supported boundaries")
+var textPercent = TextSize.steps.first!
+for expected in TextSize.steps.dropFirst() {
+    textPercent = TextSize.larger(than: textPercent)
+    require(textPercent == expected, "larger text visits each supported size once")
+}
+for expected in TextSize.steps.dropLast().reversed() {
+    textPercent = TextSize.smaller(than: textPercent)
+    require(textPercent == expected, "smaller text visits each supported size once")
+}
+require(TextSize.smaller(than: TextSize.defaultPercent) == 85 && TextSize.larger(than: TextSize.defaultPercent) == 115,
+        "the original text size has one neighboring step in either direction")
+
 let model = TorroMailModel.preview()
 
 // Decisions, not options: every sidebar destination is something the user
