@@ -70,3 +70,81 @@ fn the_server_serves_from_every_document_the_writer_publishes() {
         std::fs::remove_dir_all(path.parent().expect("a parent")).ok();
     }
 }
+
+// MARK: the command another surface calls instead of writing the document itself
+
+fn request_file(name: &str, request: &serde_json::Value) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("torromail-policy-request-{}-{name}.json", std::process::id()));
+    std::fs::write(&path, request.to_string()).expect("the request is writable");
+    path
+}
+
+fn policy_document(request_path: &std::path::Path) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_torromail-mcp"))
+        .arg("--policy-document")
+        .arg(request_path)
+        // No token, no policy path: this mode must need neither.
+        .env_remove("TORROMAIL_TOKEN")
+        .env_remove("TORROMAIL_POLICY_PATH")
+        .output()
+        .expect("the server binary runs")
+}
+
+#[test]
+fn the_policy_document_command_answers_every_shared_case_as_written() {
+    let cases_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/policy-document.json");
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cases_path).expect("the shared cases exist")).expect("JSON");
+
+    for (index, case) in file["cases"].as_array().expect("cases").iter().enumerate() {
+        let name = case["name"].as_str().expect("named");
+        let request = serde_json::json!({
+            "accounts": case["accounts"],
+            "clients": case["clients"],
+            "context": {
+                "secret_ref_prefix": file["secret_ref_prefix"],
+                "google_client_id": "$GOOGLE_CLIENT_ID",
+                "microsoft_client_id": "$MICROSOFT_CLIENT_ID",
+            },
+        });
+        let path = request_file(&index.to_string(), &request);
+        let output = policy_document(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert!(output.status.success(), "{name}: {}", String::from_utf8_lossy(&output.stderr));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout is the document");
+        assert_eq!(document, case["expected"], "{name}");
+    }
+}
+
+#[test]
+fn a_grant_that_cannot_be_understood_fails_the_publication() {
+    // Falling back to "all accounts" here would widen a client's access
+    // because of a typo. No document is better than a broader one.
+    for (label, access) in [
+        ("unknown mode", serde_json::json!({ "mode": "everything" })),
+        ("all with ids", serde_json::json!({ "mode": "all", "account_ids": ["work"] })),
+        ("selected without ids", serde_json::json!({ "mode": "selected" })),
+        ("empty id", serde_json::json!({ "mode": "selected", "account_ids": [""] })),
+    ] {
+        let request = serde_json::json!({
+            "accounts": [],
+            "clients": [{ "id": "c", "name": "C", "token_sha256": "aa", "account_access": access }],
+            "context": { "secret_ref_prefix": "keychain://TorroMail/", "google_client_id": "g", "microsoft_client_id": "m" },
+        });
+        let path = request_file(&label.replace(' ', "-"), &request);
+        let output = policy_document(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(output.status.code(), Some(1), "{label}");
+        assert!(output.stdout.is_empty(), "{label}: nothing is published");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("account_access"), "{label}");
+    }
+}
+
+#[test]
+fn a_missing_request_is_an_error_not_an_empty_document() {
+    let output = policy_document(std::path::Path::new("/nonexistent/torromail-request.json"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}

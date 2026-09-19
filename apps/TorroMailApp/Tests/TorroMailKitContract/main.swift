@@ -1585,4 +1585,15 @@ for policyCase in policyCases {
     }
 }
 
+// The writer is the server binary now. Without it there is no document — and
+// "no document" must be an error the caller sees, never an empty or partial
+// file the server would then read its rights from.
+var missingWriterFailed = false
+do {
+    _ = try PolicyDocument.data(for: [], clients: [], executableName: "/nonexistent/torromail-mcp")
+} catch {
+    missingWriterFailed = true
+}
+require(missingWriterFailed, "a missing server binary fails the publication instead of inventing a document")
+
 print("TorroMailKit control-surface contract passed")

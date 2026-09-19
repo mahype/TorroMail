@@ -77,8 +77,8 @@ public enum AccountMailboxList {
             return .failure(Failure(reason: error.localizedDescription))
         }
 
-        let output = MailboxPipeCapture(limit: 1024 * 1024)
-        let errors = MailboxPipeCapture(limit: 8 * 1024)
+        let output = PipeCapture(limit: 1024 * 1024)
+        let errors = PipeCapture(limit: 8 * 1024)
         let drained = DispatchGroup()
         for (capture, handle) in [
             (output, outputPipe.fileHandleForReading),
@@ -106,7 +106,10 @@ public enum AccountMailboxList {
     }
 }
 
-private final class MailboxPipeCapture: @unchecked Sendable {
+/// Collects what a child process writes to one pipe, up to a limit, from a
+/// background queue. Shared by every call that reads the server binary's
+/// output.
+final class PipeCapture: @unchecked Sendable {
     let limit: Int
     private let lock = NSLock()
     private var bytes = Data()

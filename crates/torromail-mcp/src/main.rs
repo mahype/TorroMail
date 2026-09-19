@@ -33,6 +33,29 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // The policy document for a request file, on stdout. A pure
+    // transformation — it reads no secret and touches no mailbox — so it sits
+    // in front of the pairing gate: the app has to be able to publish the
+    // very document that gate is read from.
+    if let Some(position) = arguments.iter().position(|argument| argument == "--policy-document") {
+        let Some(request_path) = arguments.get(position + 1) else {
+            eprintln!("--policy-document needs a request file");
+            std::process::exit(2);
+        };
+        let outcome = std::fs::read_to_string(request_path)
+            .map_err(|error| format!("the request cannot be read: {error}"))
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|error| format!("the request is not JSON: {error}")))
+            .and_then(|request| torromail_control::policy::document_for_request(&request).map_err(|error| error.to_string()));
+        match outcome {
+            Ok(document) => println!("{document}"),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // The access key the spawning client carries in its MCP config. Read
     // here, hashed inside the server, and enforced per call against the
     // policy document's `clients` allowlist. Scrubbing it from the
