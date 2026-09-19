@@ -460,6 +460,14 @@ fn mail_mark_rejects_unknown_flag_names() {
     assert!(response.contains(r#""code":-32602"#));
 }
 
+/// A `secret-tool` that answers every lookup the way the real one answers a
+/// miss: exit 1, not a word on stderr. `false` does exactly that, and using a
+/// program that already exists avoids writing an executable while other tests
+/// fork — the race that ends in "text file busy".
+fn secret_tool_that_finds_nothing() -> &'static str {
+    "false"
+}
+
 fn temp_policy_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "torromail-policy-{}-{name}.json",
@@ -1816,9 +1824,6 @@ fn an_account_with_no_connection_says_so_rather_than_reporting_it_missing() {
 /// way out would break it silently. The Swift side matches the first line
 /// against the outcome word exactly: pad it and the classification is lost.
 #[test]
-// Asserts the macOS keychain verdict ("a missing secret never becomes
-// readable"). On Linux the secret backend is still undecided — see #12, B1.
-#[cfg_attr(not(target_os = "macos"), ignore = "asserts macOS keychain semantics; Linux secret backend pending (#12)")]
 fn a_failed_check_writes_the_outcome_word_alone_on_the_first_stderr_line() {
     let path = temp_policy_path("stderr-contract");
     checkable_account_document(&path, "");
@@ -1826,6 +1831,10 @@ fn a_failed_check_writes_the_outcome_word_alone_on_the_first_stderr_line() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_torromail-mcp"))
         .args(["--check-account", "work"])
         .env("TORROMAIL_POLICY_PATH", &path)
+        // Off macOS the secret comes from the Secret Service. A stand-in that
+        // finds nothing keeps this about the verdict — a secret that is not
+        // there — rather than about whether this machine runs a keyring.
+        .env("TORROMAIL_SECRET_TOOL", secret_tool_that_finds_nothing())
         .env_remove("TORROMAIL_TOKEN")
         .output()
         .expect("the check binary runs");
@@ -2310,9 +2319,10 @@ fn sweepable_document(path: &std::path::Path, clients: &str) {
 }
 
 #[test]
-// Asserts the macOS keychain verdict ("a missing secret never becomes
-// readable"). On Linux the secret backend is still undecided — see #12, B1.
-#[cfg_attr(not(target_os = "macos"), ignore = "asserts macOS keychain semantics; Linux secret backend pending (#12)")]
+// Runs in-process, so it meets whatever secret service this machine has — or
+// has not. Off macOS that makes the outcome the machine's, not the code's; the
+// verdict itself is pinned by the stderr-contract test above.
+#[cfg_attr(not(target_os = "macos"), ignore = "in-process sweep depends on the machine's secret service off macOS")]
 fn the_sweep_records_every_account_that_is_due() {
     let dir = temp_audit_dir("sweep-due");
     let policy = dir.join("policy.json");

@@ -89,6 +89,16 @@ fn key_hints(app: &App) -> Line<'static> {
     let lang = app.lang;
     let mut hints: Vec<(&str, &str)> = Vec::new();
     match app.section {
+        Section::Accounts if app.focus == crate::app::Focus::Detail => {
+            hints.extend([("↑↓", "select"), (lang.t("space"), "toggle"), (lang.t("ctrl+s"), "save"), ("esc", "back")]);
+            let mut spans = vec![Span::raw(" ")];
+            for (key, label) in hints {
+                spans.push(Span::styled(format!(" {key} "), Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!(" {}   ", lang.t(label)), theme::muted()));
+            }
+            return Line::from(spans);
+        }
+        Section::Accounts if app.account_tab == 1 => hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit")]),
         Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab")]),
         Section::Clients => hints.push(("↑↓", "select")),
         Section::Log => hints.extend([("↑↓", "row"), ("s", "sort"), ("r", "reverse")]),

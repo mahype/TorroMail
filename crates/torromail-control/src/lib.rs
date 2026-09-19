@@ -12,8 +12,11 @@ pub mod clients;
 pub mod logs;
 pub mod mailbox_names;
 pub mod paths;
+pub mod pairings;
 pub mod policy;
 pub mod providers;
+pub mod save;
+pub mod secrets;
 pub mod state;
 
 pub use account::{

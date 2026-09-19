@@ -140,3 +140,9 @@ fn server_binary(environment: &Environment) -> Option<PathBuf> {
         .chain(environment.executable_directories.iter().map(|directory| directory.join("torromail-mcp")))
         .find(|candidate| candidate.is_file())
 }
+
+/// Saves one edited account: state and policy document, together.
+pub fn save_account(data_directory: &Path, account: &MailAccount) -> Result<(), String> {
+    torromail_control::save::save_account(data_directory, account, &torromail_control::save::default_context())
+        .map_err(|error| error.to_string())
+}

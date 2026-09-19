@@ -103,20 +103,40 @@ fn store(service: &str, account: &str, secret: &str) -> CoreResult<()> {
         .map_err(|error| CoreError::ProviderFailure(format!("keychain write failed: {error}")))
 }
 
-/// Both stubs stay `ProviderFailure`: a build with no keychain is a platform
-/// mistake, not an account state, and no password the user types would change
-/// it. The app ships macOS-only, so this is a compile target that should never
-/// meet a real account.
+/// Everywhere else the desktop's Secret Service holds the secrets, under the
+/// same service and account names the macOS keychain uses.
+///
+/// Two failures that look alike and are not. A secret that is *not there* is
+/// the macOS ruling unchanged: nothing heals it, the user has to enter the
+/// password, so it is `CredentialRejected` and the dot goes red at once. A
+/// service that *cannot be reached* — no session bus, a keyring nobody has
+/// unlocked yet — is a state of the machine, often a passing one right after
+/// login, and says nothing about the account: that stays `ProviderFailure`,
+/// which the health log grants its three strikes.
 #[cfg(not(target_os = "macos"))]
-fn lookup(_service: &str, _account: &str) -> CoreResult<String> {
-    Err(CoreError::ProviderFailure(
-        "keychain secrets are only available on macOS".to_owned(),
-    ))
+fn secret_store() -> torromail_control::secrets::SecretToolStore {
+    // The override exists for tests and for installations that keep
+    // `secret-tool` off the PATH a client spawns the server with.
+    match std::env::var_os("TORROMAIL_SECRET_TOOL") {
+        Some(program) => torromail_control::secrets::SecretToolStore::with_program(program),
+        None => torromail_control::secrets::SecretToolStore::default(),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn store(_service: &str, _account: &str, _secret: &str) -> CoreResult<()> {
-    Err(CoreError::ProviderFailure(
-        "keychain secrets are only available on macOS".to_owned(),
-    ))
+fn lookup(service: &str, account: &str) -> CoreResult<String> {
+    use torromail_control::secrets::SecretStore;
+    match secret_store().get(service, account) {
+        Ok(Some(secret)) => Ok(secret),
+        Ok(None) => Err(unreadable_secret("nothing is stored for this account")),
+        Err(error) => Err(CoreError::ProviderFailure(error.to_string())),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store(service: &str, account: &str, secret: &str) -> CoreResult<()> {
+    use torromail_control::secrets::SecretStore;
+    secret_store()
+        .set(service, account, secret)
+        .map_err(|error| CoreError::ProviderFailure(format!("secret write failed: {error}")))
 }
