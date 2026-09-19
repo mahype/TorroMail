@@ -129,6 +129,20 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             client.installed,
             lang.t(if client.installed { "Installed on this machine" } else { "Not found on this machine" }).to_owned(),
         ));
+        if let (Some(requirement), Some(met)) = (client.descriptor.requirement, client.requirement_met) {
+            lines.push(tick(
+                met,
+                if met {
+                    format!("{} {}", requirement.name, lang.t("is installed"))
+                } else {
+                    format!("{} {}", lang.t("Needs the extension"), requirement.name)
+                },
+            ));
+            if !met {
+                // On a line of its own, so it can be read — and copied — whole.
+                lines.push(Line::styled(format!("  {}", requirement.install_command), Style::new().fg(theme::CYAN)));
+            }
+        }
         lines.push(tick(
             client.configured,
             lang.t(if client.configured {

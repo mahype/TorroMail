@@ -66,7 +66,7 @@ fn snapshot() -> Snapshot {
             .iter()
             .map(|descriptor| ClientView {
                 descriptor: *descriptor,
-                installed: matches!(descriptor.id, "claude-code" | "cursor"),
+                installed: matches!(descriptor.id, "claude-code" | "cursor" | "pi"),
                 configured: descriptor.id == "claude-code",
                 config_path: (descriptor.id == "claude-code").then(|| PathBuf::from("/home/sven/.claude.json")),
                 connection: (descriptor.id == "claude-code").then(|| ClientConnection {
@@ -77,6 +77,7 @@ fn snapshot() -> Snapshot {
                 }),
                 access: (descriptor.id == "claude-code").then_some(torromail_control::policy::ClientAccountAccess::All),
                 has_current_key: descriptor.id == "claude-code",
+                requirement_met: (descriptor.id == "pi").then_some(false),
             })
             .collect(),
         audit: vec![
@@ -914,4 +915,15 @@ fn a_rebuild_that_fails_says_why() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_shows(&render(&app), &["Der Cache konnte nicht neu aufgebaut werden.", "[AUTHENTICATIONFAILED] no"]);
+}
+
+
+#[test]
+fn pi_says_which_extension_it_needs_and_how_to_get_it() {
+    let mut app = App::new(Lang::De, snapshot());
+    press(&mut app, KeyCode::Char('3'));
+    while app.snapshot.clients[app.client_index].descriptor.id != "pi" {
+        press(&mut app, KeyCode::Down);
+    }
+    assert_shows(&render(&app), &["Pi", "Braucht die Erweiterung pi-mcp-adapter", "pi install npm:pi-mcp-adapter"]);
 }

@@ -114,10 +114,48 @@ pub struct ClientDescriptor {
     pub snippet_format: SnippetFormat,
     /// For a manual client whose config file is known: where the snippet goes.
     pub manual_config_path: Option<&'static str>,
+    /// Something the assistant needs before it can speak MCP at all.
+    pub requirement: Option<Requirement>,
 }
 
+/// An extension an assistant needs for MCP. Pi ships without MCP on purpose
+/// and points to extensions for it; `pi-mcp-adapter` is the one everybody
+/// uses, and it reads the standard `mcpServers` shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requirement {
+    pub name: &'static str,
+    /// The command that installs it, shown as is.
+    pub install_command: &'static str,
+    /// Paths under the home directory; any one existing means it is there.
+    markers: &'static [&'static str],
+    /// A settings file under the home directory that names it when installed.
+    listed_in: &'static str,
+}
+
+impl Requirement {
+    #[must_use]
+    pub fn is_met(&self, home: &Path) -> bool {
+        self.markers.iter().any(|marker| home.join(marker).exists())
+            || std::fs::read_to_string(home.join(self.listed_in)).is_ok_and(|settings| settings.contains(self.name))
+    }
+}
+
+const PI_MCP_ADAPTER: Requirement = Requirement {
+    name: "pi-mcp-adapter",
+    install_command: "pi install npm:pi-mcp-adapter",
+    markers: &[".pi/agent/npm/node_modules/pi-mcp-adapter"],
+    listed_in: ".pi/agent/settings.json",
+};
+
 const fn automatic(id: &'static str, display_name: &'static str, snippet_format: SnippetFormat) -> ClientDescriptor {
-    ClientDescriptor { id, display_name, kind: ClientKind::Automatic, snippet_format, manual_config_path: None }
+    ClientDescriptor {
+        id,
+        display_name,
+        kind: ClientKind::Automatic,
+        snippet_format,
+        manual_config_path: None,
+        requirement: None,
+    }
 }
 
 /// Ids are the ones access keys are stored under, so they never change.
@@ -125,6 +163,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
     automatic("claude-desktop", "Claude Desktop", SnippetFormat::McpServersJson),
     automatic("claude-code", "Claude Code", SnippetFormat::McpServersJson),
     automatic("opencode", "OpenCode", SnippetFormat::OpenCodeJson),
+    ClientDescriptor { requirement: Some(PI_MCP_ADAPTER), ..automatic("pi", "Pi", SnippetFormat::McpServersJson) },
     automatic("chatgpt", "ChatGPT", SnippetFormat::McpServersJson),
     automatic("gemini-cli", "Gemini CLI", SnippetFormat::McpServersJson),
     automatic("cursor", "Cursor", SnippetFormat::McpServersJson),
@@ -137,6 +176,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
         kind: ClientKind::Manual,
         snippet_format: SnippetFormat::OpenClawJson,
         manual_config_path: Some("~/.openclaw/openclaw.json"),
+        requirement: None,
     },
     ClientDescriptor {
         id: "hermes",
@@ -144,6 +184,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
         kind: ClientKind::Manual,
         snippet_format: SnippetFormat::HermesYaml,
         manual_config_path: Some("~/.hermes/config.yaml"),
+        requirement: None,
     },
     ClientDescriptor {
         id: "other",
@@ -151,6 +192,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
         kind: ClientKind::Manual,
         snippet_format: SnippetFormat::McpServersJson,
         manual_config_path: None,
+        requirement: None,
     },
 ];
 
@@ -234,6 +276,11 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
     // The `User` directory is VS Code's marker; its servers sit under
     // `servers`, not `mcpServers`.
     json_client("vscode", application_support.join("Code/User"), "mcp.json", true);
+
+    // Pi: the adapter's Pi-owned global file. Not the shared
+    // ~/.config/mcp/mcp.json — the entry carries a key minted for Pi, and a
+    // file every MCP host reads would hand that key to all of them.
+    json_client("pi", home.join(".pi/agent"), "mcp.json", false);
 
     // OpenCode keeps its config under ~/.config on every platform. A `.jsonc`
     // is used when that is the only one there; comments in it make it
@@ -627,6 +674,11 @@ pub fn status_json(environment: &Environment) -> Value {
                 "kind": match descriptor.kind { ClientKind::Automatic => "automatic", ClientKind::Manual => "manual" },
                 "snippet_format": descriptor.snippet_format.as_str(),
                 "manual_config_path": descriptor.manual_config_path,
+                "requirement": descriptor.requirement.map(|requirement| json!({
+                    "name": requirement.name,
+                    "install_command": requirement.install_command,
+                    "met": requirement.is_met(&environment.home),
+                })),
                 "installed": client.is_some(),
                 "config_path": client.map(|client| client.setup.config().to_string_lossy().into_owned()),
                 "configured": client.is_some_and(|client| is_configured(&client.setup)),

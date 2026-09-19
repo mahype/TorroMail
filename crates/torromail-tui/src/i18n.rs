@@ -227,6 +227,8 @@ const GERMAN: &[(&str, &str)] = &[
     ("Report a problem", "Problem melden"),
     ("Every action an assistant takes is recorded in the log — that is the first place to look when something went differently than expected.", "Jede Aktion eines Assistenten steht im Protokoll — dort schaust du zuerst nach, wenn etwas anders lief als erwartet."),
     ("edit", "bearbeiten"),
+    ("is installed", "ist installiert"),
+    ("Needs the extension", "Braucht die Erweiterung"),
     ("Storage", "Speicher"),
     ("Rebuild", "Neu aufbauen"),
     ("Rebuilding…", "Baue neu auf …"),
