@@ -1,10 +1,10 @@
 # Maintainer: Sven Wagener (mahype)
 #
-# The release workflow (.github/workflows/release-linux.yml) fills in pkgver,
-# pkgrel and the checksums, builds and installs this package in a clean Arch
-# container, and attaches the result — PKGBUILD plus .SRCINFO — to the release
-# as torromail-bin-aur.tar.gz. That archive is what goes to the AUR; the copy
-# here is the template.
+# The release workflows (.github/workflows/build-linux.yml) fill in pkgver,
+# pkgrel, the release tag and the checksums, build and install this package in
+# a clean Arch container, and attach the result — PKGBUILD plus .SRCINFO — to
+# the release as torromail-bin-aur.tar.gz. That archive is what goes to the
+# AUR; the copy here is the template.
 
 pkgname=torromail-bin
 pkgver=0.0.0
@@ -22,13 +22,18 @@ provides=('torromail')
 conflicts=('torromail')
 # Prebuilt programs: there are no debug symbols to split off.
 options=('!debug')
-source_x86_64=("torromail-${pkgver}-${pkgrel}-x86_64-linux.tar.gz::${url}/releases/download/linux-v${pkgver}-${pkgrel}/torromail-${pkgver}-${pkgrel}-x86_64-linux.tar.gz")
-source_aarch64=("torromail-${pkgver}-${pkgrel}-aarch64-linux.tar.gz::${url}/releases/download/linux-v${pkgver}-${pkgrel}/torromail-${pkgver}-${pkgrel}-aarch64-linux.tar.gz")
+# Which release the archives come from, and what they are called there. Both
+# are filled in: a joint release is tagged v0.10.0, a Linux-only one
+# linux-v0.10.0-2.
+_tag=FILLED_IN
+_name=FILLED_IN
+source_x86_64=("${_name}-x86_64-linux.tar.gz::${url}/releases/download/${_tag}/${_name}-x86_64-linux.tar.gz")
+source_aarch64=("${_name}-aarch64-linux.tar.gz::${url}/releases/download/${_tag}/${_name}-aarch64-linux.tar.gz")
 sha256sums_x86_64=('SKIP')
 sha256sums_aarch64=('SKIP')
 
 package() {
-  cd "torromail-${pkgver}-${pkgrel}-${CARCH}-linux"
+  cd "${_name}-${CARCH}-linux"
   # Side by side: the surface looks for the server next to itself and writes
   # that absolute path into an assistant's configuration.
   install -Dm755 torromail "${pkgdir}/usr/bin/torromail"
