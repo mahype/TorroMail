@@ -6,9 +6,12 @@
 //! file system, so every screen can be rendered in a test from a snapshot.
 
 pub mod app;
+pub mod autocheck;
+pub mod check;
 pub mod data;
 pub mod i18n;
 pub mod rebuild;
+pub mod settings;
 pub mod theme;
 pub mod ui;
 pub mod wizard;
@@ -63,6 +66,24 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
         Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),
+        Request::SaveSettings(settings) => {
+            return match settings.save(&backend.data_directory) {
+                Ok(()) => {
+                    app.settings = **settings;
+                    app.lang = settings.lang();
+                }
+                Err(error) => app.failed("Could not save.", error.to_string()),
+            };
+        }
+        Request::SetAutocheck(on) => {
+            let outcome = backend.set_autocheck(*on);
+            app.replace_snapshot(backend.load());
+            return match outcome {
+                Ok(()) if *on => app.succeeded("Accounts are now checked every 15 minutes, also while this window is closed."),
+                Ok(()) => app.succeeded("The background check is off."),
+                Err(reason) => app.failed("Could not change the background check.", reason),
+            };
+        }
         Request::Discover(email) => {
             let found = (backend.discoverer)(email);
             if let Some(wizard) = &mut app.wizard {

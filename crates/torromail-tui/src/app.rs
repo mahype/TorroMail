@@ -97,7 +97,13 @@ pub enum Request {
     RemoveAccount(String),
     /// Find the servers for an address the provider table does not know.
     Discover(String),
+    SaveSettings(Box<crate::settings::Settings>),
+    /// Install or remove the timer behind the background check.
+    SetAutocheck(bool),
 }
+
+/// The rows of the settings section, top to bottom.
+pub const SETTINGS_ROWS: usize = 5;
 
 /// The editable rows of the permissions tab, top to bottom.
 pub const PERMISSION_ROWS: usize = 11;
@@ -163,6 +169,8 @@ pub struct App {
     pub detail_scroll: u16,
     /// The account whose cache is being rebuilt, and the last progress seen.
     pub rebuild: Option<(String, Option<crate::rebuild::Progress>)>,
+    pub settings: crate::settings::Settings,
+    pub settings_index: usize,
 }
 
 impl App {
@@ -193,6 +201,8 @@ impl App {
             confirm_remove: false,
             extras: EditExtras::default(),
             rebuild: None,
+            settings: crate::settings::Settings::default(),
+            settings_index: 0,
             detail_scroll: 0,
         }
     }
@@ -549,6 +559,9 @@ impl App {
             return;
         }
         self.message = None;
+        if self.section == Section::Settings && self.on_settings_key(key.code) {
+            return;
+        }
         if self.section == Section::Clients && self.on_client_key(key.code) {
             return;
         }
@@ -620,6 +633,32 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Language, background check, notifications, then the two jumps the
+    /// macOS app offers here too. Returns whether it took the key.
+    fn on_settings_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.settings_index = self.settings_index.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.settings_index = (self.settings_index + 1).min(SETTINGS_ROWS - 1),
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Left | KeyCode::Right => match self.settings_index {
+                0 => {
+                    let mut settings = self.settings;
+                    settings.language = settings.next_language();
+                    self.request = Some(Request::SaveSettings(Box::new(settings)));
+                }
+                1 => self.request = Some(Request::SetAutocheck(!self.snapshot.autocheck)),
+                2 => {
+                    let mut settings = self.settings;
+                    settings.notifications = !settings.notifications;
+                    self.request = Some(Request::SaveSettings(Box::new(settings)));
+                }
+                3 => self.section = Section::Clients,
+                _ => self.section = Section::Updates,
+            },
+            _ => return false,
+        }
+        true
     }
 
     /// The keys that act on the selected client. Returns whether it took one.

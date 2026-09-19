@@ -89,6 +89,8 @@ pub struct Snapshot {
     /// How many tools the server binary offered when asked — the half of "is
     /// it set up?" this surface can prove by itself. `None`: it did not answer.
     pub server_tools: Option<usize>,
+    /// Whether the timer behind the background check is installed.
+    pub autocheck: bool,
 }
 
 impl Snapshot {
@@ -194,6 +196,7 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
         pairings_problem,
         home: environment.map(|environment| environment.home.clone()),
         server_tools: None,
+        autocheck: false,
     }
 }
 
@@ -229,7 +232,12 @@ pub struct Backend {
     /// Asked once: launching the server for every two-second reload would be
     /// a process per frame for an answer that does not change.
     pub tool_count: std::cell::OnceCell<Option<usize>>,
+    /// Where systemd user units live, and how `systemctl --user` is run.
+    pub unit_directory: PathBuf,
+    pub systemctl: Box<Systemctl>,
 }
+
+pub type Systemctl = dyn Fn(&[&str]) -> Result<(), String>;
 
 pub type RebuildCommand = dyn Fn(&Path, &Path, &str, &str) -> std::process::Command;
 
@@ -244,6 +252,7 @@ impl Backend {
     pub fn load(&self) -> Snapshot {
         let mut snapshot = load(&self.data_directory, self.environment.as_ref());
         snapshot.server_tools = *self.tool_count.get_or_init(|| snapshot.server_binary.as_deref().and_then(count_tools));
+        snapshot.autocheck = crate::autocheck::is_enabled(&self.unit_directory);
         snapshot
     }
 
@@ -319,6 +328,12 @@ impl Backend {
     /// The "Test Connection" button: a real login, and — because the user
     /// asked for it — a record in the health log like any other check.
     pub fn test_connection(&self, account_id: &str) -> Result<(), String> {
+        self.check_and_record(account_id, "manual")
+    }
+
+    /// One real login, written to the health log under the given source —
+    /// `manual` for the button, `periodic` for the background pass.
+    pub fn check_and_record(&self, account_id: &str, source: &str) -> Result<(), String> {
         use torromail_control::enroll::CheckOutcome;
         use torromail_mcp::health::{self, HealthOutcome};
         let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
@@ -330,10 +345,20 @@ impl Backend {
             CheckOutcome::Rejected(reason) => (HealthOutcome::Rejected, reason.as_str()),
             CheckOutcome::Unreachable(reason) => (HealthOutcome::Unreachable, reason.as_str()),
         };
-        health::append(&self.data_directory.join(paths::HEALTH_LOG), account_id, word, "manual", detail);
+        health::append(&self.data_directory.join(paths::HEALTH_LOG), account_id, word, source, detail);
         match outcome {
             CheckOutcome::Ok => Ok(()),
             CheckOutcome::Rejected(reason) | CheckOutcome::Unreachable(reason) => Err(reason),
+        }
+    }
+
+    /// Turns the systemd timer behind the background check on or off.
+    pub fn set_autocheck(&self, on: bool) -> Result<(), String> {
+        if on {
+            let program = std::env::current_exe().map_err(|error| error.to_string())?;
+            crate::autocheck::enable(&self.unit_directory, &program, self.systemctl.as_ref())
+        } else {
+            crate::autocheck::disable(&self.unit_directory, self.systemctl.as_ref())
         }
     }
 

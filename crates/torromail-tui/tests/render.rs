@@ -89,6 +89,7 @@ fn snapshot() -> Snapshot {
         pairings_problem: None,
         home: Some(PathBuf::from("/home/sven")),
         server_tools: Some(15),
+        autocheck: false,
     }
 }
 
@@ -369,6 +370,8 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         rebuild_command: Box::new(|_, _, _, _| std::process::Command::new("true")),
         rebuild: std::cell::RefCell::new(None),
         tool_count: std::cell::OnceCell::new(),
+        unit_directory: directory.join("units"),
+        systemctl: Box::new(|_| Ok(())),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -429,6 +432,8 @@ fn scene(name: &str) -> Scene {
             rebuild_command: Box::new(|_, _, _, _| std::process::Command::new("true")),
             rebuild: std::cell::RefCell::new(None),
             tool_count: std::cell::OnceCell::new(),
+            unit_directory: root.join("units"),
+            systemctl: Box::new(|_| Ok(())),
         },
         root,
     }
@@ -926,4 +931,153 @@ fn pi_says_which_extension_it_needs_and_how_to_get_it() {
         press(&mut app, KeyCode::Down);
     }
     assert_shows(&render(&app), &["Pi", "Braucht die Erweiterung pi-mcp-adapter", "pi install npm:pi-mcp-adapter"]);
+}
+
+
+// MARK: settings
+
+#[test]
+fn the_settings_screen_has_settings() {
+    let app = {
+        let mut app = App::new(Lang::De, snapshot());
+        press(&mut app, KeyCode::Char('4'));
+        app
+    };
+    assert_shows(
+        &render(&app),
+        &["Sprache", "‹ System ›", "[ ] Konten alle 15 Minuten prüfen", "[✓] Benachrichtigen, wenn ein Konto ausfällt", "Assistenten einrichten", "Updates öffnen"],
+    );
+}
+
+#[test]
+fn the_language_changes_at_once_and_is_remembered() {
+    let scene = scene("settings-language");
+    let mut app = App::new(Lang::En, scene.backend.load());
+    press(&mut app, KeyCode::Char('4'));
+    assert_shows(&render(&app), &["Language", "Settings"]);
+
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Sprache", "‹ Deutsch ›", "Einstellungen"]);
+    let remembered = torromail_tui::settings::Settings::load(&scene.backend.data_directory);
+    assert_eq!(remembered.language, Some(Lang::De));
+    assert_eq!(remembered.lang(), Lang::De);
+
+    press(&mut app, KeyCode::Right);
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["‹ English ›", "Settings"]);
+    press(&mut app, KeyCode::Right);
+    scene.act(&mut app);
+    assert_eq!(torromail_tui::settings::Settings::load(&scene.backend.data_directory).language, None, "and back to the system's");
+}
+
+#[test]
+fn the_background_check_installs_a_timer_and_removes_it_again() {
+    use std::sync::{Arc, Mutex};
+    let mut scene = scene("settings-autocheck");
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let recorded = Arc::clone(&calls);
+    scene.backend.systemctl = Box::new(move |arguments| {
+        recorded.lock().expect("not poisoned").push(arguments.join(" "));
+        Ok(())
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+
+    let units = scene.root.join("units");
+    let service = std::fs::read_to_string(units.join("torromail-check.service")).expect("a service unit");
+    assert!(service.contains("\" check\n"), "it runs this program's `check`: {service}");
+    assert!(service.contains("ExecStart=\"/"), "by absolute path — a unit has no PATH: {service}");
+    let timer = std::fs::read_to_string(units.join("torromail-check.timer")).expect("a timer unit");
+    assert!(timer.contains("OnUnitActiveSec=15min") && timer.contains("WantedBy=timers.target"));
+    assert_eq!(*calls.lock().expect("not poisoned"), ["daemon-reload", "enable --now torromail-check.timer"]);
+    assert_shows(&render(&app), &["[✓] Konten alle 15 Minuten prüfen", "alle 15 Minuten geprüft"]);
+
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+    assert!(!units.join("torromail-check.timer").exists() && !units.join("torromail-check.service").exists());
+    assert_shows(&render(&app), &["[ ] Konten alle 15 Minuten prüfen", "Die Prüfung im Hintergrund ist aus."]);
+}
+
+#[test]
+fn a_timer_that_would_not_start_does_not_look_enabled() {
+    let mut scene = scene("settings-autocheck-fails");
+    scene.backend.systemctl = Box::new(|arguments| {
+        if arguments.first() == Some(&"enable") { Err("Failed to connect to bus".to_owned()) } else { Ok(()) }
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["[ ] Konten alle 15 Minuten prüfen", "ließ sich nicht ändern", "Failed to connect to bus"]);
+    assert!(!scene.root.join("units/torromail-check.timer").exists());
+}
+
+#[test]
+fn notifications_are_a_remembered_switch_and_the_jumps_jump() {
+    let scene = scene("settings-rest");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    // German by choice, not by whatever locale the tests happen to run under.
+    app.settings.language = Some(Lang::De);
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["[ ] Benachrichtigen, wenn ein Konto ausfällt"]);
+    assert!(!torromail_tui::settings::Settings::load(&scene.backend.data_directory).notifications);
+
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.section, Section::Clients);
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.section, Section::Updates);
+}
+
+#[test]
+fn the_background_pass_notifies_on_a_crossing_and_only_on_a_crossing() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use torromail_tui::check;
+    let mut scene = scene("check");
+    let notes: RefCell<Vec<String>> = RefCell::default();
+    let notify = |title: &str, body: &str| notes.borrow_mut().push(format!("{title}: {body}"));
+    let verdict = Rc::new(RefCell::new(CheckOutcome::Ok));
+    let answer = Rc::clone(&verdict);
+    scene.backend.checker = Box::new(move |_, _, _, account| {
+        // Only "work" ever fails; the other account stays fine throughout.
+        if account == "work" { answer.borrow().clone() } else { CheckOutcome::Ok }
+    });
+
+    let first = check::run(&scene.backend, Lang::De, Some(&notify));
+    assert_eq!((first.checked, first.broke.len(), first.recovered.len()), (2, 0, 0));
+    assert!(notes.borrow().is_empty(), "all is well: nothing to say");
+
+    *verdict.borrow_mut() = CheckOutcome::Rejected("[AUTHENTICATIONFAILED] no".to_owned());
+    let broke = check::run(&scene.backend, Lang::De, Some(&notify));
+    assert_eq!(broke.broke, ["Torro"]);
+    assert_eq!(*notes.borrow(), ["Torro: TorroMail erreicht dieses Konto nicht mehr. [AUTHENTICATIONFAILED] no"]);
+
+    check::run(&scene.backend, Lang::De, Some(&notify));
+    assert_eq!(notes.borrow().len(), 1, "a standing problem is not news");
+
+    *verdict.borrow_mut() = CheckOutcome::Ok;
+    let recovered = check::run(&scene.backend, Lang::De, Some(&notify));
+    assert_eq!(recovered.recovered, ["Torro"]);
+    assert_eq!(notes.borrow().last().map(String::as_str), Some("Torro: Wieder erreichbar."));
+
+    // Switched off, the pass still checks and records — it just stays quiet.
+    *verdict.borrow_mut() = CheckOutcome::Rejected("no".to_owned());
+    let quiet = check::run(&scene.backend, Lang::De, None);
+    assert_eq!(quiet.broke, ["Torro"]);
+    assert_eq!(notes.borrow().len(), 2);
+    let log = std::fs::read_to_string(scene.root.join("data/health.jsonl")).expect("records were written");
+    assert!(log.contains(r#""source":"periodic""#));
 }
