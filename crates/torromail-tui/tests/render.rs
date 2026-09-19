@@ -281,7 +281,7 @@ fn a_preset_is_applied_to_a_draft_and_nothing_is_saved_until_asked() {
     assert!(!app.snapshot.accounts[0].account.permissions.send, "the stored account is untouched");
 
     ctrl(&mut app, 's');
-    let Some(Request::SaveAccount(requested)) = app.request.take() else { panic!("ctrl+s asks the event loop to save") };
+    let Some(Request::SaveAccount(requested, None)) = app.request.take() else { panic!("ctrl+s asks the event loop to save") };
     assert!(requested.permissions.send);
 }
 
@@ -361,6 +361,7 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
         checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
         discoverer: Box::new(|_| None),
+        mailbox_lister: Box::new(|_, _, _, _| Ok(Vec::new())),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -417,6 +418,7 @@ fn scene(name: &str) -> Scene {
             secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
             checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
             discoverer: Box::new(|_| None),
+            mailbox_lister: Box::new(|_, _, _, _| Ok(vec!["INBOX".to_owned(), "Entw&APw-rfe".to_owned(), "Privat".to_owned()])),
         },
         root,
     }
@@ -712,4 +714,117 @@ fn a_company_domain_is_looked_up_and_a_workspace_mailbox_is_not_offered_a_passwo
         &render_at(&app, 112, 44),
         &["Einstellungen gefunden · Microsoft 365", "outlook.office365.com:993", "Ein-Klick-Anmeldung", "Administration"],
     );
+}
+
+
+// MARK: editing the other account tabs
+
+#[test]
+fn the_connection_tab_takes_text_checks_ports_and_rechecks_the_login_on_save() {
+    let mut scene = scene("edit-connection");
+    scene.backend.checker = Box::new(|_, _, _, _| CheckOutcome::Ok);
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Absendername", "Neues Passwort", "IMAP-Verschlüsselung", "‹ SSL/TLS ›"]);
+
+    // j and k are letters here.
+    type_text(&mut app, "jk");
+    assert_eq!(app.draft.as_ref().expect("editing").name, "Torrojk");
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "x");
+    ctrl(&mut app, 's');
+    assert!(app.request.is_none());
+    assert_shows(&render(&app), &["Ein Port ist eine Zahl"]);
+
+    press(&mut app, KeyCode::Backspace);
+    type_text(&mut app, "143");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Down);
+    }
+    type_text(&mut app, "new-secret");
+    assert!(!render(&app).contains("new-secret"));
+    ctrl(&mut app, 's');
+    scene.act(&mut app);
+
+    assert_shows(&render(&app), &["Gespeichert. Die Verbindung funktioniert.", "imap.example.org:143 · STARTTLS"]);
+    assert_eq!(app.focus, Focus::List);
+    let id = app.snapshot.accounts[0].account.id.clone();
+    assert_eq!(scene.backend.secrets.get("TorroMail", &id).expect("readable").as_deref(), Some("new-secret"));
+    assert_eq!(scene.policy()["accounts"][0]["imap"]["port"], 143);
+    assert_eq!(scene.policy()["accounts"][0]["imap"]["security"], "starttls");
+}
+
+#[test]
+fn folder_rules_and_special_folders_are_edited_against_the_servers_own_folders() {
+    let scene = scene("edit-folders");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Ordner werden geladen"]);
+    scene.act(&mut app);
+    assert_eq!(app.focus, Focus::Detail);
+    assert_shows(&render(&app), &["INBOX", "Entwürfe", "Privat", "kein Zugriff", "‹ Entwürfe ›"]);
+
+    // INBOX: standard → read only.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    // "Privat" was "no access": one more step returns it to standard.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    // Sent: automatic → the first folder the server has.
+    for _ in 0..2 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Right);
+    assert_shows(&render(&app), &["angepasst · nur lesen", "‹ INBOX ›"]);
+
+    ctrl(&mut app, 's');
+    scene.act(&mut app);
+    let policy = scene.policy();
+    assert_eq!(policy["accounts"][0]["folder_rules"], json!({ "INBOX": { "read": true, "write": false } }));
+    assert_eq!(policy["accounts"][0]["mailbox_overrides"], json!({ "drafts": "Entw&APw-rfe", "sent": "INBOX" }));
+    assert_eq!(app.snapshot.accounts[0].account.known_mailboxes, ["INBOX", "Entw&APw-rfe", "Privat"]);
+}
+
+#[test]
+fn folders_that_cannot_be_listed_leave_the_tab_as_it_was() {
+    let mut scene = scene("edit-folders-fail");
+    scene.backend.mailbox_lister = Box::new(|_, _, _, _| Err("[AUTHENTICATIONFAILED] no".to_owned()));
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    scene.act(&mut app);
+    assert_eq!(app.focus, Focus::List);
+    assert_shows(&render(&app), &["Ordner konnten nicht geladen werden", "[AUTHENTICATIONFAILED] no"]);
+}
+
+#[test]
+fn the_cache_level_steps_between_its_ends_and_is_published() {
+    let scene = scene("edit-cache");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::BackTab);
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Left);
+    }
+    assert_shows(&render(&app), &["‹ Aus ›", "Ungespeicherte Änderungen"]);
+    press(&mut app, KeyCode::Right);
+    ctrl(&mut app, 's');
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Gespeichert.", "Betreff & Absender"]);
+    assert_eq!(scene.policy()["accounts"][0]["cache"]["level"], "headers");
 }

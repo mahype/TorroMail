@@ -90,3 +90,14 @@ pub fn latest_connections(path: &Path) -> HashMap<String, ClientConnection> {
     }
     latest
 }
+
+/// A JSON array of strings, as the server prints a folder list.
+#[must_use]
+pub fn parse_string_array(text: &str) -> Option<Vec<String>> {
+    serde_json::from_str::<Value>(text)
+        .ok()?
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}

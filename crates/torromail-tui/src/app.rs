@@ -3,7 +3,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use torromail_control::policy::ClientAccountAccess;
-use torromail_control::{MailAccount, PermissionPreset, ReadAccess};
+use torromail_control::{CacheLevel, ConnectionSecurity, FolderRule, MailAccount, PermissionPreset, ReadAccess};
 
 use crate::data::Snapshot;
 use crate::i18n::Lang;
@@ -79,7 +79,10 @@ pub enum Focus {
 /// never writes a file or starts a process itself.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    SaveAccount(Box<MailAccount>),
+    /// The account, and a new password for it when one was typed.
+    SaveAccount(Box<MailAccount>, Option<Secret>),
+    /// Log in and list the account's folders, to edit folder rules with.
+    LoadMailboxes(String),
     Connect(String),
     Disconnect(String),
     SetAccess(String, ClientAccountAccess),
@@ -97,6 +100,23 @@ pub enum Request {
 
 /// The editable rows of the permissions tab, top to bottom.
 pub const PERMISSION_ROWS: usize = 11;
+/// Connection tab: name, username, IMAP host/port/encryption, SMTP
+/// host/port/encryption, new password.
+pub const CONNECTION_ROWS: usize = 9;
+const ROW_IMAP_SECURITY: usize = 4;
+const ROW_SMTP_SECURITY: usize = 7;
+pub const SPECIAL_ROLES: usize = 5;
+
+/// What an account draft cannot hold while it is being typed: ports that are
+/// not numbers yet, a password that is not stored yet, and the folders the
+/// server reported for the pickers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EditExtras {
+    pub imap_port: String,
+    pub smtp_port: String,
+    pub password: Secret,
+    pub folders: Vec<String>,
+}
 const ROW_READ_DEPTH: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +157,7 @@ pub struct App {
     /// The add-account wizard, while it is open. It takes every key.
     pub wizard: Option<Wizard>,
     pub confirm_remove: bool,
+    pub extras: EditExtras,
     /// How far the detail pane is scrolled; it can be taller than the terminal.
     pub detail_scroll: u16,
 }
@@ -167,6 +188,7 @@ impl App {
             revealed: None,
             wizard: None,
             confirm_remove: false,
+            extras: EditExtras::default(),
             detail_scroll: 0,
         }
     }
@@ -178,9 +200,157 @@ impl App {
             return client.access.as_ref() != Some(draft);
         }
         match (&self.draft, self.snapshot.accounts.get(self.account_index)) {
-            (Some(draft), Some(stored)) => *draft != stored.account,
+            (Some(draft), Some(stored)) => {
+                *draft != stored.account
+                    || !self.extras.password.0.is_empty()
+                    || self.extras.imap_port != stored.account.imap_port.to_string()
+                    || self.extras.smtp_port != stored.account.smtp_port.to_string()
+            }
             _ => false,
         }
+    }
+
+    fn begin_account_edit(&mut self, folders: Vec<String>) {
+        let Some(view) = self.snapshot.accounts.get(self.account_index) else { return };
+        self.extras = EditExtras {
+            imap_port: view.account.imap_port.to_string(),
+            smtp_port: view.account.smtp_port.to_string(),
+            password: Secret::default(),
+            folders,
+        };
+        self.draft = Some(view.account.clone());
+        self.focus = Focus::Detail;
+        self.cursor = 0;
+        self.detail_scroll = 0;
+    }
+
+    /// The event loop listed the account's folders: the folders tab can be
+    /// edited now.
+    pub fn mailboxes_loaded(&mut self, folders: Vec<String>) {
+        self.message = None;
+        self.begin_account_edit(folders);
+    }
+
+    /// The account as it would be saved, or why it cannot be yet.
+    fn account_to_save(&self) -> Result<MailAccount, &'static str> {
+        let mut account = self.draft.clone().ok_or("Nothing to save.")?;
+        account.imap_port = self.extras.imap_port.trim().parse().map_err(|_| "A port is a number between 1 and 65535.")?;
+        account.smtp_port = self.extras.smtp_port.trim().parse().map_err(|_| "A port is a number between 1 and 65535.")?;
+        if account.imap_port == 0 || account.smtp_port == 0 {
+            return Err("A port is a number between 1 and 65535.");
+        }
+        if !self.extras.folders.is_empty() {
+            account.known_mailboxes = self.extras.folders.clone();
+        }
+        Ok(account)
+    }
+
+    fn rows(&self) -> usize {
+        match (self.section, self.account_tab) {
+            (Section::Clients, _) => 2 + self.snapshot.accounts.len(),
+            (_, 0) => CONNECTION_ROWS,
+            (_, 1) => PERMISSION_ROWS,
+            (_, 2) => 1 + self.extras.folders.len() + SPECIAL_ROLES,
+            _ => 1,
+        }
+    }
+
+    /// The text under the cursor on the connection tab, if it is on text.
+    fn connection_text(&mut self) -> Option<&mut String> {
+        let draft = self.draft.as_mut()?;
+        match self.cursor {
+            0 => Some(&mut draft.name),
+            1 => Some(&mut draft.username),
+            2 => Some(&mut draft.imap_host),
+            3 => Some(&mut self.extras.imap_port),
+            5 => Some(&mut draft.smtp_host),
+            6 => Some(&mut self.extras.smtp_port),
+            8 => Some(&mut self.extras.password.0),
+            _ => None,
+        }
+    }
+
+    fn on_connection_key(&mut self, code: KeyCode) {
+        let on_security = matches!(self.cursor, ROW_IMAP_SECURITY | ROW_SMTP_SECURITY);
+        match code {
+            KeyCode::Up | KeyCode::BackTab => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab | KeyCode::Enter => self.cursor = (self.cursor + 1).min(CONNECTION_ROWS - 1),
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right if on_security => {
+                if let Some(draft) = &mut self.draft {
+                    let security = if self.cursor == ROW_IMAP_SECURITY { &mut draft.imap_security } else { &mut draft.smtp_security };
+                    *security = match security {
+                        ConnectionSecurity::Tls => ConnectionSecurity::StartTls,
+                        ConnectionSecurity::StartTls => ConnectionSecurity::Tls,
+                    };
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(text) = self.connection_text() {
+                    text.push(character);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(text) = self.connection_text() {
+                    text.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Row 0 is the per-folder switch, then the folders, then the five roles.
+    fn on_folders_key(&mut self, code: KeyCode) {
+        let folders = self.extras.folders.clone();
+        let cursor = self.cursor;
+        let Some(draft) = &mut self.draft else { return };
+        let step: isize = match code {
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right => 1,
+            KeyCode::Left => -1,
+            _ => return,
+        };
+        if cursor == 0 {
+            draft.permissions.per_folder = !draft.permissions.per_folder;
+        } else if let Some(folder) = folders.get(cursor - 1) {
+            // Standard → read only → no access → standard. A folder can only
+            // ever allow less than the account does.
+            let rules = &mut draft.permissions.folder_rules;
+            match rules.get(folder).copied() {
+                None => {
+                    rules.insert(folder.clone(), FolderRule { read: true, write: false });
+                }
+                Some(FolderRule { read: true, write: false }) => {
+                    rules.insert(folder.clone(), FolderRule { read: false, write: false });
+                }
+                Some(_) => {
+                    rules.remove(folder);
+                }
+            }
+            draft.permissions.per_folder = true;
+        } else {
+            let special = &mut draft.special_mailboxes;
+            let slot = match cursor - 1 - folders.len() {
+                0 => &mut special.drafts,
+                1 => &mut special.sent,
+                2 => &mut special.archive,
+                3 => &mut special.junk,
+                _ => &mut special.trash,
+            };
+            // Automatic first, then every folder the server has.
+            let position = folders.iter().position(|folder| folder == slot).map_or(0, |index| index + 1);
+            let count = folders.len() as isize + 1;
+            let next = (position as isize + step).rem_euclid(count) as usize;
+            *slot = if next == 0 { String::new() } else { folders[next - 1].clone() };
+            special.manual = [&special.drafts, &special.sent, &special.archive, &special.junk, &special.trash]
+                .iter()
+                .any(|choice| !choice.is_empty());
+        }
+    }
+
+    fn step_cache_level(&mut self, delta: isize) {
+        let Some(draft) = &mut self.draft else { return };
+        let levels = [CacheLevel::Off, CacheLevel::Headers, CacheLevel::Bodies, CacheLevel::Attachments];
+        let position = levels.iter().position(|level| *level == draft.cache_level).unwrap_or(1) as isize;
+        draft.cache_level = levels[(position + delta).clamp(0, 3) as usize];
     }
 
     /// The event loop did what was asked.
@@ -209,13 +379,21 @@ impl App {
             return;
         }
         self.message = None;
-        let rows = if self.section == Section::Clients { 2 + self.snapshot.accounts.len() } else { PERMISSION_ROWS };
+        let rows = self.rows();
         match key.code {
             KeyCode::Esc if self.is_dirty() => self.confirm_discard = true,
             KeyCode::Esc => self.leave_detail(),
+            // On the connection tab letters are text, so it handles its own
+            // movement; j and k must not steer there.
+            code if self.section == Section::Accounts && self.account_tab == 0 => self.on_connection_key(code),
             KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(rows - 1),
             KeyCode::Char(' ') | KeyCode::Enter if self.section == Section::Clients => self.toggle_access_row(),
+            code if self.section == Section::Accounts && self.account_tab == 2 => self.on_folders_key(code),
+            KeyCode::Left if self.section == Section::Accounts && self.account_tab == 3 => self.step_cache_level(-1),
+            KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter if self.section == Section::Accounts && self.account_tab == 3 => {
+                self.step_cache_level(1);
+            }
             KeyCode::Left if self.cursor == ROW_READ_DEPTH => self.step_read_depth(-1),
             KeyCode::Right if self.cursor == ROW_READ_DEPTH => self.step_read_depth(1),
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_row(),
@@ -332,7 +510,16 @@ impl App {
                         (Some(access), Some(client)) => {
                             Some(Request::SetAccess(client.descriptor.id.to_owned(), access.clone()))
                         }
-                        _ => self.draft.clone().map(|draft| Request::SaveAccount(Box::new(draft))),
+                        _ => match self.account_to_save() {
+                            Ok(account) => {
+                                let password = Some(self.extras.password.clone()).filter(|password| !password.0.is_empty());
+                                Some(Request::SaveAccount(Box::new(account), password))
+                            }
+                            Err(problem) => {
+                                self.message = Some(Message { text: problem, detail: String::new(), is_error: true });
+                                None
+                            }
+                        },
                     };
                 }
                 _ => {}
@@ -396,13 +583,15 @@ impl App {
                 self.section = Section::Accounts;
                 self.wizard = Some(Wizard::default());
             }
-            KeyCode::Enter if self.section == Section::Accounts && self.account_tab == 1 => {
+            // The folders tab edits against the folders the server really
+            // has, so it logs in first; the others start at once.
+            KeyCode::Enter if self.section == Section::Accounts && self.account_tab == 2 => {
                 if let Some(view) = self.snapshot.accounts.get(self.account_index) {
-                    self.draft = Some(view.account.clone());
-                    self.focus = Focus::Detail;
-                    self.cursor = 0;
+                    self.message = Some(Message { text: "Loading folders…", detail: String::new(), is_error: false });
+                    self.request = Some(Request::LoadMailboxes(view.account.id.clone()));
                 }
             }
+            KeyCode::Enter if self.section == Section::Accounts => self.begin_account_edit(Vec::new()),
             KeyCode::Enter if self.section == Section::Overview => {
                 // The attention card leads to where the repair is.
                 if let Some(index) = self.snapshot.accounts.iter().position(|view| view.health.is_broken()) {
