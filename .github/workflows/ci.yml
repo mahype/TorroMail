@@ -23,7 +23,7 @@ jobs:
 
   macos:
     name: Rust + Swift (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,15 @@ jobs:
       # The Swift contract suite and the app supervisor look for the server in
       # target/debug, so it is built before anything Swift runs.
       - run: cargo build -p torromail-mcp
+      - name: Build Swift contract suite
+        run: swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build --product TorroMailKitContract
       - name: Swift contract suite
-        run: swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
+        run: apps/TorroMailApp/.build/debug/TorroMailKitContract
+      - name: Why the suite died (only on failure)
+        if: failure()
+        run: |
+          codesign -dvvv --entitlements - apps/TorroMailApp/.build/debug/TorroMailKitContract || true
+          log show --last 3m --style compact --predicate 'eventMessage CONTAINS "TorroMailKitContract"' | tail -40 || true
+          ls -t ~/Library/Logs/DiagnosticReports 2>/dev/null | head -5 || true
       - name: Swift app build
         run: swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
