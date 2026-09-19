@@ -118,6 +118,31 @@ pub struct ClientDescriptor {
     pub requirement: Option<Requirement>,
 }
 
+impl ClientDescriptor {
+    /// How to confirm, inside the assistant itself, that it really loaded
+    /// TorroMail — the one step nobody can observe from the outside. For a
+    /// manual client: where the snippet goes. The English sentence is the key
+    /// both surfaces translate from.
+    #[must_use]
+    pub fn verification_hint(&self) -> &'static str {
+        match self.id {
+            "claude-desktop" => "Restart Claude Desktop. A tools icon appears below the message box; TorroMail’s tools sit under “torromail”. Ask it: “List my mail accounts.”",
+            "claude-code" => "In a new Claude Code session run “/mcp” — “torromail” must show as connected. Or ask it: “List my mail accounts.”",
+            "opencode" => "Restart OpenCode, or run “opencode mcp list” in a terminal; “torromail” must be listed as connected. Then ask: “List my mail accounts.”",
+            "pi" => "Pi needs the pi-mcp-adapter extension: run “pi install npm:pi-mcp-adapter” once, restart Pi and open “/mcp” — “torromail” must be listed. Then ask: “List my mail accounts.”",
+            "chatgpt" => "Restart the Codex CLI; “torromail” appears in its MCP list. Then ask: “List my mail accounts.”",
+            "gemini-cli" => "Restart the Gemini CLI and run “/mcp”; “torromail” must be listed.",
+            "cursor" => "Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”",
+            "lm-studio" => "Restart LM Studio and open its MCP panel (the tools/plug icon); “torromail” must appear. Then ask a model: “List my mail accounts.”",
+            "vscode" => "Reload VS Code, open the MCP view (Command Palette → “MCP: List Servers”), and start “torromail” — trust it if asked. Then in Chat: “List my mail accounts.”",
+            "windsurf" => "Restart Windsurf and open Settings → MCP (or the Cascade MCP panel); “torromail” must show as active. Then ask: “List my mail accounts.”",
+            "clawbot" => "Add the snippet below under “mcp.servers” in Clawbot’s config (or run “openclaw mcp add”), then restart it and ask it to list your mail accounts.",
+            "hermes" => "Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts.",
+            _ => "Paste the snippet below into your client’s MCP configuration — any client that speaks MCP over stdio can run TorroMail. Restart it afterwards.",
+        }
+    }
+}
+
 /// An extension an assistant needs for MCP. Pi ships without MCP on purpose
 /// and points to extensions for it; `pi-mcp-adapter` is the one everybody
 /// uses, and it reads the standard `mcpServers` shape.

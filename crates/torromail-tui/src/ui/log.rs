@@ -95,4 +95,14 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     .row_highlight_style(theme::selected());
     let mut state = TableState::default().with_selected(Some(app.log_index));
     frame.render_stateful_widget(table, inner, &mut state);
+    // The outcome of an export sits over the table's last line.
+    if let Some(message) = &app.message {
+        let line = Rect { y: inner.y + inner.height.saturating_sub(1), height: 1, ..inner };
+        let colour = if message.is_error { theme::ACCENT } else { theme::GREEN };
+        frame.render_widget(
+            Paragraph::new(format!(" {} {}", lang.t(message.text), message.detail)).style(Style::new().fg(colour)),
+            line,
+        );
+    }
+
 }

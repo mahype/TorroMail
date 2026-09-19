@@ -235,6 +235,10 @@ pub struct Backend {
     /// Where systemd user units live, and how `systemctl --user` is run.
     pub unit_directory: PathBuf,
     pub systemctl: Box<Systemctl>,
+    /// Asks for the newest release tag. The real one asks GitHub.
+    pub release_lookup: Box<dyn Fn() -> Result<String, String>>,
+    /// Where an exported log is written.
+    pub export_directory: PathBuf,
 }
 
 pub type Systemctl = dyn Fn(&[&str]) -> Result<(), String>;
@@ -350,6 +354,16 @@ impl Backend {
             CheckOutcome::Ok => Ok(()),
             CheckOutcome::Rejected(reason) | CheckOutcome::Unreachable(reason) => Err(reason),
         }
+    }
+
+    /// Writes the whole audit log as CSV and says where it went.
+    pub fn export_log(&self) -> Result<PathBuf, String> {
+        let entries = logs::load_audit(&self.data_directory.join(paths::AUDIT_LOG), usize::MAX);
+        let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+        let target = self.export_directory.join(format!("torromail-log-{stamp}.csv"));
+        std::fs::create_dir_all(&self.export_directory).map_err(|error| error.to_string())?;
+        std::fs::write(&target, logs::audit_csv(&entries)).map_err(|error| error.to_string())?;
+        Ok(target)
     }
 
     /// Turns the systemd timer behind the background check on or off.

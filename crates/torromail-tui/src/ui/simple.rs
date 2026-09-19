@@ -19,11 +19,46 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let lines = match app.section {
         Section::Settings => settings(app, body.width),
-        Section::Updates => vec![
-            field(lang.t("Installed version"), VERSION),
-            Line::default(),
-            Line::styled(lang.t("Updates arrive through your package manager or the GitHub releases."), theme::muted()),
-        ],
+        Section::Updates => {
+            let mut lines = vec![field(lang.t("Installed version"), VERSION), Line::default()];
+            match &app.update {
+                Some((tag, _)) if torromail_discovery::is_newer(tag, VERSION) => {
+                    lines.push(Line::styled(
+                        format!("▲ {} {tag}", lang.t("A newer version is available:")),
+                        Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD),
+                    ));
+                    lines.push(Line::styled("  git pull && scripts/install-linux.sh", Style::new().fg(theme::CYAN)));
+                }
+                Some((tag, _)) => lines.push(Line::styled(
+                    format!("✓ {} ({tag})", lang.t("You are up to date.")),
+                    Style::new().fg(theme::GREEN),
+                )),
+                None => {}
+            }
+            if let Some((_, at)) = &app.update {
+                lines.push(Line::styled(
+                    format!("  {} {}", lang.t("Last checked:"), lang.ago(app.snapshot.taken_at.saturating_sub(*at))),
+                    theme::muted(),
+                ));
+            }
+            if let Some(message) = &app.message {
+                let colour = if message.is_error { theme::ACCENT } else { theme::CYAN };
+                lines.push(Line::styled(lang.t(message.text), Style::new().fg(colour)));
+                if !message.detail.is_empty() {
+                    lines.push(Line::styled(message.detail.clone(), theme::muted()));
+                }
+            }
+            lines.extend([
+                Line::default(),
+                Line::from(vec![
+                    Span::styled(" u ", Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!(" {}", lang.t("Check for updates now")), theme::muted()),
+                ]),
+                Line::default(),
+                Line::styled(lang.t("Updates arrive through your package manager or the GitHub releases."), theme::muted()),
+            ]);
+            lines
+        }
         _ => vec![
             rule(lang.t("About TorroMail"), body.width),
             field(lang.t("Version"), VERSION),

@@ -35,6 +35,10 @@ fn main() -> std::io::Result<()> {
         tool_count: std::cell::OnceCell::new(),
         unit_directory: torromail_tui::autocheck::unit_directory(&home, xdg_config.as_deref()),
         systemctl: Box::new(torromail_tui::autocheck::run_systemctl),
+        release_lookup: Box::new(|| torromail_discovery::latest_release_tag("mahype/TorroMail")),
+        // Downloads when there is one — where people look for a file they
+        // just asked for — otherwise the home directory.
+        export_directory: Some(home.join("Downloads")).filter(|path| path.is_dir()).unwrap_or_else(|| home.clone()),
     };
     let settings = torromail_tui::settings::Settings::load(&backend.data_directory);
 

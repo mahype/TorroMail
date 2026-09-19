@@ -75,6 +75,30 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
                 Err(error) => app.failed("Could not save.", error.to_string()),
             };
         }
+        Request::CheckForUpdates => {
+            return match (backend.release_lookup)() {
+                Ok(tag) => {
+                    app.update = Some((tag, data::now()));
+                    app.message = None;
+                }
+                Err(reason) => app.failed("Could not check for updates.", reason),
+            };
+        }
+        Request::ExportLog => {
+            return match backend.export_log() {
+                Ok(path) => {
+                    app.succeeded("Exported.");
+                    if let Some(message) = &mut app.message {
+                        // File name first: the directory can be long, and a
+                        // clipped line must still say what to look for.
+                        let file = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                        let directory = path.parent().map(|parent| app.snapshot.tilde(parent)).unwrap_or_default();
+                        message.detail = format!("{file} → {directory}");
+                    }
+                }
+                Err(reason) => app.failed("Could not export the log.", reason),
+            };
+        }
         Request::SetAutocheck(on) => {
             let outcome = backend.set_autocheck(*on);
             app.replace_snapshot(backend.load());
@@ -139,6 +163,12 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
     match outcome {
         Ok(text) => {
             // What is stored now is what the draft said; editing is over.
+            if let Request::Connect(id) = &request {
+                app.key_changed.insert(id.clone(), data::now());
+            }
+            if let Request::Disconnect(id) = &request {
+                app.key_changed.remove(id);
+            }
             if matches!(request, Request::SetAccess(..) | Request::SaveAccount(..)) {
                 end_editing(app);
             }

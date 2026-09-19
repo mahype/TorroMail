@@ -99,6 +99,17 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(Line::default());
     }
 
+    if app.restart_pending(client) {
+        lines.push(Line::styled(
+            format!("▲ {}", lang.t("Restart %@ now").replace("%@", name)),
+            Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            lang.t("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail.").replace("%@", name),
+            theme::muted(),
+        ));
+        lines.push(Line::default());
+    }
     match &client.connection {
         Some(connection) => {
             lines.push(Line::styled(
@@ -216,6 +227,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
         lines.push(Line::default());
     }
+
+    // The one step nobody can see from the outside: did the assistant load it?
+    lines.push(rule(&lang.t("Confirm inside %@").replace("%@", name), body.width));
+    lines.push(Line::raw(lang.t(client.descriptor.verification_hint())));
+    lines.push(Line::default());
 
     lines.push(rule(lang.t("Configuration"), body.width));
     let command = app
