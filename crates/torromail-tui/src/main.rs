@@ -4,7 +4,6 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use torromail_control::clients::Environment;
 use torromail_control::paths;
 use torromail_tui::app::App;
-use torromail_tui::i18n::Lang;
 use torromail_tui::{data, ui};
 
 /// How often the files are read again while nothing is pressed. The server
@@ -22,6 +21,8 @@ fn main() -> std::io::Result<()> {
         eprintln!("torromail: HOME is not set, so there is nowhere to look for the TorroMail data.");
         std::process::exit(1);
     };
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
     let backend = data::Backend {
         data_directory: directory,
         environment: Environment::current(),
@@ -32,8 +33,23 @@ fn main() -> std::io::Result<()> {
         rebuild_command: Box::new(data::rebuild_command),
         rebuild: std::cell::RefCell::new(None),
         tool_count: std::cell::OnceCell::new(),
+        unit_directory: torromail_tui::autocheck::unit_directory(&home, xdg_config.as_deref()),
+        systemctl: Box::new(torromail_tui::autocheck::run_systemctl),
     };
-    let mut app = App::new(Lang::from_environment(), backend.load());
+    let settings = torromail_tui::settings::Settings::load(&backend.data_directory);
+
+    // `torromail check`: one pass over the accounts, no screen. What the
+    // systemd timer runs.
+    if std::env::args().nth(1).as_deref() == Some("check") {
+        let notify: Option<torromail_tui::check::Notify<'_>> =
+            if settings.notifications { Some(&torromail_tui::check::notify_send) } else { None };
+        let summary = torromail_tui::check::run(&backend, settings.lang(), notify);
+        println!("checked {}, broke {}, recovered {}", summary.checked, summary.broke.len(), summary.recovered.len());
+        return Ok(());
+    }
+
+    let mut app = App::new(settings.lang(), backend.load());
+    app.settings = settings;
 
     let mut terminal = ratatui::init();
     let mut loaded = Instant::now();
