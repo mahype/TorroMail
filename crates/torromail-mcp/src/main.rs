@@ -85,6 +85,9 @@ fn main() -> io::Result<()> {
             eprintln!("{message}");
             std::process::exit(1);
         }
+        return Ok(());
+    }
+
     // What the health log adds up to, for any surface that shows a status dot.
     // Read-only and local: no login, no secrets, so it sits in front of the
     // pairing gate like `--list-tools`.
