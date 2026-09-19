@@ -16,12 +16,16 @@ struct AccountSetupWizard: View {
 
     /// Only three of these are stops the user makes decisions at — the other
     /// two are the app doing work and saying so.
+    ///
+    /// The rights come before the check, not after it: everything the user
+    /// decides is decided first, and the one step that can fail is the last
+    /// one. The terminal surface walks the same order.
     enum Step {
         case identity
         case discovering
         case login
-        case testing
         case permissions
+        case testing
     }
 
     @State private var step: Step = .identity
@@ -64,8 +68,8 @@ struct AccountSetupWizard: View {
                 case .identity: identityStep
                 case .discovering: waitingStep(L("Looking up the settings for %@…"))
                 case .login: loginStep
-                case .testing: waitingStep(L("Checking the connection…"))
                 case .permissions: permissionsStep
+                case .testing: waitingStep(L("Checking the connection…"))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,11 +132,25 @@ struct AccountSetupWizard: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(Autodiscovery.domain(of: email) == nil || name.isEmpty)
             case .login:
-                Button(L("Sign In")) { beginTrial() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canAttemptLogin)
+                // OAuth signs in here, in the browser, because that is where
+                // the user expects the provider's page; a password is only
+                // noted and proven at the end with everything else.
+                if case .oauth = effectiveAuth {
+                    Button(L("Sign In")) { leaveLogin() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canAttemptLogin)
+                } else {
+                    Button(L("Continue")) { leaveLogin() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canAttemptLogin)
+                }
             case .permissions:
-                Button(L("Done")) { finish() }
+                Button(L("Back")) {
+                    failure = nil
+                    step = .login
+                }
+                .torroButton()
+                Button(L("Add")) { beginTrial() }
                     .buttonStyle(.borderedProminent)
             case .discovering, .testing:
                 EmptyView()
@@ -357,9 +375,10 @@ struct AccountSetupWizard: View {
     private var permissionsStep: some View {
         VStack(spacing: 18 * textScale) {
             Spacer()
-            Label(String(format: L("Connected as %@"), email), systemImage: "checkmark.circle.fill")
+            // Nothing is connected yet — the check follows this step — so the
+            // address is named without a verdict on it.
+            Text(verbatim: email)
                 .scaledFont(.headline)
-                .foregroundStyle(.green)
 
             VStack(spacing: 8 * textScale) {
                 Text(L("What may connected assistants do with this account?"))
@@ -415,17 +434,29 @@ struct AccountSetupWizard: View {
         smtpSecurity = config.smtpSecurity
     }
 
-    /// Saves the secret, proves the account, and only then moves on. A failure
-    /// returns to the login step with everything the user typed still there.
-    private func beginTrial() {
+    /// Leaves the login step for the rights. A password needs nothing yet; an
+    /// OAuth account makes its browser round trip now, so the token is in the
+    /// keychain by the time the check runs.
+    private func leaveLogin() {
         failure = nil
-
         if case .oauth(let issuer) = effectiveAuth {
             Task { await signIn(with: issuer) }
+        } else {
+            step = .permissions
+        }
+    }
+
+    /// Saves the secret, proves the account, and only then adds it. A failure
+    /// returns to the login step with everything the user typed — and chose —
+    /// still there.
+    private func beginTrial() {
+        failure = nil
+        step = .testing
+        // An OAuth account already stored its token when it signed in.
+        if case .oauth = effectiveAuth {
+            runTrial()
             return
         }
-
-        step = .testing
         do {
             try KeychainStore.savePassword(password, forAccount: accountID)
         } catch {
@@ -459,8 +490,7 @@ struct AccountSetupWizard: View {
                 result.tokens.keychainPayload(),
                 forAccount: accountID
             )
-            step = .testing
-            runTrial()
+            step = .permissions
         } catch OAuthService.Failure.cancelled {
             // Closing the window is a decision, not an error to explain.
             failure = nil
@@ -481,7 +511,7 @@ struct AccountSetupWizard: View {
                 switch state {
                 case .connected:
                     password = ""
-                    step = .permissions
+                    finish()
                 case .failed(let reason):
                     NSLog("TorroMail: account check failed: %@", reason)
                     failure = L("The server did not accept these details. Check the password, or open the server details below.")
