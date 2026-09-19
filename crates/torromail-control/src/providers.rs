@@ -240,7 +240,7 @@ pub fn parse_autoconfig(xml: &str, source: &str) -> Option<DiscoveredConfig> {
             .filter(|node| node.is_element() && node.tag_name().name() == name)
             .filter_map(|node| node.text())
             .map(|text| text.trim().to_owned())
-            .last()
+            .next_back()
     };
 
     // POP is listed alongside IMAP; TorroMail only speaks IMAP.

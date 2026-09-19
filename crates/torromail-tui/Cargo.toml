@@ -1,0 +1,24 @@
+[package]
+name = "torromail-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Terminal control surface for TorroMail: accounts, permissions, MCP clients and the log. Not a mail client."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "torromail"
+path = "src/main.rs"
+
+[dependencies]
+torromail-control = { path = "../torromail-control" }
+torromail-mcp = { path = "../torromail-mcp" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ratatui = "0.30"
+
+[dev-dependencies]
+serde_json = "1"
