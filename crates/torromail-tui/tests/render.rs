@@ -11,8 +11,8 @@ use serde_json::json;
 use torromail_control::MailAccount;
 use torromail_control::clients::CATALOG;
 use torromail_control::logs::{AuditEntry, ClientConnection};
-use torromail_tui::app::{App, Section};
-use torromail_tui::data::{AccountHealth, AccountView, ClientView, Snapshot};
+use torromail_tui::app::{App, Focus, Request, Section};
+use torromail_tui::data::{AccountHealth, AccountView, Backend, ClientView, Snapshot};
 use torromail_tui::i18n::Lang;
 use torromail_tui::ui;
 
@@ -72,6 +72,8 @@ fn snapshot() -> Snapshot {
                     reported_name: "claude-code".to_owned(),
                     reported_version: "2.1.4".to_owned(),
                 }),
+                access: (descriptor.id == "claude-code").then_some(torromail_control::policy::ClientAccountAccess::All),
+                has_current_key: descriptor.id == "claude-code",
             })
             .collect(),
         audit: vec![
@@ -80,6 +82,8 @@ fn snapshot() -> Snapshot {
             entry(200, "Codex", "", "mail_list_accounts", "", "ok"),
         ],
         taken_at: NOW,
+        pairings_problem: None,
+        home: Some(PathBuf::from("/home/sven")),
     }
 }
 
@@ -185,7 +189,7 @@ fn the_client_list_says_where_each_assistant_stands_and_never_shows_a_key() {
     assert_shows(
         &screen,
         &[
-            "Claude Code hat sich mit dem Server verbunden", "Version 2.1.4", "/home/sven/.claude.json",
+            "Claude Code hat sich mit dem Server verbunden", "Version 2.1.4", "~/.claude.json",
             "Nicht verbunden", "Nicht installiert", "Von Hand einrichten",
             "\"mcpServers\"", "/usr/bin/torromail-mcp", "torro_claude-code_••••••••••••",
         ],
@@ -272,11 +276,11 @@ fn a_preset_is_applied_to_a_draft_and_nothing_is_saved_until_asked() {
     }
     press(&mut app, KeyCode::Char(' '));
     assert_shows(&render(&app), &["(•) Voller Zugriff", "[✓] Senden", "E-Mail und Anhänge", "Ungespeicherte Änderungen"]);
-    assert!(app.save_request.is_none(), "a change is a draft until ctrl+s");
+    assert!(app.request.is_none(), "a change is a draft until ctrl+s");
     assert!(!app.snapshot.accounts[0].account.permissions.send, "the stored account is untouched");
 
     ctrl(&mut app, 's');
-    let requested = app.save_request.take().expect("ctrl+s asks the event loop to save");
+    let Some(Request::SaveAccount(requested)) = app.request.take() else { panic!("ctrl+s asks the event loop to save") };
     assert!(requested.permissions.send);
 }
 
@@ -350,7 +354,12 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
     let state = AppState { accounts: vec![account("work", "Torro", "sven@torro.dev", json!({}))], ..AppState::default() };
     JsonStateStore::new(directory.join(paths::STATE_FILE)).save(&state).expect("seeds");
 
-    let mut app = App::new(Lang::De, torromail_tui::data::load(&directory, None));
+    let backend = Backend {
+        data_directory: directory.clone(),
+        environment: None,
+        secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
+    };
+    let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
     press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Enter);
@@ -359,12 +368,8 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
     }
     press(&mut app, KeyCode::Char(' '));
     ctrl(&mut app, 's');
-
-    // What the event loop does with a save request.
-    let requested = app.save_request.take().expect("a save was requested");
-    torromail_tui::data::save_account(&directory, &requested).expect("saves");
-    app.replace_snapshot(torromail_tui::data::load(&directory, None));
-    app.saved();
+    let request = app.request.take().expect("a save was requested");
+    torromail_tui::perform(&backend, &mut app, request);
 
     assert!(!app.is_dirty(), "what is stored now equals the draft");
     assert_shows(&render(&app), &["[✓] Senden", "Gespeichert."]);
@@ -372,4 +377,160 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         serde_json::from_str(&std::fs::read_to_string(directory.join(paths::POLICY_FILE)).expect("published")).expect("JSON");
     assert_eq!(policy["accounts"][0]["send"], true);
     std::fs::remove_dir_all(&directory).ok();
+}
+
+// MARK: connecting an assistant
+
+struct Scene {
+    root: PathBuf,
+    backend: Backend,
+}
+
+/// A machine with Cursor installed, the server on the PATH, and two accounts.
+fn scene(name: &str) -> Scene {
+    use torromail_control::clients::{Environment, Platform};
+    use torromail_control::{AppState, JsonStateStore, StateStore, paths};
+    let root = std::env::temp_dir().join(format!("torromail-tui-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("home/.cursor")).expect("cursor is installed");
+    std::fs::create_dir_all(root.join("bin")).expect("a bin directory");
+    std::fs::write(root.join("bin/torromail-mcp"), "").expect("the server is installed");
+    let state = AppState {
+        accounts: vec![
+            account("work", "Torro", "sven@torro.dev", json!({})),
+            account("home", "Privat", "privat@gmx.de", json!({})),
+        ],
+        ..AppState::default()
+    };
+    JsonStateStore::new(root.join("data").join(paths::STATE_FILE)).save(&state).expect("seeds");
+    Scene {
+        backend: Backend {
+            data_directory: root.join("data"),
+            environment: Some(Environment {
+                platform: Platform::Linux,
+                home: root.join("home"),
+                executable_directories: vec![root.join("bin")],
+            }),
+            secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
+        },
+        root,
+    }
+}
+
+impl Scene {
+    fn app_on_cursor(&self) -> App {
+        let mut app = App::new(Lang::De, self.backend.load());
+        press(&mut app, KeyCode::Char('3'));
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.snapshot.clients[app.client_index].descriptor.id, "cursor");
+        app
+    }
+
+    fn act(&self, app: &mut App) {
+        let request = app.request.take().expect("the key asked for something");
+        torromail_tui::perform(&self.backend, app, request);
+    }
+
+    fn policy(&self) -> serde_json::Value {
+        let path = self.root.join("data").join(torromail_control::paths::POLICY_FILE);
+        serde_json::from_str(&std::fs::read_to_string(path).expect("published")).expect("JSON")
+    }
+
+    fn cursor_config(&self) -> String {
+        std::fs::read_to_string(self.root.join("home/.cursor/mcp.json")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn c_connects_an_assistant_and_the_key_stays_off_the_screen() {
+    let scene = scene("connect");
+    let mut app = scene.app_on_cursor();
+    assert_shows(&render(&app), &["Nicht verbunden", " c ", "verbinden"]);
+
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+
+    let key = scene.backend.token("cursor").expect("readable").expect("a key was stored");
+    let screen = render_at(&app, 112, 48);
+    assert_shows(
+        &screen,
+        &["Verbunden. Starte den Assistenten neu", "Eingerichtet", "Der Client hat seinen Zugangsschlüssel", "~/.cursor/mcp.json", "Kontozugriff", "(•) Alle Konten", "torro_cursor_••••••••••••"],
+    );
+    assert!(!screen.contains(&key[..24]), "the key is masked until asked for");
+    assert!(scene.cursor_config().contains(&key), "Cursor's own config carries it");
+    assert!(scene.cursor_config().contains("bin/torromail-mcp"), "and names the server by absolute path");
+    assert_eq!(scene.policy()["clients"][0]["id"], "cursor");
+}
+
+#[test]
+fn v_shows_the_key_only_for_the_selected_client_and_only_until_it_moves() {
+    let scene = scene("reveal");
+    let mut app = scene.app_on_cursor();
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+    let key = scene.backend.token("cursor").expect("readable").expect("stored");
+
+    press(&mut app, KeyCode::Char('v'));
+    scene.act(&mut app);
+    assert!(render_at(&app, 160, 40).contains(&key), "v reveals");
+    press(&mut app, KeyCode::Up);
+    assert!(app.revealed.is_none(), "moving away hides it again");
+    press(&mut app, KeyCode::Down);
+    assert!(!render_at(&app, 160, 40).contains(&key));
+}
+
+#[test]
+fn account_access_is_narrowed_in_a_draft_and_saved_on_request() {
+    let scene = scene("access");
+    let mut app = scene.app_on_cursor();
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.focus, Focus::Detail);
+    // Third row is the first account; unticking it under "all" leaves the rest.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    assert_shows(&render(&app), &["(•) Ausgewählte Konten", "[ ] Torro", "[✓] Privat", "Ungespeicherte Änderungen"]);
+    assert_eq!(scene.policy()["clients"][0]["account_access"]["mode"], "all", "nothing is saved yet");
+
+    ctrl(&mut app, 's');
+    scene.act(&mut app);
+    assert_eq!(scene.policy()["clients"][0]["account_access"], json!({ "mode": "selected", "account_ids": ["home"] }));
+    assert_eq!(app.focus, Focus::List);
+    assert_shows(&render(&app), &["Gespeichert.", "[ ] Torro"]);
+}
+
+#[test]
+fn disconnecting_asks_first_then_revokes_and_cleans_up() {
+    let scene = scene("disconnect");
+    let mut app = scene.app_on_cursor();
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+
+    press(&mut app, KeyCode::Char('T'));
+    assert_shows(&render(&app), &["Trennen: Cursor? (j/n)"]);
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.request.is_none(), "n changes nothing");
+
+    press(&mut app, KeyCode::Char('T'));
+    press(&mut app, KeyCode::Char('j'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Getrennt.", "Nicht verbunden"]);
+    assert_eq!(scene.policy()["clients"], json!([]));
+    assert_eq!(scene.backend.token("cursor"), Ok(None));
+    assert!(!scene.cursor_config().contains("torromail"));
+}
+
+#[test]
+fn an_assistant_that_is_not_installed_offers_no_connect() {
+    let scene = scene("absent");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('c'));
+    assert!(app.request.is_none(), "Claude Desktop is not on this machine");
+    assert!(!render(&app).contains(" c "), "and the key is not advertised");
 }
