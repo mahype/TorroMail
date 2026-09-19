@@ -89,7 +89,11 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
                 Ok(path) => {
                     app.succeeded("Exported.");
                     if let Some(message) = &mut app.message {
-                        message.detail = app.snapshot.tilde(&path);
+                        // File name first: the directory can be long, and a
+                        // clipped line must still say what to look for.
+                        let file = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                        let directory = path.parent().map(|parent| app.snapshot.tilde(parent)).unwrap_or_default();
+                        message.detail = format!("{file} → {directory}");
                     }
                 }
                 Err(reason) => app.failed("Could not export the log.", reason),
