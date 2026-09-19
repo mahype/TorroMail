@@ -43,6 +43,7 @@ fn the_shared_config_cases_merge_as_written() {
         }
         let setup = match case["root_key"].as_str() {
             Some("servers") => ClientSetup::ServersJson { config: config.clone() },
+            Some("mcp") => ClientSetup::OpenCodeJson { config: config.clone() },
             _ => ClientSetup::McpServersJson { config: config.clone() },
         };
         let outcome = match case["action"].as_str() {
@@ -78,6 +79,7 @@ fn the_shared_config_cases_merge_as_written() {
         SnippetFormat::ServersJson,
         SnippetFormat::HermesYaml,
         SnippetFormat::OpenClawJson,
+        SnippetFormat::OpenCodeJson,
     ];
     for format in formats {
         let snippet = clients::config_snippet(&command_path, format, &token);
@@ -95,7 +97,7 @@ fn the_shared_config_cases_merge_as_written() {
 
 #[test]
 fn the_json_snippets_are_themselves_valid_configs() {
-    for format in [SnippetFormat::McpServersJson, SnippetFormat::ServersJson, SnippetFormat::OpenClawJson] {
+    for format in [SnippetFormat::McpServersJson, SnippetFormat::ServersJson, SnippetFormat::OpenClawJson, SnippetFormat::OpenCodeJson] {
         let snippet = clients::config_snippet("/opt/torromail-mcp", format, "torro_x_1");
         let parsed: Value = serde_json::from_str(&snippet).expect("a JSON snippet parses");
         assert!(parsed.to_string().contains("torro_x_1"), "{}", format.as_str());
@@ -261,7 +263,7 @@ fn the_catalog_carries_the_ids_the_macos_app_stores_keys_under() {
     let ids: Vec<&str> = clients::CATALOG.iter().map(|descriptor| descriptor.id).collect();
     assert_eq!(
         ids,
-        ["claude-desktop", "claude-code", "chatgpt", "gemini-cli", "cursor", "lm-studio", "vscode", "windsurf",
+        ["claude-desktop", "claude-code", "opencode", "chatgpt", "gemini-cli", "cursor", "lm-studio", "vscode", "windsurf",
          "clawbot", "hermes", "other"]
     );
 }

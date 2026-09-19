@@ -73,6 +73,9 @@ pub enum SnippetFormat {
     HermesYaml,
     /// OpenClaw's `~/.openclaw/openclaw.json`: JSON nested under `mcp.servers`.
     OpenClawJson,
+    /// OpenCode's `opencode.json`: servers under `mcp`, each a `local` entry
+    /// whose command is a list and whose variables are called `environment`.
+    OpenCodeJson,
 }
 
 impl SnippetFormat {
@@ -83,6 +86,7 @@ impl SnippetFormat {
             Self::ServersJson => "servers_json",
             Self::HermesYaml => "hermes_yaml",
             Self::OpenClawJson => "openclaw_json",
+            Self::OpenCodeJson => "opencode_json",
         }
     }
 
@@ -93,6 +97,7 @@ impl SnippetFormat {
             "servers_json" => Some(Self::ServersJson),
             "hermes_yaml" => Some(Self::HermesYaml),
             "openclaw_json" => Some(Self::OpenClawJson),
+            "opencode_json" => Some(Self::OpenCodeJson),
             _ => None,
         }
     }
@@ -119,6 +124,7 @@ const fn automatic(id: &'static str, display_name: &'static str, snippet_format:
 pub const CATALOG: &[ClientDescriptor] = &[
     automatic("claude-desktop", "Claude Desktop", SnippetFormat::McpServersJson),
     automatic("claude-code", "Claude Code", SnippetFormat::McpServersJson),
+    automatic("opencode", "OpenCode", SnippetFormat::OpenCodeJson),
     automatic("chatgpt", "ChatGPT", SnippetFormat::McpServersJson),
     automatic("gemini-cli", "Gemini CLI", SnippetFormat::McpServersJson),
     automatic("cursor", "Cursor", SnippetFormat::McpServersJson),
@@ -160,6 +166,8 @@ pub enum ClientSetup {
     McpServersJson { config: PathBuf },
     /// The same merge under VS Code's `servers` key.
     ServersJson { config: PathBuf },
+    /// OpenCode: the same merge under `mcp`, with its own entry shape.
+    OpenCodeJson { config: PathBuf },
     /// Codex owns its TOML; its CLI does the edit, the file is only read.
     CodexCli { executable: PathBuf, config: PathBuf },
     /// Claude Code rewrites `~/.claude.json` constantly; editing it by hand
@@ -173,6 +181,7 @@ impl ClientSetup {
         match self {
             Self::McpServersJson { config }
             | Self::ServersJson { config }
+            | Self::OpenCodeJson { config }
             | Self::CodexCli { config, .. }
             | Self::ClaudeCodeCli { config, .. } => config,
         }
@@ -182,6 +191,7 @@ impl ClientSetup {
     fn json_root_key(&self) -> &'static str {
         match self {
             Self::ServersJson { .. } => "servers",
+            Self::OpenCodeJson { .. } => "mcp",
             _ => "mcpServers",
         }
     }
@@ -224,6 +234,16 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
     // The `User` directory is VS Code's marker; its servers sit under
     // `servers`, not `mcpServers`.
     json_client("vscode", application_support.join("Code/User"), "mcp.json", true);
+
+    // OpenCode keeps its config under ~/.config on every platform. A `.jsonc`
+    // is used when that is the only one there; comments in it make it
+    // unreadable to a strict parser, which is an error — never an overwrite.
+    let opencode = home.join(".config/opencode");
+    if opencode.exists() {
+        let jsonc_only = !opencode.join("opencode.json").exists() && opencode.join("opencode.jsonc").exists();
+        let config = opencode.join(if jsonc_only { "opencode.jsonc" } else { "opencode.json" });
+        clients.push(InstalledClient { id: "opencode", setup: ClientSetup::OpenCodeJson { config } });
+    }
 
     // On macOS the ChatGPT app bundles the codex CLI; elsewhere it is a
     // command on the PATH.
@@ -330,7 +350,7 @@ pub fn configured_token(setup: &ClientSetup) -> Option<String> {
             Some(quoted[open..close].to_owned())
         }
         _ => json_server_entry(setup)?
-            .get("env")?
+            .get(if matches!(setup, ClientSetup::OpenCodeJson { .. }) { "environment" } else { "env" })?
             .get(TOKEN_VARIABLE)?
             .as_str()
             .map(str::to_owned),
@@ -387,10 +407,14 @@ pub fn run_tool(executable: &Path, arguments: &[String]) -> Result<(), SetupErro
 /// Registers the server with a client, access key included.
 pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner<'_>) -> Result<(), SetupError> {
     match setup {
-        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } => {
+        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } | ClientSetup::OpenCodeJson { config } => {
             let root_key = setup.json_root_key();
             let mut root = read_json_config(config)?;
-            let mut entry = json!({ "command": command_path, "env": { TOKEN_VARIABLE: token } });
+            let mut entry = if matches!(setup, ClientSetup::OpenCodeJson { .. }) {
+                json!({ "type": "local", "command": [command_path], "environment": { TOKEN_VARIABLE: token }, "enabled": true })
+            } else {
+                json!({ "command": command_path, "env": { TOKEN_VARIABLE: token } })
+            };
             // VS Code's schema tags the transport; the `mcpServers` clients
             // infer stdio from `command` and reject an unknown key here.
             if root_key == "servers" {
@@ -425,7 +449,7 @@ pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner
 /// Removes TorroMail from a client's configuration — the counterpart to `add`.
 pub fn remove(setup: &ClientSetup, run: ToolRunner<'_>) -> Result<(), SetupError> {
     match setup {
-        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } => {
+        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } | ClientSetup::OpenCodeJson { config } => {
             if std::fs::read(config).map(|bytes| bytes.is_empty()).unwrap_or(true) {
                 return Ok(());
             }
@@ -530,6 +554,20 @@ pub fn config_snippet(command_path: &str, format: SnippetFormat, token: &str) ->
         ),
         SnippetFormat::HermesYaml => format!(
             "mcp_servers:\n  {name}:\n    command: \"{command_path}\"\n    env:\n      {TOKEN_VARIABLE}: \"{token}\""
+        ),
+        SnippetFormat::OpenCodeJson => format!(
+            r#"{{
+  "mcp": {{
+    "{name}": {{
+      "type": "local",
+      "command": ["{command_path}"],
+      "environment": {{
+        "{TOKEN_VARIABLE}": "{token}"
+      }},
+      "enabled": true
+    }}
+  }}
+}}"#
         ),
         SnippetFormat::OpenClawJson => format!(
             r#"{{

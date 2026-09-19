@@ -437,10 +437,10 @@ impl Scene {
     fn app_on_cursor(&self) -> App {
         let mut app = App::new(Lang::De, self.backend.load());
         press(&mut app, KeyCode::Char('3'));
-        for _ in 0..4 {
+        // By id, not by position: the catalog grows.
+        while app.snapshot.clients[app.client_index].descriptor.id != "cursor" {
             press(&mut app, KeyCode::Down);
         }
-        assert_eq!(app.snapshot.clients[app.client_index].descriptor.id, "cursor");
         app
     }
 
