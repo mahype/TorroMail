@@ -25,6 +25,13 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
         Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),
+        Request::Discover(email) => {
+            let found = (backend.discoverer)(email);
+            if let Some(wizard) = &mut app.wizard {
+                wizard.discovered(found);
+            }
+            return;
+        }
         Request::TestConnection(id) => {
             let outcome = backend.test_connection(id);
             app.replace_snapshot(backend.load());

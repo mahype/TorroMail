@@ -74,6 +74,8 @@ pub struct Wizard {
     pub error: Option<String>,
     /// Set while the check runs, so the screen can say so.
     pub checking: bool,
+    /// Set while the network is being asked about the domain.
+    pub looking_up: bool,
     /// The account that came to exist.
     pub created: Option<String>,
 }
@@ -84,6 +86,8 @@ pub enum Outcome {
     Stay,
     Close,
     Enroll(Box<MailAccount>, Secret),
+    /// Ask the network what this address implies.
+    Discover(String),
 }
 
 impl Default for Wizard {
@@ -107,6 +111,7 @@ impl Default for Wizard {
             preset: 1,
             error: None,
             checking: false,
+            looking_up: false,
             created: None,
         }
     }
@@ -199,9 +204,15 @@ impl Wizard {
                 if self.name.trim().is_empty() {
                     self.name = self.email.clone();
                 }
-                self.discover(providers::lookup(&domain));
-                self.step = Step::SignIn;
-                self.field = 0;
+                // The table answers at once; anything else is worth a few
+                // seconds of asking the network before asking the user.
+                match providers::lookup(&domain) {
+                    Some(known) => self.discovered(Some(known)),
+                    None => {
+                        self.looking_up = true;
+                        return Outcome::Discover(self.email.clone());
+                    }
+                }
             }
             Step::SignIn => {
                 let ports_ok = self.imap_port.parse::<u16>().is_ok() && self.smtp_port.parse::<u16>().is_ok();
@@ -222,7 +233,12 @@ impl Wizard {
         Outcome::Stay
     }
 
-    fn discover(&mut self, found: Option<DiscoveredConfig>) {
+    /// What the table or the network found, or that nothing was: either way
+    /// the sign-in step is next.
+    pub fn discovered(&mut self, found: Option<DiscoveredConfig>) {
+        self.looking_up = false;
+        self.step = Step::SignIn;
+        self.field = 0;
         let Some(config) = found else {
             self.hint = Hint::Unknown;
             self.manual = true;
