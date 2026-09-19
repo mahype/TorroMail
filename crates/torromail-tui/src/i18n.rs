@@ -243,6 +243,8 @@ const GERMAN: &[(&str, &str)] = &[
     ("Done", "Fertig"),
     ("Login for", "Anmeldung für"),
     ("Settings found", "Einstellungen gefunden"),
+    ("Looking up the settings for", "Suche die Einstellungen für"),
+    ("The one-click sign-in is not available in this version yet. Use the password for this mailbox — that only works if your administrator still allows it.", "Die Ein-Klick-Anmeldung ist in dieser Version noch nicht verfügbar. Nimm das Passwort dieses Postfachs — das funktioniert nur, wenn deine Administration es noch erlaubt."),
     ("IMAP Port", "IMAP-Port"),
     ("SMTP Port", "SMTP-Port"),
     ("App password", "App-Passwort"),

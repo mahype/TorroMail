@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 torromail-control = { path = "../torromail-control" }
+torromail-discovery = { path = "../torromail-discovery" }
 torromail-mcp = { path = "../torromail-mcp" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ratatui = "0.30"

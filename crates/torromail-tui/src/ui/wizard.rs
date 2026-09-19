@@ -63,6 +63,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, lang: Lang, wizard: &Wizard) {
             lines.push(Line::default());
             lines.extend(input("Email", &wizard.email, wizard.field == 0, false));
             lines.extend(input("Sender Name", &wizard.name, wizard.field == 1, false));
+            if wizard.looking_up {
+                lines.push(Line::styled(
+                    format!("⠹ {} {} …", lang.t("Looking up the settings for"), wizard.email),
+                    Style::new().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         Step::SignIn => {
             lines.push(Line::styled(format!("{} {}", lang.t("Login for"), wizard.email), theme::bold()));
@@ -91,6 +97,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, lang: Lang, wizard: &Wizard) {
             }
             let note = match wizard.hint {
                 Hint::AppPassword => Some("Your normal password will not work for mail apps. Create an app password and paste it here — it is a password just for TorroMail, and you can revoke it any time."),
+                Hint::OAuthNotYet if wizard.setup_url.is_none() => Some("The one-click sign-in is not available in this version yet. Use the password for this mailbox — that only works if your administrator still allows it."),
                 Hint::OAuthNotYet => Some("The one-click sign-in is not available in this version yet. An app password works just as well and needs two-factor to be on."),
                 _ => None,
             };
@@ -102,7 +109,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, lang: Lang, wizard: &Wizard) {
                 lines.push(Line::default());
             }
             let on_password = if wizard.manual { wizard.field == 4 } else { true };
-            let label = if wizard.hint == Hint::None || wizard.hint == Hint::Unknown { "Password" } else { "App password" };
+            let label = if wizard.setup_url.is_some() { "App password" } else { "Password" };
             lines.extend(input(label, &wizard.password.0, on_password, true));
         }
         Step::Rights => {

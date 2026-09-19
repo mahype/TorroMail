@@ -318,3 +318,120 @@ fn issuer_for_host(host: &str) -> Option<OAuthIssuer> {
     }
     None
 }
+
+// MARK: the discovery chain
+
+/// What the chain needs from the outside world. Every method is best-effort
+/// and bounded in time by whoever implements it: an empty answer means
+/// "nothing learned", never an error the chain has to handle.
+pub trait Network {
+    /// MX hosts, most preferred first.
+    fn mail_exchangers(&self, domain: &str) -> Vec<String>;
+    fn text_records(&self, domain: &str) -> Vec<String>;
+    /// RFC 6186 `_imaps._tcp`: the target host and port.
+    fn imap_service(&self, domain: &str) -> Option<(String, u16)>;
+    /// The body of a `200 OK`, anything else is `None`.
+    fn fetch(&self, url: &str) -> Option<String>;
+    /// Whether something accepts a TCP connection there.
+    fn answers(&self, host: &str, port: u16) -> bool;
+}
+
+/// Finds the settings for an address. `expired` is asked before every step
+/// that touches the network; once it says yes the chain gives up and the
+/// wizard shows manual fields — a slow network costs the user typing, not the
+/// setup.
+pub fn discover(email: &str, network: &dyn Network, expired: &dyn Fn() -> bool) -> Option<DiscoveredConfig> {
+    let domain = domain_of(email)?;
+
+    // 1. The table — no network, no waiting.
+    if let Some(known) = lookup(&domain) {
+        return Some(known);
+    }
+    if expired() {
+        return None;
+    }
+
+    // 2. Where the mail actually goes. This runs before any published
+    // configuration because the two disagree far more often than they should:
+    // a shared hoster serves a generated autoconfig for every domain on the
+    // box, advertising its own IMAP with a password — and keeps serving it
+    // long after the mailboxes moved to Microsoft 365 or Google Workspace. The
+    // MX record is the domain owner's own statement of where the mail lives,
+    // and when it names a hyperscaler, only a token will ever get in.
+    let exchangers = network.mail_exchangers(&domain);
+    if let Some(config) = exchangers.iter().find_map(|host| from_mx_host(host)) {
+        return Some(config);
+    }
+
+    // 3/4. The domain's own autoconfig. No hyperscaler claimed the domain
+    // above, so a provider publishing this knows its servers best.
+    for url in autoconfig_urls(&domain, email) {
+        if expired() {
+            return None;
+        }
+        if let Some(config) = network.fetch(&url).and_then(|xml| parse_autoconfig(&xml, "autoconfig")) {
+            return Some(config);
+        }
+    }
+
+    // 5. Mozilla's ISPDB — a shared table for the long tail of ISPs.
+    if expired() {
+        return None;
+    }
+    let ispdb = format!("https://autoconfig.thunderbird.net/v1.1/{domain}");
+    if let Some(config) = network.fetch(&ispdb).and_then(|xml| parse_autoconfig(&xml, "ispdb")) {
+        return Some(config);
+    }
+
+    // 6. SPF, for the tenants the MX cannot see: mail filtered through a
+    // gateway carries the gateway in its MX. Deliberately down here — SPF says
+    // who may *send* for the domain, a weaker claim than where mail arrives —
+    // so it only rescues a domain that published nothing of its own.
+    if expired() {
+        return None;
+    }
+    if let Some(config) = network.text_records(&domain).iter().find_map(|record| from_spf(record)) {
+        return Some(config);
+    }
+
+    // 7. A third-party MX often shares the mail host's domain.
+    if let Some(known) = exchangers.first().map(|host| base_domain(host)).filter(|base| *base != domain).and_then(|base| lookup(&base)) {
+        return Some(known);
+    }
+
+    // 8. RFC 6186: the domain naming its own IMAP server.
+    if expired() {
+        return None;
+    }
+    if let Some((target, port)) = network.imap_service(&domain).filter(|(target, _)| !target.is_empty()) {
+        return Some(guess(&target, port, &format!("smtp.{domain}"), &domain, "srv"));
+    }
+
+    // 9. The guess, but only if something actually answers on 993. An
+    // unreachable host in the field is worse than an empty one.
+    for candidate in [format!("imap.{domain}"), format!("mail.{domain}")] {
+        if expired() {
+            return None;
+        }
+        if network.answers(&candidate, 993) {
+            let smtp = candidate.replacen("imap.", "smtp.", 1);
+            return Some(guess(&candidate, 993, &smtp, &domain, "probe"));
+        }
+    }
+    None
+}
+
+fn guess(imap_host: &str, imap_port: u16, smtp_host: &str, label: &str, source: &str) -> DiscoveredConfig {
+    DiscoveredConfig {
+        imap_host: imap_host.to_owned(),
+        imap_port,
+        imap_security: ConnectionSecurity::implied_by_imap_port(imap_port),
+        smtp_host: smtp_host.to_owned(),
+        smtp_port: 587,
+        smtp_security: ConnectionSecurity::implied_by_smtp_port(587),
+        auth: AuthPath::Password,
+        provider_label: label.to_owned(),
+        provider: PROVIDER_IMAP_SMTP,
+        source: source.to_owned(),
+    }
+}

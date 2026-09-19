@@ -203,6 +203,9 @@ pub struct Backend {
     /// key, account id. The real one logs into the mailbox; tests put their
     /// own verdict here.
     pub checker: Box<CheckAccount>,
+    /// How an address outside the provider table is looked up. The real one
+    /// asks DNS and HTTPS under a budget of a few seconds.
+    pub discoverer: Box<dyn Fn(&str) -> Option<torromail_control::providers::DiscoveredConfig>>,
 }
 
 pub type CheckAccount = dyn Fn(&Path, &Path, &str, &str) -> torromail_control::enroll::CheckOutcome;

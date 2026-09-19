@@ -360,6 +360,7 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         environment: None,
         secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
         checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
+        discoverer: Box::new(|_| None),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -415,6 +416,7 @@ fn scene(name: &str) -> Scene {
             }),
             secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
             checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
+            discoverer: Box::new(|_| None),
         },
         root,
     }
@@ -616,6 +618,8 @@ fn an_unknown_domain_asks_for_the_servers_and_gmail_explains_the_app_password() 
     press(&mut app, KeyCode::Char('n'));
     type_text(&mut app, "hallo@lindenhof-design.de");
     press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Suche die Einstellungen für hallo@lindenhof-design.de"]);
+    scene.act(&mut app);
     assert_shows(&render(&app), &["Für diese Domain war nichts zu finden", "IMAP-Server", "SMTP-Port", "587"]);
     press(&mut app, KeyCode::Enter);
     assert_shows(&render(&app), &["Server von Hand eintragen."]);
@@ -688,4 +692,24 @@ fn page_down_scrolls_a_detail_that_is_taller_than_the_terminal() {
     assert_shows(&render(&app), &["behandle ihn wie"]);
     press(&mut app, KeyCode::Up);
     assert_eq!(app.detail_scroll, 0, "another client starts at the top");
+}
+
+
+#[test]
+fn a_company_domain_is_looked_up_and_a_workspace_mailbox_is_not_offered_a_password_that_cannot_work() {
+    let mut scene = scene("wizard-discover");
+    scene.backend.discoverer = Box::new(|email| {
+        assert_eq!(email, "sven@firma.example");
+        torromail_control::providers::from_mx_host("firma-example.mail.protection.outlook.com")
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('n'));
+    type_text(&mut app, "sven@firma.example");
+    press(&mut app, KeyCode::Enter);
+    scene.act(&mut app);
+
+    assert_shows(
+        &render_at(&app, 112, 44),
+        &["Einstellungen gefunden · Microsoft 365", "outlook.office365.com:993", "Ein-Klick-Anmeldung", "Administration"],
+    );
 }

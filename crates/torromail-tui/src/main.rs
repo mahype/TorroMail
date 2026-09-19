@@ -27,6 +27,7 @@ fn main() -> std::io::Result<()> {
         environment: Environment::current(),
         secrets: Box::new(torromail_control::secrets::SecretToolStore::default()),
         checker: Box::new(data::check_account),
+        discoverer: Box::new(torromail_discovery::discover),
     };
     let mut app = App::new(Lang::from_environment(), backend.load());
 
