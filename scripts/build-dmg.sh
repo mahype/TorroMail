@@ -34,7 +34,7 @@ fi
 # the Cargo.toml version rather than naming the DMG after a commit hash.
 if [[ -z "${VERSION:-}" ]]; then
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        VERSION="$(git describe --tags --dirty 2>/dev/null | sed 's/^v//' || true)"
+        VERSION="$(git describe --tags --match 'v*' --dirty 2>/dev/null | sed 's/^v//' || true)"
     fi
 fi
 if [[ -z "${VERSION:-}" ]]; then

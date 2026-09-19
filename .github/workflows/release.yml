@@ -1,17 +1,73 @@
 name: Release
 
+# One tag, one release, every platform: the signed and notarized Mac app with
+# its Sparkle appcast, and the Linux programs with their AUR package.
+#
+# The release is assembled as a draft and only published once every job has
+# delivered. The Mac app's updater reads releases/latest/download/appcast.xml,
+# and a draft is nobody's "latest" — so no Mac sees a release that is still
+# missing a file, and a failed Linux build ships nothing at all.
+#
+# A tag like v0.10.0-rc.1 is a release candidate: built and signed exactly the
+# same, published as a pre-release. GitHub never calls a pre-release "latest",
+# so no installed app is offered it; it is there to be downloaded and tried.
+
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Build, sign, notarize, publish
+  version:
+    name: Read the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      pkgver: ${{ steps.read.outputs.pkgver }}
+      prerelease: ${{ steps.read.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-rc\.([0-9]+))?$ ]]; then
+            echo "::error::the tag must look like v0.10.0 or v0.10.0-rc.1, not $TAG"
+            exit 1
+          fi
+          base="${BASH_REMATCH[1]}"
+          candidate="${BASH_REMATCH[3]}"
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          if [[ "$base" != "$cargo_version" ]]; then
+            echo "::error::the tag says $base, Cargo.toml says $cargo_version"
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # A package version may not contain a hyphen.
+          echo "pkgver=${base}${candidate:+rc$candidate}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ -n "$candidate" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux
+    needs: version
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      pkgver: ${{ needs.version.outputs.pkgver }}
+      pkgrel: '1'
+      name: torromail-${{ needs.version.outputs.version }}
+      tag: ${{ github.ref_name }}
+
+  macos:
+    name: macOS — build, sign, notarize
+    needs: version
     runs-on: macos-14
     timeout-minutes: 90
+    # generate-notes, below, is a write call.
+    permissions:
+      contents: write
     env:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -23,19 +79,6 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '16'
-
-      - name: Verify tag matches Cargo.toml version
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          tag="${TAG#v}"
-          cargo_ver="$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)"
-          if [[ "$tag" != "$cargo_ver" ]]; then
-            echo "error: tag $tag does not match Cargo.toml version $cargo_ver" >&2
-            exit 1
-          fi
-          echo "Tag / Cargo version match: $tag"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -141,19 +184,50 @@ jobs:
             "dist/appcast.xml" \
             "release-notes.md"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          draft: false
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
+          name: macos
+          path: |
             dist/TorroMail-*.dmg
             dist/SHA256SUMS.txt
             dist/appcast.xml
+          if-no-files-found: error
 
       - name: Cleanup keychain
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain" || true
+
+  publish:
+    name: Publish
+    needs: [version, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Assemble the release as a draft, then publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          # The three an installed Mac app will come looking for.
+          test -f assets/appcast.xml
+          ls assets/TorroMail-*.dmg assets/torromail-*-x86_64-linux.tar.gz > /dev/null
+
+          flags=(--draft --title "$TAG" --generate-notes)
+          if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" assets/* "${flags[@]}"
+
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
