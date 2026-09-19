@@ -56,7 +56,7 @@ fn main() -> std::io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("status") {
         let snapshot = backend.load();
         if std::env::args().any(|argument| argument == "--json") {
-            println!("{}", torromail_tui::status::json(&snapshot, ui::VERSION));
+            println!("{}", torromail_tui::status::json(&snapshot, ui::VERSION, settings.lang()));
         } else {
             println!("{}", torromail_tui::status::plain(&snapshot));
         }

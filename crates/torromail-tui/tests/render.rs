@@ -1171,7 +1171,9 @@ fn e_writes_the_log_as_csv_and_says_where() {
 
 #[test]
 fn the_status_document_carries_the_glance_and_none_of_what_was_searched_for() {
-    let status = torromail_tui::status::json(&snapshot(), "0.9.0");
+    let status = torromail_tui::status::json(&snapshot(), "0.9.0", Lang::De);
+    assert_eq!(status["language"], "de", "the widget speaks the language chosen in the settings");
+    assert_eq!(status["activity"][0]["account_email"], "sven@torro.dev");
     assert_eq!(status["schema"], 1);
     assert_eq!((&status["ready"], &status["broken_accounts"], &status["connected_clients"]), (&json!(true), &json!(1), &json!(1)));
     assert_eq!(status["accounts"][1]["state"], "failed");

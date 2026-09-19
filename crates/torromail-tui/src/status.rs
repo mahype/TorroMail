@@ -14,7 +14,7 @@ use crate::data::{AccountHealth, Snapshot};
 const ACTIVITY: usize = 10;
 
 #[must_use]
-pub fn json(snapshot: &Snapshot, version: &str) -> Value {
+pub fn json(snapshot: &Snapshot, version: &str, language: crate::i18n::Lang) -> Value {
     let accounts: Vec<Value> = snapshot
         .accounts
         .iter()
@@ -62,6 +62,13 @@ pub fn json(snapshot: &Snapshot, version: &str) -> Value {
                 "ts": entry.timestamp as u64,
                 "client": entry.client,
                 "account": if entry.account.is_empty() { Value::Null } else { json!(snapshot.account_name(&entry.account)) },
+                // Several accounts often share a sender name; the address is
+                // what tells them apart.
+                "account_email": snapshot
+                    .accounts
+                    .iter()
+                    .find(|view| view.account.id == entry.account)
+                    .map(|view| view.account.email.clone()),
                 "tool": entry.tool,
                 "result": entry.result,
             })
@@ -71,6 +78,12 @@ pub fn json(snapshot: &Snapshot, version: &str) -> Value {
     json!({
         "schema": 1,
         "version": version,
+        // The language chosen in TorroMail's settings, so a widget speaks the
+        // same one rather than guessing from the desktop's locale.
+        "language": match language {
+            crate::i18n::Lang::De => "de",
+            crate::i18n::Lang::En => "en",
+        },
         "taken_at": snapshot.taken_at,
         "ready": snapshot.server_binary.is_some(),
         "broken_accounts": broken,
