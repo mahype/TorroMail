@@ -77,3 +77,37 @@ pub fn discover(email: &str) -> Option<DiscoveredConfig> {
     let deadline = Instant::now() + BUDGET;
     providers::discover(email, &SystemNetwork::default(), &|| Instant::now() >= deadline)
 }
+
+/// The newest published release of a GitHub repository, as its tag
+/// (`v0.9.0`). Read-only: nothing is downloaded or installed from here — on
+/// Linux updates arrive through a package or a checkout.
+pub fn latest_release_tag(repository: &str) -> Result<String, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .user_agent("TorroMail")
+        .https_only(true)
+        .build()
+        .into();
+    let mut response = agent
+        .get(&format!("https://api.github.com/repos/{repository}/releases/latest"))
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|error| error.to_string())?;
+    let body = response.body_mut().with_config().limit(MAX_DOCUMENT).read_to_string().map_err(|error| error.to_string())?;
+    // `"tag_name": "v0.9.0"` — one field of a large document, so it is picked
+    // out rather than the whole thing being modelled.
+    let after = body.split_once("\"tag_name\"").ok_or("the answer names no release")?.1;
+    let start = after.find('"').ok_or("the answer names no release")? + 1;
+    let end = after[start..].find('"').ok_or("the answer names no release")? + start;
+    Ok(after[start..end].to_owned())
+}
+
+/// Whether `candidate` (`v1.2.3` or `1.2.3`) is newer than `installed`.
+/// Compared number by number; anything that is not a number counts as zero.
+#[must_use]
+pub fn is_newer(candidate: &str, installed: &str) -> bool {
+    let numbers = |version: &str| -> Vec<u64> {
+        version.trim_start_matches(['v', 'V']).split(['.', '-']).take(3).map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    numbers(candidate) > numbers(installed)
+}

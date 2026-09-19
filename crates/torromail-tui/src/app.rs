@@ -98,6 +98,10 @@ pub enum Request {
     /// Find the servers for an address the provider table does not know.
     Discover(String),
     SaveSettings(Box<crate::settings::Settings>),
+    /// Ask GitHub whether a newer release exists.
+    CheckForUpdates,
+    /// Write the log to a CSV file.
+    ExportLog,
     /// Install or remove the timer behind the background check.
     SetAutocheck(bool),
 }
@@ -171,6 +175,12 @@ pub struct App {
     pub rebuild: Option<(String, Option<crate::rebuild::Progress>)>,
     pub settings: crate::settings::Settings,
     pub settings_index: usize,
+    /// When a client's key was last written in this session. An assistant
+    /// reads its key once, at start, so until it has connected *after* this
+    /// moment it is still presenting the old one.
+    pub key_changed: std::collections::HashMap<String, u64>,
+    /// The newest release seen, and when it was asked for (Unix seconds).
+    pub update: Option<(String, u64)>,
 }
 
 impl App {
@@ -203,8 +213,20 @@ impl App {
             rebuild: None,
             settings: crate::settings::Settings::default(),
             settings_index: 0,
+            key_changed: std::collections::HashMap::new(),
+            update: None,
             detail_scroll: 0,
         }
+    }
+
+    /// Whether the client still has to be restarted before the key written
+    /// for it takes effect. A connection older than the change proves nothing;
+    /// one after it is the proof, which is why this clears by itself.
+    #[must_use]
+    pub fn restart_pending(&self, client: &crate::data::ClientView) -> bool {
+        self.key_changed.get(client.descriptor.id).is_some_and(|changed| {
+            client.connection.as_ref().is_none_or(|connection| (connection.last_connected as u64) < *changed)
+        })
     }
 
     /// Whether a draft differs from what is stored.
@@ -586,6 +608,13 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Left if self.section == Section::Accounts => {
                 self.account_tab = (self.account_tab + ACCOUNT_TABS.len() - 1) % ACCOUNT_TABS.len();
+            }
+            KeyCode::Char('u') if self.section == Section::Updates => {
+                self.message = Some(Message { text: "Checking for updates…", detail: String::new(), is_error: false });
+                self.request = Some(Request::CheckForUpdates);
+            }
+            KeyCode::Char('e') if self.section == Section::Log && !self.snapshot.audit.is_empty() => {
+                self.request = Some(Request::ExportLog);
             }
             KeyCode::Char('R') if self.section == Section::Accounts && self.account_tab == 3 && self.rebuild.is_none() => {
                 if let Some(view) = self.snapshot.accounts.get(self.account_index) {

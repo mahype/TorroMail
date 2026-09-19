@@ -74,3 +74,22 @@ fn the_data_directory_follows_the_platform() {
     );
     assert_eq!(paths::data_directory(Platform::Linux, None, None), None, "no home, no invented location");
 }
+
+
+#[test]
+fn an_export_cannot_be_made_to_run_as_a_formula() {
+    let entry = |detail: &str| logs::AuditEntry {
+        timestamp: 100.5,
+        client: "Codex".to_owned(),
+        account: "work".to_owned(),
+        tool: "mail_search".to_owned(),
+        detail: detail.to_owned(),
+        result: "ok".to_owned(),
+    };
+    let csv = logs::audit_csv(&[entry(r#"=HYPERLINK("http://evil","x")"#), entry("say \"hi\", twice"), entry("-2+3")]);
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[0], "timestamp,client,account,tool,detail,result");
+    assert!(lines[1].contains(r#""'=HYPERLINK(""http://evil"",""x"")""#), "got: {}", lines[1]);
+    assert!(lines[2].contains(r#""say ""hi"", twice""#), "got: {}", lines[2]);
+    assert!(lines[3].contains(r#""'-2+3""#), "got: {}", lines[3]);
+}

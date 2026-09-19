@@ -115,3 +115,28 @@ pub fn parse_flat_object(text: &str) -> Option<HashMap<String, String>> {
             .collect(),
     )
 }
+
+/// The audit entries as CSV, oldest first, with the header the log table has.
+/// A cell that a spreadsheet would run as a formula — it starts with `=`, `+`,
+/// `-` or `@` — is prefixed with an apostrophe: the details column carries
+/// text an assistant chose, and an export must not execute it.
+#[must_use]
+pub fn audit_csv(entries: &[AuditEntry]) -> String {
+    fn cell(text: &str) -> String {
+        let guarded = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{text}") } else { text.to_owned() };
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    }
+    let mut csv = String::from("timestamp,client,account,tool,detail,result\n");
+    for entry in entries {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            entry.timestamp,
+            cell(&entry.client),
+            cell(&entry.account),
+            cell(&entry.tool),
+            cell(&entry.detail),
+            cell(&entry.result)
+        ));
+    }
+    csv
+}

@@ -139,7 +139,8 @@ fn key_hints(app: &App) -> Line<'static> {
             }
         }
         Section::Settings => hints.extend([("↑↓", "select"), (lang.t("space"), "toggle")]),
-        Section::Log => hints.extend([("↑↓", "row"), ("s", "sort"), ("r", "reverse")]),
+        Section::Log => hints.extend([("↑↓", "row"), ("s", "sort"), ("r", "reverse"), ("e", "export")]),
+        Section::Updates => hints.push(("u", "check")),
         _ => {}
     }
     if app.section != Section::Log {

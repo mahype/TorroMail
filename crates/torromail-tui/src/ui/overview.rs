@@ -14,6 +14,11 @@ use crate::theme;
 pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = app.lang;
     let snapshot = &app.snapshot;
+    // Nothing set up yet: say what to do, instead of four empty cards.
+    if snapshot.accounts.is_empty() {
+        getting_started(frame, area, app);
+        return;
+    }
     let broken: Vec<_> = snapshot.accounts.iter().filter(|view| view.health.is_broken()).collect();
     let attention_height = if broken.is_empty() { 0 } else { broken.len() as u16 * 2 + 2 };
     let accounts_height = (snapshot.accounts.len().max(2) as u16 + 2).min(8);
@@ -170,4 +175,40 @@ fn tile_title(good: bool, text: &str) -> Line<'static> {
         Span::styled(" ● ", Style::new().fg(colour)),
         Span::styled(text.to_owned(), Style::new().fg(colour).add_modifier(Modifier::BOLD)),
     ])
+}
+
+/// The first-run card: the three steps, with the key that starts each.
+fn getting_started(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = app.lang;
+    let block = panel(lang.t("Getting started"), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let body = Rect { x: inner.x + 2, y: inner.y + 1, width: inner.width.saturating_sub(4), height: inner.height.saturating_sub(1) };
+
+    let step = |number: &'static str, key: &'static str, title: &'static str, detail: &'static str| {
+        vec![
+            Line::from(vec![
+                Span::styled(format!("{number}  "), Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(lang.t(title), Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw("   "),
+                Span::styled(format!(" {key} "), Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::styled(format!("   {}", lang.t(detail)), theme::muted()),
+            Line::default(),
+        ]
+    };
+    let mut lines = vec![
+        Line::styled(lang.t("Your mailboxes for AI assistants."), theme::muted()),
+        Line::default(),
+    ];
+    lines.extend(step("1", "n", "Add a mail account", "TorroMail talks to your mail server. It never becomes your mail client."));
+    lines.extend(step("2", "2", "Decide what is allowed", "Per account you pick what assistants may read and do."));
+    lines.extend(step("3", "3", "Connect an assistant", "Connect one in the MCP Clients section to start using your mail."));
+    if app.snapshot.server_binary.is_none() {
+        lines.push(Line::styled(
+            format!("▲ {}", lang.t("torromail-mcp was not found next to this program or on the PATH.")),
+            Style::new().fg(theme::AMBER),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), body);
 }

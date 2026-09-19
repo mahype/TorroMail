@@ -153,7 +153,10 @@ fn a_healthy_setup_shows_no_attention_card() {
 #[test]
 fn a_first_start_explains_itself_instead_of_showing_empty_boxes() {
     let mut app = App::new(Lang::En, Snapshot::default());
-    assert_shows(&render(&app), &["Not reachable for assistants", "No assistant connected", "No accounts yet.", "Press n to add your first account.", "No activity yet."]);
+    assert_shows(
+        &render(&app),
+        &["Getting started", "Add a mail account", " n ", "Decide what is allowed", "Connect an assistant", "torromail-mcp was not found"],
+    );
     press(&mut app, KeyCode::Char('2'));
     assert_shows(&render(&app), &["No accounts yet."]);
     press(&mut app, KeyCode::Char('6'));
@@ -191,10 +194,12 @@ fn the_client_list_says_where_each_assistant_stands_and_never_shows_a_key() {
     press(&mut app, KeyCode::Char('3'));
     assert_shows(&render(&app), &["Claude Desktop", "Auf diesem Rechner nicht gefunden", "Hat sich noch nicht verbunden"]);
     press(&mut app, KeyCode::Down);
-    let screen = render(&app);
+    // Taller than the default: the hint and the snippet sit below the status.
+    let screen = render_at(&app, 112, 50);
     assert_shows(
         &screen,
         &[
+            "In Claude Code prüfen", "/mcp",
             "Claude Code hat sich mit dem Server verbunden", "Version 2.1.4", "~/.claude.json", "TorroMail-Server antwortet — 15 Werkzeuge",
             "Nicht verbunden", "Nicht installiert", "Von Hand einrichten",
             "\"mcpServers\"", "/usr/bin/torromail-mcp", "torro_claude-code_••••••••••••",
@@ -372,6 +377,8 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         tool_count: std::cell::OnceCell::new(),
         unit_directory: directory.join("units"),
         systemctl: Box::new(|_| Ok(())),
+        release_lookup: Box::new(|| Ok("v0.0.1".to_owned())),
+        export_directory: directory.join("exports"),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -434,6 +441,8 @@ fn scene(name: &str) -> Scene {
             tool_count: std::cell::OnceCell::new(),
             unit_directory: root.join("units"),
             systemctl: Box::new(|_| Ok(())),
+            release_lookup: Box::new(|| Ok("v0.0.1".to_owned())),
+            export_directory: root.join("exports"),
         },
         root,
     }
@@ -1080,4 +1089,79 @@ fn the_background_pass_notifies_on_a_crossing_and_only_on_a_crossing() {
     assert_eq!(notes.borrow().len(), 2);
     let log = std::fs::read_to_string(scene.root.join("data/health.jsonl")).expect("records were written");
     assert!(log.contains(r#""source":"periodic""#));
+}
+
+
+// MARK: what a connected assistant still has to do
+
+#[test]
+fn a_fresh_key_asks_for_a_restart_until_the_assistant_connects_again() {
+    let scene = scene("restart-pending");
+    let mut app = scene.app_on_cursor();
+    assert_shows(&render_at(&app, 112, 50), &["In Cursor prüfen", "Einstellungen → MCP"]);
+    assert!(!render(&app).contains("Starte Cursor jetzt neu"));
+
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Starte Cursor jetzt neu", "verwendet weiterhin den alten"]);
+
+    // The server saw Cursor connect after the key was written: proof enough.
+    let later = torromail_tui::data::now() + 5;
+    std::fs::write(
+        scene.root.join("data/connections.jsonl"),
+        format!(r#"{{"ts":{later},"client_id":"cursor","client_name":"cursor","client_version":"1.0"}}"#) + "\n",
+    )
+    .expect("writable");
+    app.replace_snapshot(scene.backend.load());
+    assert!(!render(&app).contains("Starte Cursor jetzt neu"), "the warning clears by itself");
+}
+
+
+// MARK: updates and the log export
+
+#[test]
+fn u_asks_for_the_newest_release_and_says_which_way_it_compares() {
+    let mut scene = scene("updates");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    app.settings.language = Some(Lang::De);
+    press(&mut app, KeyCode::Char('5'));
+    assert_shows(&render(&app), &["Installierte Version", " u ", "Jetzt nach Updates suchen"]);
+
+    press(&mut app, KeyCode::Char('u'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Du bist auf dem neuesten Stand. (v0.0.1)", "Zuletzt geprüft: gerade eben"]);
+
+    scene.backend.release_lookup = Box::new(|| Ok("v99.0.0".to_owned()));
+    press(&mut app, KeyCode::Char('u'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Eine neuere Version ist verfügbar: v99.0.0", "scripts/install-linux.sh"]);
+
+    scene.backend.release_lookup = Box::new(|| Err("no route to host".to_owned()));
+    press(&mut app, KeyCode::Char('u'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Die Suche nach Updates ist fehlgeschlagen.", "no route to host"]);
+}
+
+#[test]
+fn e_writes_the_log_as_csv_and_says_where() {
+    let scene = scene("export");
+    std::fs::write(
+        scene.root.join("data/audit.jsonl"),
+        concat!(
+            r#"{"ts":100,"client":"Codex","account":"work","tool":"mail_search","detail":"=cmd","result":"ok"}"#, "\n",
+            r#"{"ts":101,"client":"Codex","account":"","tool":"mail_list_accounts","detail":"","result":"ok"}"#, "\n",
+        ),
+    )
+    .expect("writable");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('6'));
+    assert_shows(&render(&app), &[" e ", "exportieren"]);
+    press(&mut app, KeyCode::Char('e'));
+    scene.act(&mut app);
+
+    assert_shows(&render(&app), &["Exportiert:", "torromail-log-"]);
+    let exported = std::fs::read_dir(scene.root.join("exports")).expect("the directory was made").flatten().next().expect("one file");
+    let csv = std::fs::read_to_string(exported.path()).expect("readable");
+    assert_eq!(csv.lines().count(), 3, "a header and both entries");
+    assert!(csv.contains(r#""'=cmd""#), "a formula is defused: {csv}");
 }

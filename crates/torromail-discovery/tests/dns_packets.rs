@@ -161,3 +161,13 @@ fn the_real_network_finds_a_workspace_domain_and_a_published_autoconfig() {
     let found = torromail_discovery::discover("someone@google.com").expect("found through its MX");
     assert_eq!(found.source, "mx");
 }
+
+#[test]
+fn versions_compare_by_their_numbers() {
+    use torromail_discovery::is_newer;
+    assert!(is_newer("v0.10.0", "0.9.0"), "ten is more than nine");
+    assert!(is_newer("1.0.0", "0.99.99"));
+    assert!(!is_newer("v0.9.0", "0.9.0"));
+    assert!(!is_newer("v0.8.5", "0.9.0"));
+    assert!(!is_newer("nonsense", "0.9.0"));
+}
