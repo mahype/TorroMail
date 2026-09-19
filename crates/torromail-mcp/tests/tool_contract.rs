@@ -460,6 +460,15 @@ fn mail_mark_rejects_unknown_flag_names() {
     assert!(response.contains(r#""code":-32602"#));
 }
 
+/// Whether a check got as far as asking for the secret. On macOS that is the
+/// keychain saying no; elsewhere it is either the Secret Service finding
+/// nothing (the same sentence) or there being no Secret Service to ask — which
+/// of the two depends on the machine running the test, and both prove the
+/// point: nothing before the secret refused.
+fn failed_at_the_secret(message: &str) -> bool {
+    message.contains("keychain") || message.contains("secret service")
+}
+
 /// A `secret-tool` that answers every lookup the way the real one answers a
 /// miss: exit 1, not a word on stderr. `false` does exactly that, and using a
 /// program that already exists avoids writing an executable while other tests
@@ -1492,7 +1501,7 @@ fn an_xoauth2_account_is_accepted_and_reaches_the_keychain() {
 
     assert_ne!(outcome, torromail_mcp::health::HealthOutcome::Ok);
     assert!(
-        error.contains("keychain"),
+        failed_at_the_secret(&error),
         "should fail at the secret, not before it — got: {error}"
     );
 }
@@ -1734,7 +1743,7 @@ fn check_account_sits_behind_the_pairing_gate() {
 
     assert!(unpaired.contains("not paired"), "got: {unpaired}");
     assert!(wrong.contains("revoked or is not valid"), "got: {wrong}");
-    assert!(through.contains("keychain"), "got: {through}");
+    assert!(failed_at_the_secret(&through), "got: {through}");
 }
 
 // --- What a check reports -------------------------------------------------
