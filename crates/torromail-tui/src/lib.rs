@@ -12,6 +12,7 @@ pub mod data;
 pub mod i18n;
 pub mod rebuild;
 pub mod settings;
+pub mod status;
 pub mod theme;
 pub mod ui;
 pub mod wizard;

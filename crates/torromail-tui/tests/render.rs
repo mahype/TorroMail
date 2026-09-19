@@ -1165,3 +1165,32 @@ fn e_writes_the_log_as_csv_and_says_where() {
     assert_eq!(csv.lines().count(), 3, "a header and both entries");
     assert!(csv.contains(r#""'=cmd""#), "a formula is defused: {csv}");
 }
+
+
+// MARK: the glance, without a screen
+
+#[test]
+fn the_status_document_carries_the_glance_and_none_of_what_was_searched_for() {
+    let status = torromail_tui::status::json(&snapshot(), "0.9.0", Lang::De);
+    assert_eq!(status["language"], "de", "the widget speaks the language chosen in the settings");
+    assert_eq!(status["activity"][0]["account_email"], "sven@torro.dev");
+    assert_eq!(status["schema"], 1);
+    assert_eq!((&status["ready"], &status["broken_accounts"], &status["connected_clients"]), (&json!(true), &json!(1), &json!(1)));
+    assert_eq!(status["accounts"][1]["state"], "failed");
+    assert_eq!(status["accounts"][1]["reason"], "[AUTHENTICATIONFAILED] Authentication failed.");
+    assert_eq!(status["accounts"][0]["last_checked"], NOW - 120);
+
+    let clients: Vec<&str> = status["clients"].as_array().expect("clients").iter().map(|client| client["id"].as_str().expect("id")).collect();
+    assert_eq!(clients, ["claude-code", "pi", "cursor"], "installed or paired, nothing else");
+    assert_eq!(status["clients"][0]["version"], "2.1.4");
+
+    assert_eq!(status["activity"][0]["tool"], "mail_search");
+    assert_eq!(status["activity"][0]["account"], "Torro", "by the name the user gave it");
+    assert!(status["activity"][2]["account"].is_null());
+    let text = status.to_string();
+    assert!(!text.contains("angebot") && !text.contains("rechnung"), "search terms stay inside the surface: {text}");
+
+    let plain = torromail_tui::status::plain(&snapshot());
+    assert!(plain.contains("BROKEN") && plain.contains("Claude Code") && plain.contains("connected"));
+    assert!(torromail_tui::status::plain(&Snapshot::default()).contains("nothing set up yet"));
+}
