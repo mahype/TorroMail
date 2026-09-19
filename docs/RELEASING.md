@@ -1,7 +1,9 @@
 # Releasing
 
 This document is for maintainers. It describes how TorroMail is versioned,
-built, signed, notarized, and published as a downloadable `.dmg`.
+built, signed, notarized, and published: the Mac app as a downloadable `.dmg`,
+the Linux programs as tarballs and as the `torromail-bin` AUR package — all in
+one GitHub Release per version.
 
 ## TL;DR
 
@@ -11,9 +13,13 @@ built, signed, notarized, and published as a downloadable `.dmg`.
 git commit -am "release: v0.2.0"
 git tag v0.2.0
 git push origin main v0.2.0
-# 3. Watch the Release workflow on GitHub Actions — it builds, signs, notarizes,
-#    and attaches the DMG to a new GitHub Release.
+# 3. Watch the Release workflow on GitHub Actions — it builds every platform,
+#    assembles the release as a draft and publishes it once nothing is missing.
 ```
+
+Unsure about a build? Tag a release candidate first (`v0.2.0-rc.1`, same
+`Cargo.toml` version): it is built and signed exactly the same but published as
+a pre-release, which no installed app is ever offered.
 
 ## Versioning
 
@@ -23,7 +29,7 @@ pre-releases.
 The version lives in one place: `version` under `[workspace.package]` in the
 root [Cargo.toml](../Cargo.toml). All crates inherit it via
 `version.workspace = true`. The release workflow refuses to run if the pushed
-tag does not match this value.
+tag does not match this value (a `-rc.N` suffix aside).
 
 The build script injects the version into the app bundle's `Info.plist`
 (`CFBundleShortVersionString` / `CFBundleVersion`) at build time.
@@ -36,23 +42,47 @@ The build script injects the version into the app bundle's `Info.plist`
 
 ## What the release workflow does
 
-On push of a `v*` tag, the GitHub Actions release workflow (`macos-14` runner):
+On push of a `v*` tag, [release.yml](../.github/workflows/release.yml) first
+verifies that the tag matches the `Cargo.toml` workspace version, then runs two
+halves side by side.
 
-1. Verifies the tag matches the `Cargo.toml` workspace version.
-2. Builds `torromail-mcp` for `aarch64` and `x86_64` and lipos them universal.
-3. Builds a universal Swift executable and assembles `dist/TorroMail.app`
+**macOS** (`macos-14` runner):
+
+1. Builds `torromail-mcp` for `aarch64` and `x86_64` and lipos them universal.
+2. Builds a universal Swift executable and assembles `dist/TorroMail.app`
    (bundled MCP server, icon, localization, version-stamped `Info.plist`).
-4. Signs the bundle with the **Developer ID Application** certificate under the
+3. Signs the bundle with the **Developer ID Application** certificate under the
    hardened runtime, notarizes it with Apple, and staples the ticket.
-5. Packages a drag-to-Applications `.dmg`, signs + notarizes + staples it, and
+4. Packages a drag-to-Applications `.dmg`, signs + notarizes + staples it, and
    writes `SHA256SUMS.txt`.
-6. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket.
-7. Signs the DMG with TorroMail's Sparkle Ed25519 key and creates
+5. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket.
+6. Signs the DMG with TorroMail's Sparkle Ed25519 key and creates
    `appcast.xml` with the generated release notes.
-8. Publishes one GitHub Release containing the DMG, checksum, and appcast.
-   Installed apps poll the stable
-   `releases/latest/download/appcast.xml` address, so the feed and the file it
-   advertises become visible together.
+
+**Linux** ([build-linux.yml](../.github/workflows/build-linux.yml)):
+
+1. Builds `torromail` and `torromail-mcp` for `x86_64` and `aarch64` on the
+   oldest runner image on offer (glibc 2.35) and packs a tarball each.
+2. Fills in the [PKGBUILD](../packaging/aur/torromail-bin/PKGBUILD) — version,
+   release tag, checksums — then builds, installs and runs the package in a
+   clean Arch container. `PKGBUILD` and `.SRCINFO` become
+   `torromail-bin-aur.tar.gz`; its contents are what is pushed to the AUR.
+
+**Publish**, only once both halves succeeded: the release is created as a
+**draft** with every file attached, and then published. Installed Mac apps poll
+`releases/latest/download/appcast.xml`, and a draft is nobody's "latest" — so
+the feed, the file it advertises and the Linux downloads become visible
+together, and a build that failed halfway ships nothing. A `-rc.N` tag is
+published as a pre-release and never becomes "latest".
+
+### Linux-only releases
+
+A fix that does not concern the Mac app can go out alone: a tag of the form
+`linux-v<version>-<build>` (`linux-v0.10.0-2`) runs
+[release-linux.yml](../.github/workflows/release-linux.yml), which builds the
+same Linux half and publishes it with `--latest=false`, so the Mac updater
+never looks at it. Started by hand, or by a pull request that touches the
+packaging, that workflow is a dry run and publishes nothing.
 
 ## Required GitHub Actions secrets
 

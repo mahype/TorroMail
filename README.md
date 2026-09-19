@@ -54,12 +54,9 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 On Linux, `scripts/install-linux.sh` builds a release and installs `torromail` and
 `torromail-mcp` into `~/.local/bin` (no root; `--uninstall` removes them again).
 
-Prebuilt Linux programs come from their own releases, tagged `linux-v<version>-<build>`
-([release-linux.yml](.github/workflows/release-linux.yml)): tarballs for x86_64 and aarch64
-and the `torromail-bin` AUR package ([packaging/aur](packaging/aur/torromail-bin/PKGBUILD)),
-which the workflow builds and installs in a clean Arch container before anything is
-published. These releases are never marked "latest" — the Mac app's updater reads its
-appcast from the latest release.
+Prebuilt Linux programs are part of every release: tarballs for x86_64 and aarch64 and the
+`torromail-bin` AUR package ([packaging/aur](packaging/aur/torromail-bin/PKGBUILD)), which
+the release builds and installs in a clean Arch container before anything is published.
 
 To try the terminal surface from a checkout: `cargo run -p torromail-tui`. It reads the shared data directory —
 `~/Library/Application Support/TorroMail` on macOS, `$XDG_STATE_HOME/torromail`
@@ -76,7 +73,9 @@ For a runnable dev bundle, use `scripts/make-app-bundle.sh`.
 
 Pushing a `v*` tag triggers [.github/workflows/release.yml](.github/workflows/release.yml),
 which builds a universal `TorroMail.app`, signs and notarizes it, packages a
-`.dmg`, signs a Sparkle appcast, and publishes all artifacts as one GitHub
-Release. Installed copies can check that feed automatically or on demand. See
+`.dmg`, signs a Sparkle appcast, builds the Linux programs and their AUR
+package, and publishes everything as one GitHub Release — assembled as a draft
+first, so nothing half-finished is ever the latest release. Installed Mac
+copies can check that feed automatically or on demand. See
 [docs/RELEASING.md](docs/RELEASING.md) for versioning rules, the required
 signing secrets, and how to build a release locally.
