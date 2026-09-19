@@ -52,6 +52,17 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
+    // `torromail status [--json]`: the glance, for a shell or a bar widget.
+    if std::env::args().nth(1).as_deref() == Some("status") {
+        let snapshot = backend.load();
+        if std::env::args().any(|argument| argument == "--json") {
+            println!("{}", torromail_tui::status::json(&snapshot, ui::VERSION));
+        } else {
+            println!("{}", torromail_tui::status::plain(&snapshot));
+        }
+        return Ok(());
+    }
+
     let mut app = App::new(settings.lang(), backend.load());
     app.settings = settings;
 
