@@ -132,7 +132,7 @@ fn hostile_packets_end_in_none_never_in_a_panic_or_a_loop() {
         let _ = dns::parse_response(&good[..cut], ID);
     }
     for noise in [&[][..], &[0xBE][..], &[0xBE, 0xEF, 0x81, 0x80, 0xFF, 0xFF, 0xFF, 0xFF][..]] {
-        assert!(dns::parse_response(noise, ID).map_or(true, |(records, _)| records.is_empty()));
+        assert!(dns::parse_response(noise, ID).is_none_or(|(records, _)| records.is_empty()));
     }
 }
 
