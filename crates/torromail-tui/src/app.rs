@@ -83,6 +83,7 @@ pub enum Request {
     SaveAccount(Box<MailAccount>, Option<Secret>),
     /// Log in and list the account's folders, to edit folder rules with.
     LoadMailboxes(String),
+    RebuildCache(String),
     Connect(String),
     Disconnect(String),
     SetAccess(String, ClientAccountAccess),
@@ -160,6 +161,8 @@ pub struct App {
     pub extras: EditExtras,
     /// How far the detail pane is scrolled; it can be taller than the terminal.
     pub detail_scroll: u16,
+    /// The account whose cache is being rebuilt, and the last progress seen.
+    pub rebuild: Option<(String, Option<crate::rebuild::Progress>)>,
 }
 
 impl App {
@@ -189,6 +192,7 @@ impl App {
             wizard: None,
             confirm_remove: false,
             extras: EditExtras::default(),
+            rebuild: None,
             detail_scroll: 0,
         }
     }
@@ -569,6 +573,11 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Left if self.section == Section::Accounts => {
                 self.account_tab = (self.account_tab + ACCOUNT_TABS.len() - 1) % ACCOUNT_TABS.len();
+            }
+            KeyCode::Char('R') if self.section == Section::Accounts && self.account_tab == 3 && self.rebuild.is_none() => {
+                if let Some(view) = self.snapshot.accounts.get(self.account_index) {
+                    self.request = Some(Request::RebuildCache(view.account.id.clone()));
+                }
             }
             KeyCode::Char('t') if self.section == Section::Accounts => {
                 if let Some(view) = self.snapshot.accounts.get(self.account_index) {

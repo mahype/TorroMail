@@ -48,15 +48,11 @@ pub fn remove_account(
         leftovers.push("the cache was left alone: the account id is not a plain name".to_owned());
         return Ok(leftovers);
     }
-    for suffix in ["", "-wal", "-shm"] {
-        let file = data_directory.join("cache").join(format!("{account_id}.sqlite{suffix}"));
-        if file.exists() && std::fs::remove_file(&file).is_err() {
-            leftovers.push(format!("{} could not be removed", file.display()));
+    for path in crate::cache_files::paths_for(data_directory, account_id) {
+        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        if path.exists() && removed.is_err() {
+            leftovers.push(format!("{} could not be removed", path.display()));
         }
-    }
-    let attachments = data_directory.join("attachments").join(account_id);
-    if attachments.exists() && std::fs::remove_dir_all(&attachments).is_err() {
-        leftovers.push(format!("{} could not be removed", attachments.display()));
     }
     Ok(leftovers)
 }

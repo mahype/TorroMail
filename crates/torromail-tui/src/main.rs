@@ -29,6 +29,9 @@ fn main() -> std::io::Result<()> {
         checker: Box::new(data::check_account),
         discoverer: Box::new(torromail_discovery::discover),
         mailbox_lister: Box::new(data::list_account_mailboxes),
+        rebuild_command: Box::new(data::rebuild_command),
+        rebuild: std::cell::RefCell::new(None),
+        tool_count: std::cell::OnceCell::new(),
     };
     let mut app = App::new(Lang::from_environment(), backend.load());
 
@@ -58,6 +61,7 @@ fn main() -> std::io::Result<()> {
             torromail_tui::perform(&backend, &mut app, request);
             loaded = Instant::now();
         }
+        torromail_tui::tick(&backend, &mut app);
         if app.wants_reload || loaded.elapsed() >= REFRESH {
             app.wants_reload = false;
             app.replace_snapshot(backend.load());
