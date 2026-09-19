@@ -100,7 +100,26 @@ fn key_hints(app: &App) -> Line<'static> {
         }
         Section::Accounts if app.account_tab == 1 => hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit")]),
         Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab")]),
-        Section::Clients => hints.push(("↑↓", "select")),
+        Section::Clients if app.focus == crate::app::Focus::Detail => {
+            hints.extend([("↑↓", "select"), (lang.t("space"), "toggle"), (lang.t("ctrl+s"), "save"), ("esc", "back")]);
+            let mut spans = vec![Span::raw(" ")];
+            for (key, label) in hints {
+                spans.push(Span::styled(format!(" {key} "), Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!(" {}   ", lang.t(label)), theme::muted()));
+            }
+            return Line::from(spans);
+        }
+        Section::Clients => {
+            hints.push(("↑↓", "select"));
+            if let Some(client) = app.snapshot.clients.get(app.client_index) {
+                if client.can_connect() {
+                    hints.push(("c", if client.is_paired() { "reconnect" } else { "connect" }));
+                }
+                if client.is_paired() {
+                    hints.extend([("enter", "accounts"), ("y", "copy"), ("v", "key"), ("T", "disconnect")]);
+                }
+            }
+        }
         Section::Log => hints.extend([("↑↓", "row"), ("s", "sort"), ("r", "reverse")]),
         _ => {}
     }

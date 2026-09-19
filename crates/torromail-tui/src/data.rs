@@ -3,7 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use torromail_control::clients::{self, ClientDescriptor, Environment};
+use torromail_control::clients::{self, ClientDescriptor, ClientKind, Environment};
+use torromail_control::connect::Pairing;
+use torromail_control::policy::ClientAccountAccess;
+use torromail_control::secrets::SecretStore;
 use torromail_control::logs::{self, AuditEntry, ClientConnection};
 use torromail_control::{JsonStateStore, MailAccount, StateStore, paths};
 use torromail_mcp::health::{self, HealthVerdict};
@@ -40,6 +43,26 @@ pub struct ClientView {
     pub configured: bool,
     pub config_path: Option<PathBuf>,
     pub connection: Option<ClientConnection>,
+    /// What the client may see, when it is on the allowlist at all.
+    pub access: Option<ClientAccountAccess>,
+    /// Whether its config carries the key the allowlist knows. A client that
+    /// points at TorroMail without it will be refused — the state the list
+    /// has to call out for reconnecting. Always false for a manual client:
+    /// nobody here can read a config it did not write.
+    pub has_current_key: bool,
+}
+
+impl ClientView {
+    #[must_use]
+    pub fn is_paired(&self) -> bool {
+        self.access.is_some()
+    }
+
+    /// Whether `connect` can do anything for it on this machine.
+    #[must_use]
+    pub fn can_connect(&self) -> bool {
+        self.installed || self.descriptor.kind == ClientKind::Manual
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -53,9 +76,23 @@ pub struct Snapshot {
     pub audit: Vec<AuditEntry>,
     /// Unix seconds when this was taken; relative times count from here.
     pub taken_at: u64,
+    /// Set when the pairing file cannot be read — nothing can be saved until
+    /// that is repaired, and the surface should say so rather than fail late.
+    pub pairings_problem: Option<String>,
+    /// For showing paths the way people write them.
+    pub home: Option<PathBuf>,
 }
 
 impl Snapshot {
+    /// `~/.cursor/mcp.json` rather than the whole home path.
+    #[must_use]
+    pub fn tilde(&self, path: &Path) -> String {
+        match self.home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
+            Some(rest) => format!("~/{}", rest.display()),
+            None => path.display().to_string(),
+        }
+    }
+
     #[must_use]
     pub fn account_name(&self, id: &str) -> String {
         self.accounts
@@ -68,7 +105,11 @@ impl Snapshot {
     /// connecting at least once.
     #[must_use]
     pub fn connected_clients(&self) -> Vec<&ClientView> {
-        self.clients.iter().filter(|client| client.configured && client.connection.is_some()).collect()
+        self.clients
+            .iter()
+            .filter(|client| client.is_paired() && client.connection.is_some())
+            .filter(|client| client.has_current_key || client.descriptor.kind == ClientKind::Manual)
+            .collect()
     }
 }
 
@@ -104,16 +145,24 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
 
     let connections = logs::latest_connections(&data_directory.join(paths::CONNECTIONS_LOG));
     let installed = environment.map(clients::installed).unwrap_or_default();
+    let (pairings, pairings_problem) = match torromail_control::save::load_pairings(data_directory) {
+        Ok(pairings) => (pairings, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     let clients = clients::CATALOG
         .iter()
         .map(|descriptor| {
             let found = installed.iter().find(|client| client.id == descriptor.id);
+            let pairing = pairings.iter().find(|pairing| pairing.id == descriptor.id);
+            let config_hash = found.and_then(|client| clients::configured_token(&client.setup)).map(|token| clients::sha256_hex(&token));
             ClientView {
                 descriptor: *descriptor,
                 installed: found.is_some(),
                 configured: found.is_some_and(|client| clients::is_configured(&client.setup)),
                 config_path: found.map(|client| client.setup.config().to_path_buf()),
                 connection: connections.get(descriptor.id).cloned(),
+                access: pairing.map(|pairing| pairing.account_access.clone()),
+                has_current_key: pairing.is_some_and(|pairing| config_hash.as_deref() == Some(pairing.token_sha256.as_str())),
             }
         })
         .collect();
@@ -128,6 +177,8 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
         clients,
         audit,
         taken_at: now(),
+        pairings_problem,
+        home: environment.map(|environment| environment.home.clone()),
     }
 }
 
@@ -141,8 +192,79 @@ fn server_binary(environment: &Environment) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Saves one edited account: state and policy document, together.
-pub fn save_account(data_directory: &Path, account: &MailAccount) -> Result<(), String> {
-    torromail_control::save::save_account(data_directory, account, &torromail_control::save::default_context())
+/// What the surface does to the world, as opposed to what it shows. The event
+/// loop owns one; tests build one over scratch directories and an in-memory
+/// secret store.
+pub struct Backend {
+    pub data_directory: PathBuf,
+    pub environment: Option<Environment>,
+    pub secrets: Box<dyn SecretStore>,
+}
+
+impl Backend {
+    #[must_use]
+    pub fn load(&self) -> Snapshot {
+        load(&self.data_directory, self.environment.as_ref())
+    }
+
+    /// Saves one edited account: state and policy document, together.
+    pub fn save_account(&self, account: &MailAccount) -> Result<(), String> {
+        torromail_control::save::save_account(&self.data_directory, account, &torromail_control::save::default_context())
+            .map_err(|error| error.to_string())
+    }
+
+    fn pairing<T>(&self, act: impl FnOnce(&Pairing<'_>) -> Result<T, torromail_control::connect::ConnectError>) -> Result<T, String> {
+        let environment = self.environment.as_ref().ok_or("HOME is not set")?;
+        let context = torromail_control::save::default_context();
+        act(&Pairing {
+            data_directory: &self.data_directory,
+            environment,
+            secrets: self.secrets.as_ref(),
+            context: &context,
+            run: &clients::run_tool,
+        })
         .map_err(|error| error.to_string())
+    }
+
+    /// The config of a client has to name the server by absolute path: the
+    /// assistant spawns it without this terminal's PATH.
+    pub fn connect(&self, client_id: &str) -> Result<(), String> {
+        let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
+        let command = binary.to_string_lossy().into_owned();
+        self.pairing(|pairing| pairing.connect(client_id, &command))
+    }
+
+    pub fn disconnect(&self, client_id: &str) -> Result<(), String> {
+        self.pairing(|pairing| pairing.disconnect(client_id))
+    }
+
+    pub fn set_account_access(&self, client_id: &str, access: ClientAccountAccess) -> Result<(), String> {
+        self.pairing(|pairing| pairing.set_account_access(client_id, access))
+    }
+
+    pub fn token(&self, client_id: &str) -> Result<Option<String>, String> {
+        self.pairing(|pairing| pairing.token(client_id))
+    }
+}
+
+/// Hands text to the desktop clipboard through whichever helper is there. The
+/// text travels over stdin — it may carry a key.
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    for (program, arguments) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
+        let Ok(mut child) = std::process::Command::new(program)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        let written = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+        if written && child.wait().is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+    Err("wl-copy / xclip".to_owned())
 }

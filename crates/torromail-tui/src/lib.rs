@@ -10,3 +10,54 @@ pub mod data;
 pub mod i18n;
 pub mod theme;
 pub mod ui;
+
+use app::{App, Request};
+use data::Backend;
+
+/// Carries out what the app asked for and tells it how that went. Lives here
+/// rather than in `main` so a test can drive the same code the event loop
+/// does, over scratch directories.
+pub fn perform(backend: &Backend, app: &mut App, request: Request) {
+    let outcome = match &request {
+        Request::SaveAccount(account) => backend.save_account(account).map(|()| "Saved."),
+        Request::Connect(id) => backend.connect(id).map(|()| "Connected. Restart the assistant to load it."),
+        Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
+        Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
+        Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),
+        Request::RevealKey(id) => match backend.token(id) {
+            Ok(Some(token)) => {
+                app.revealed = Some((id.clone(), token));
+                return;
+            }
+            Ok(None) => Err("no key is stored for this client — reconnect it".to_owned()),
+            Err(error) => Err(error),
+        },
+    };
+    app.replace_snapshot(backend.load());
+    match outcome {
+        Ok(text) => {
+            // What is stored now is what the draft said; editing is over.
+            if matches!(request, Request::SetAccess(..)) {
+                app.access_draft = None;
+                app.focus = app::Focus::List;
+            }
+            app.succeeded(text);
+        }
+        Err(detail) => app.failed(
+            match request {
+                Request::CopySnippet(_) => "No clipboard helper found.",
+                Request::Connect(_) => "Could not connect.",
+                _ => "Could not save.",
+            },
+            detail,
+        ),
+    }
+}
+
+/// The snippet as it leaves the screen: the real key in place of the mask.
+fn snippet(backend: &Backend, app: &App, client_id: &str) -> Result<String, String> {
+    let token = backend.token(client_id)?.ok_or("no key is stored for this client — reconnect it")?;
+    let format = torromail_control::clients::descriptor(client_id).ok_or("unknown client")?.snippet_format;
+    let command = app.snapshot.server_binary.as_ref().map_or_else(|| "torromail-mcp".to_owned(), |path| path.display().to_string());
+    Ok(torromail_control::clients::config_snippet(&command, format, &token))
+}

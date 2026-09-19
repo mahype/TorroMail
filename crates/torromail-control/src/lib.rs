@@ -9,6 +9,7 @@
 
 pub mod account;
 pub mod clients;
+pub mod connect;
 pub mod logs;
 pub mod mailbox_names;
 pub mod paths;
