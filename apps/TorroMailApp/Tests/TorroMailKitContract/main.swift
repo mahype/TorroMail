@@ -1203,7 +1203,13 @@ let serialMonitor = AccountHealthMonitor(
 )
 serialMonitor.update(accountIDs: ["work", "personal"], executableName: "torromail-mcp")
 serialMonitor.start()
-Thread.sleep(forTimeInterval: 0.3)
+// Waits for the pass rather than for a fixed 0.3 s: two 50 ms checks fit in
+// that on a quiet machine and do not on a loaded CI runner, where this failed
+// now and then for reasons that had nothing to do with the monitor.
+let serialDeadline = Date().addingTimeInterval(5)
+while Set(HealthLog.load(from: serialLog).map(\.accountID)).count < 2, Date() < serialDeadline {
+    Thread.sleep(forTimeInterval: 0.05)
+}
 serialMonitor.stop()
 require(
     serialSpy.mostAtOnce == 1,
