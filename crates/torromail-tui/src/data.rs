@@ -52,6 +52,9 @@ pub struct ClientView {
     /// has to call out for reconnecting. Always false for a manual client:
     /// nobody here can read a config it did not write.
     pub has_current_key: bool,
+    /// Whether an extension the assistant needs for MCP is in place. `None`
+    /// when it needs none.
+    pub requirement_met: Option<bool>,
 }
 
 impl ClientView {
@@ -173,6 +176,7 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
                 connection: connections.get(descriptor.id).cloned(),
                 access: pairing.map(|pairing| pairing.account_access.clone()),
                 has_current_key: pairing.is_some_and(|pairing| config_hash.as_deref() == Some(pairing.token_sha256.as_str())),
+                requirement_met: descriptor.requirement.zip(environment).map(|(requirement, environment)| requirement.is_met(&environment.home)),
             }
         })
         .collect();

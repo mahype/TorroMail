@@ -1734,7 +1734,7 @@ for (formatName, format) in snippetFormats {
 // stored by id, so a renamed client would lose its key on the other surface.
 require(
     Set(MCPClientRegistry.catalog.map(\.id))
-        == ["claude-desktop", "claude-code", "opencode", "chatgpt", "gemini-cli", "cursor", "lm-studio",
+        == ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "cursor", "lm-studio",
             "vscode", "windsurf", "clawbot", "hermes", "other"],
     "the client catalog carries the ids the Rust catalog carries"
 )

@@ -1036,6 +1036,20 @@ public enum MCPClientRegistry {
             ))
         }
 
+        // Pi ships without MCP on purpose and points to extensions for it;
+        // `pi-mcp-adapter` is the one everybody uses, and it reads the standard
+        // `mcpServers` shape. The Pi-owned file, not the shared
+        // ~/.config/mcp/mcp.json: the entry carries a key minted for Pi, and a
+        // file every MCP host reads would hand that key to all of them.
+        let piDirectory = home.appendingPathComponent(".pi/agent", isDirectory: true)
+        if fileManager.fileExists(atPath: piDirectory.path) {
+            clients.append(MCPClient(
+                id: "pi",
+                displayName: "Pi",
+                setup: .mcpServersJSON(configURL: piDirectory.appendingPathComponent("mcp.json"))
+            ))
+        }
+
         // OpenCode keeps its config under ~/.config on every platform. A
         // `.jsonc` is used when it is the only one there; comments in it make
         // it unreadable to a strict parser — an error, never an overwrite.
@@ -1629,6 +1643,12 @@ extension MCPClientRegistry {
             symbol: "curlybraces",
             snippetFormat: .openCodeJSON,
             verificationHintKey: "Restart OpenCode, or run “opencode mcp list” in a terminal; “torromail” must be listed as connected. Then ask: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "pi",
+            displayName: "Pi",
+            symbol: "terminal.fill",
+            verificationHintKey: "Pi needs the pi-mcp-adapter extension: run “pi install npm:pi-mcp-adapter” once, restart Pi and open “/mcp” — “torromail” must be listed. Then ask: “List my mail accounts.”"
         ),
         MCPClientDescriptor(
             id: "chatgpt",

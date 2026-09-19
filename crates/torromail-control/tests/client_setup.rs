@@ -263,7 +263,36 @@ fn the_catalog_carries_the_ids_the_macos_app_stores_keys_under() {
     let ids: Vec<&str> = clients::CATALOG.iter().map(|descriptor| descriptor.id).collect();
     assert_eq!(
         ids,
-        ["claude-desktop", "claude-code", "opencode", "chatgpt", "gemini-cli", "cursor", "lm-studio", "vscode", "windsurf",
+        ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "cursor", "lm-studio", "vscode", "windsurf",
          "clawbot", "hermes", "other"]
     );
+}
+
+
+#[test]
+fn pi_gets_its_own_file_and_says_what_it_still_needs() {
+    let home = scratch("pi");
+    std::fs::create_dir_all(home.join(".pi/agent")).expect("pi is installed");
+    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![] };
+    let pi = clients::installed_client(&environment, "pi").expect("pi is found");
+    assert_eq!(pi.setup, ClientSetup::McpServersJson { config: home.join(".pi/agent/mcp.json") });
+
+    let requirement = clients::descriptor("pi").expect("in the catalog").requirement.expect("pi needs its adapter");
+    assert_eq!(requirement.install_command, "pi install npm:pi-mcp-adapter");
+    assert!(!requirement.is_met(&home), "a bare Pi speaks no MCP");
+    let status = clients::status_json(&environment);
+    let entry = status["clients"].as_array().expect("clients").iter().find(|entry| entry["id"] == "pi").expect("pi").clone();
+    assert_eq!(entry["requirement"]["met"], false);
+
+    // Either trace of the installed adapter counts.
+    std::fs::write(home.join(".pi/agent/settings.json"), r#"{"packages":["npm:pi-mcp-adapter"]}"#).expect("writable");
+    assert!(requirement.is_met(&home));
+    std::fs::remove_file(home.join(".pi/agent/settings.json")).expect("removable");
+    std::fs::create_dir_all(home.join(".pi/agent/npm/node_modules/pi-mcp-adapter")).expect("installed");
+    assert!(requirement.is_met(&home));
+
+    // The entry is the standard shape, in Pi's own file — never the shared one.
+    clients::add(&pi.setup, "/opt/torromail-mcp", "torro_pi_1", &no_tool).expect("adds");
+    assert!(clients::has_key(&pi.setup, "torro_pi_1"));
+    assert!(!home.join(".config/mcp/mcp.json").exists());
 }
