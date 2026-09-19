@@ -1,0 +1,662 @@
+{
+  "about": "The policy document as cases: accounts in the shape state.json stores them, clients, and the document both must publish. Run by crates/torromail-control/tests/policy_contract.rs and by the Swift contract suite. $GOOGLE_CLIENT_ID and $MICROSOFT_CLIENT_ID stand for whatever ids the running build was registered with. Regenerate `expected` with TORROMAIL_BLESS=1 cargo test -p torromail-control, then read the diff.",
+  "cases": [
+    {
+      "accounts": [
+        {
+          "email": "sven@torro.dev",
+          "id": "work",
+          "imapHost": "imap.torro.dev",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Torro",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "smtpHost": "smtp.torro.dev",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "username": "sven@torro.dev"
+        }
+      ],
+      "clients": [
+        {
+          "account_access": {
+            "mode": "all"
+          },
+          "id": "claude-code",
+          "name": "Claude Code",
+          "token_sha256": "aa11"
+        }
+      ],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "headers"
+            },
+            "email": "sven@torro.dev",
+            "folder_rules": {},
+            "id": "work",
+            "imap": {
+              "host": "imap.torro.dev",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "tls",
+              "username": "sven@torro.dev"
+            },
+            "name": "Torro",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "smtp.torro.dev",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "starttls",
+              "username": "sven@torro.dev"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [
+          {
+            "account_access": {
+              "mode": "all"
+            },
+            "id": "claude-code",
+            "name": "Claude Code",
+            "token_sha256": "aa11"
+          }
+        ],
+        "version": 1
+      },
+      "name": "a password account publishes both connection blocks and the everyday rights"
+    },
+    {
+      "accounts": [
+        {
+          "email": "mail@awesome.ug",
+          "id": "gmail",
+          "imapHost": "imap.gmail.com",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX",
+            "Archive",
+            "Private"
+          ],
+          "loginMethod": "oauth",
+          "name": "Awesome",
+          "oauthIssuer": "google",
+          "permissions": {
+            "folderRules": {
+              "Archive": {
+                "read": true,
+                "write": false
+              },
+              "Private": {
+                "read": false,
+                "write": false
+              }
+            },
+            "perFolder": true,
+            "read": 3,
+            "send": true,
+            "write": {
+              "drafts": true,
+              "mark": true,
+              "move": true,
+              "permanentDelete": true,
+              "trash": true
+            }
+          },
+          "provider": "Gmail",
+          "searchCache": {
+            "level": "attachments"
+          },
+          "smtpHost": "smtp.gmail.com",
+          "smtpPort": 465,
+          "smtpSecurity": "tls",
+          "specialMailboxes": {
+            "archive": "Ablage",
+            "drafts": "Entwürfe",
+            "junk": "",
+            "manual": true,
+            "sent": "",
+            "trash": "Papierkorb"
+          },
+          "username": "mail@awesome.ug"
+        }
+      ],
+      "clients": [
+        {
+          "account_access": {
+            "account_ids": [
+              "gmail",
+              "another"
+            ],
+            "mode": "selected"
+          },
+          "id": "codex",
+          "name": "Codex CLI",
+          "token_sha256": "bb22"
+        }
+      ],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "attachments"
+            },
+            "email": "mail@awesome.ug",
+            "folder_rules": {
+              "Archive": {
+                "read": true,
+                "write": false
+              },
+              "Private": {
+                "read": false,
+                "write": false
+              }
+            },
+            "id": "gmail",
+            "imap": {
+              "auth": "xoauth2",
+              "client_id": "$GOOGLE_CLIENT_ID",
+              "host": "imap.gmail.com",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/gmail",
+              "security": "tls",
+              "token_endpoint": "https://oauth2.googleapis.com/token",
+              "username": "mail@awesome.ug"
+            },
+            "mailbox_overrides": {
+              "archive": "Ablage",
+              "drafts": "Entwürfe",
+              "trash": "Papierkorb"
+            },
+            "name": "Awesome",
+            "per_folder": true,
+            "read": "with_attachments",
+            "send": true,
+            "smtp": {
+              "auth": "xoauth2",
+              "client_id": "$GOOGLE_CLIENT_ID",
+              "host": "smtp.gmail.com",
+              "port": 465,
+              "secret_ref": "keychain://TorroMail/gmail",
+              "security": "tls",
+              "token_endpoint": "https://oauth2.googleapis.com/token",
+              "username": "mail@awesome.ug"
+            },
+            "write": {
+              "drafts": true,
+              "mark": true,
+              "move": true,
+              "permanent_delete": true,
+              "trash": true
+            }
+          }
+        ],
+        "clients": [
+          {
+            "account_access": {
+              "account_ids": [
+                "another",
+                "gmail"
+              ],
+              "mode": "selected"
+            },
+            "id": "codex",
+            "name": "Codex CLI",
+            "token_sha256": "bb22"
+          }
+        ],
+        "version": 1
+      },
+      "name": "an oauth account names its token endpoint and client id, with every right and folder exceptions"
+    },
+    {
+      "accounts": [
+        {
+          "email": "s@contoso.com",
+          "id": "m365",
+          "imapHost": "outlook.office365.com",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "oauth",
+          "name": "Büro",
+          "oauthIssuer": "microsoft",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 1,
+            "send": false,
+            "write": {
+              "drafts": false,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "Microsoft 365",
+          "searchCache": {
+            "level": "off"
+          },
+          "smtpHost": "smtp.office365.com",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "username": "s@contoso.com"
+        }
+      ],
+      "clients": [],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "off"
+            },
+            "email": "s@contoso.com",
+            "folder_rules": {},
+            "id": "m365",
+            "imap": {
+              "auth": "xoauth2",
+              "client_id": "$MICROSOFT_CLIENT_ID",
+              "host": "outlook.office365.com",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/m365",
+              "security": "tls",
+              "token_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+              "username": "s@contoso.com"
+            },
+            "name": "Büro",
+            "per_folder": false,
+            "read": "headers",
+            "send": false,
+            "smtp": {
+              "auth": "xoauth2",
+              "client_id": "$MICROSOFT_CLIENT_ID",
+              "host": "smtp.office365.com",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/m365",
+              "security": "starttls",
+              "token_endpoint": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+              "username": "s@contoso.com"
+            },
+            "write": {
+              "drafts": false,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [],
+        "version": 1
+      },
+      "name": "a microsoft oauth account uses the microsoft endpoint and client id"
+    },
+    {
+      "accounts": [
+        {
+          "email": "x@example.com",
+          "id": "shell",
+          "imapHost": "",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": false,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Leer",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "smtpHost": "",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "username": ""
+        }
+      ],
+      "clients": [],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "headers"
+            },
+            "email": "x@example.com",
+            "folder_rules": {},
+            "id": "shell",
+            "name": "Leer",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [],
+        "version": 1
+      },
+      "name": "an account without connection facts publishes neither block, and nobody is allowed yet"
+    },
+    {
+      "accounts": [
+        {
+          "email": "sven@torro.dev",
+          "id": "work",
+          "imapHost": "imap.torro.dev",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Torro",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "smtpHost": "smtp.torro.dev",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "Entwürfe",
+            "junk": "",
+            "manual": false,
+            "sent": "Gesendet",
+            "trash": ""
+          },
+          "username": "sven@torro.dev"
+        }
+      ],
+      "clients": [],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "headers"
+            },
+            "email": "sven@torro.dev",
+            "folder_rules": {},
+            "id": "work",
+            "imap": {
+              "host": "imap.torro.dev",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "tls",
+              "username": "sven@torro.dev"
+            },
+            "name": "Torro",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "smtp.torro.dev",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "starttls",
+              "username": "sven@torro.dev"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [],
+        "version": 1
+      },
+      "name": "chosen folder names are ignored while the manual switch is off"
+    },
+    {
+      "accounts": [
+        {
+          "email": "alt@example.com",
+          "id": "old",
+          "imapHost": "mail.example.com",
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Alt",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "cacheMode": "fullText",
+            "localCacheEnabled": true
+          },
+          "smtpHost": "mail.example.com",
+          "username": "alt"
+        }
+      ],
+      "clients": [],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "bodies"
+            },
+            "email": "alt@example.com",
+            "folder_rules": {},
+            "id": "old",
+            "imap": {
+              "host": "mail.example.com",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/old",
+              "security": "tls",
+              "username": "alt"
+            },
+            "name": "Alt",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "mail.example.com",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/old",
+              "security": "starttls",
+              "username": "alt"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [],
+        "version": 1
+      },
+      "name": "a record from before ports, encryption and cache levels were stored keeps connecting as it did"
+    },
+    {
+      "accounts": [
+        {
+          "email": "alt@example.com",
+          "id": "old465",
+          "imapHost": "mail.example.com",
+          "imapPort": 143,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Alt 465",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "cacheMode": "body",
+            "localCacheEnabled": false
+          },
+          "smtpHost": "mail.example.com",
+          "smtpPort": 465,
+          "username": "alt"
+        }
+      ],
+      "clients": [],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "off"
+            },
+            "email": "alt@example.com",
+            "folder_rules": {},
+            "id": "old465",
+            "imap": {
+              "host": "mail.example.com",
+              "port": 143,
+              "secret_ref": "keychain://TorroMail/old465",
+              "security": "starttls",
+              "username": "alt"
+            },
+            "name": "Alt 465",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "mail.example.com",
+              "port": 465,
+              "secret_ref": "keychain://TorroMail/old465",
+              "security": "tls",
+              "username": "alt"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [],
+        "version": 1
+      },
+      "name": "a legacy record on the implicit-tls submission port is published as tls, and a disabled cache as off"
+    }
+  ],
+  "secret_ref_prefix": "keychain://TorroMail/"
+}
