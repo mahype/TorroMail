@@ -151,7 +151,11 @@ pub fn load(path: &Path) -> Vec<HealthRecord> {
         .filter_map(|line| {
             let value: Value = serde_json::from_str(line).ok()?;
             Some(HealthRecord {
-                ts: value["ts"].as_u64()?,
+                // The app stamps its records with a fractional Unix time;
+                // whole seconds are all any rule here looks at.
+                ts: value["ts"]
+                    .as_u64()
+                    .or_else(|| value["ts"].as_f64().filter(|ts| *ts >= 0.0).map(|ts| ts as u64))?,
                 account: value["account"].as_str()?.to_owned(),
                 outcome: HealthOutcome::parse(value["outcome"].as_str()?)?,
                 source: value["source"].as_str().unwrap_or_default().to_owned(),
@@ -251,4 +255,109 @@ pub fn needs_check(records: &[HealthRecord], account: &str, now: u64, window: u6
         .iter()
         .filter(|record| record.account == account)
         .any(|record| now.saturating_sub(record.ts) < window)
+}
+
+/// How many consecutive unreachable checks it takes before an account is
+/// called broken. Below this it keeps whatever it was, because a flaky network
+/// is not a credential problem and a false red teaches people to ignore the
+/// dot.
+pub const UNREACHABLE_GRACE: usize = 3;
+
+/// What one account's records add up to. There is no "unknown" here: an
+/// account with nothing to go on yields `None` from [`derive`], and the caller
+/// keeps whatever state it already showed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthVerdict {
+    Connected,
+    /// Broken, with the reason to show — the writer's own words when it gave
+    /// any, a plain sentence when it did not.
+    Failed(String),
+}
+
+impl HealthVerdict {
+    #[must_use]
+    pub fn is_broken(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+fn verdict_for(record: &HealthRecord, fallback_reason: &str) -> HealthVerdict {
+    match record.outcome {
+        HealthOutcome::Ok => HealthVerdict::Connected,
+        _ if record.detail.is_empty() => HealthVerdict::Failed(fallback_reason.to_owned()),
+        _ => HealthVerdict::Failed(record.detail.clone()),
+    }
+}
+
+/// The status one account's records add up to, or `None` when they settle
+/// nothing and the caller's stored state stands.
+///
+/// The rule every surface shares: a success is green, refused credentials are
+/// red at once — they will not fix themselves — and an unreachable server only
+/// counts after `grace` checks in a row. A streak shorter than that falls back
+/// to the last real verdict, because a couple of missed checks is a network,
+/// not an account, and it is no evidence a refused password started working
+/// again either.
+#[must_use]
+pub fn derive(records: &[HealthRecord], account: &str, grace: usize) -> Option<HealthVerdict> {
+    // Stable, so records sharing a second keep the caller's order: two lines
+    // written moments apart must not be able to swap places and flip the dot.
+    let mut mine: Vec<&HealthRecord> = records
+        .iter()
+        .filter(|record| record.account == account)
+        .collect();
+    mine.sort_by_key(|record| record.ts);
+    let last = *mine.last()?;
+
+    match last.outcome {
+        HealthOutcome::Ok => Some(HealthVerdict::Connected),
+        HealthOutcome::Rejected => Some(verdict_for(last, "credentials rejected")),
+        HealthOutcome::Unreachable => {
+            let streak = mine
+                .iter()
+                .rev()
+                .take_while(|record| record.outcome == HealthOutcome::Unreachable)
+                .count();
+            if streak >= grace {
+                return Some(verdict_for(last, "server not reachable"));
+            }
+            mine.iter()
+                .rev()
+                .find(|record| record.outcome != HealthOutcome::Unreachable)
+                .map(|settled| verdict_for(settled, "credentials rejected"))
+        }
+    }
+}
+
+/// When each account was last checked, for the "last checked …" line.
+#[must_use]
+pub fn last_checked(records: &[HealthRecord]) -> HashMap<String, u64> {
+    let mut latest: HashMap<String, u64> = HashMap::new();
+    for record in records {
+        let entry = latest.entry(record.account.clone()).or_default();
+        *entry = (*entry).max(record.ts);
+    }
+    latest
+}
+
+/// Every account the log knows, with its verdict and last check, as the JSON
+/// `--health-status` prints. Accounts whose records settle nothing carry
+/// `"state": null`: the reader keeps what it had.
+#[must_use]
+pub fn status_json(records: &[HealthRecord]) -> Value {
+    let accounts: serde_json::Map<String, Value> = last_checked(records)
+        .into_iter()
+        .map(|(account, checked)| {
+            let (state, reason) = match derive(records, &account, UNREACHABLE_GRACE) {
+                Some(HealthVerdict::Connected) => (json!("connected"), Value::Null),
+                Some(HealthVerdict::Failed(reason)) => (json!("failed"), json!(reason)),
+                None => (Value::Null, Value::Null),
+            };
+            (
+                account,
+                json!({ "state": state, "reason": reason, "last_checked": checked }),
+            )
+        })
+        .collect();
+    json!({ "accounts": accounts })
 }
