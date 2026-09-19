@@ -1,0 +1,16 @@
+[package]
+name = "torromail-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The network half of account discovery: DNS and HTTPS lookups behind torromail-control's Network trait."
+
+[lints]
+workspace = true
+
+[dependencies]
+torromail-control = { path = "../torromail-control" }
+getrandom = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }

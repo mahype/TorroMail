@@ -3,6 +3,7 @@ members = [
     "crates/torromail-cache",
     "crates/torromail-control",
     "crates/torromail-core",
+    "crates/torromail-discovery",
     "crates/torromail-imap-tls",
     "crates/torromail-mcp",
     "crates/torromail-oauth",

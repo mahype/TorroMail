@@ -91,6 +91,8 @@ pub enum Request {
     Enroll(Box<MailAccount>, Secret),
     TestConnection(String),
     RemoveAccount(String),
+    /// Find the servers for an address the provider table does not know.
+    Discover(String),
 }
 
 /// The editable rows of the permissions tab, top to bottom.
@@ -316,6 +318,7 @@ impl App {
                 Outcome::Stay => {}
                 Outcome::Close => self.wizard = None,
                 Outcome::Enroll(account, password) => self.request = Some(Request::Enroll(account, password)),
+                Outcome::Discover(email) => self.request = Some(Request::Discover(email)),
             }
             return;
         }

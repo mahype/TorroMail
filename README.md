@@ -30,6 +30,7 @@ configuration and user confirmation.
 - `crates/torromail-core`: portable Rust domain model for accounts, policies, cache defaults, pending actions, and reusable search result sets.
 - `crates/torromail-mcp`: explicit MCP tool surface and stdio line server facade.
 - `crates/torromail-control`: the configuration model every surface shares — accounts and their state file, the policy document writer, MCP client setup, provider discovery, log readers, platform paths.
+- `crates/torromail-discovery`: the network half of account discovery — a small DNS client (MX, TXT, SRV), HTTPS autoconfig fetches and a TCP probe — behind the `Network` trait `torromail-control` decides with.
 - `crates/torromail-tui`: terminal control surface (`torromail`), the Linux counterpart to the macOS app: add accounts, set permissions, connect assistants, read the log. This is not a mail client UI either.
 - `contracts`: behaviour pinned as shared cases. The Rust tests and the Swift contract suite run the same files, so the two implementations cannot drift apart silently.
 - `apps/TorroMailApp`: macOS SwiftUI configuration/control app. This is not a mail client UI.
