@@ -125,6 +125,10 @@ pub fn enroll(
     password: &str,
     check: Checker<'_>,
 ) -> Result<MailAccount, EnrollError> {
+    // The id names the trial document, and later the cache file.
+    if !crate::account::is_plain_id(&account.id) {
+        return Err(EnrollError::Other("the account id is not a plain name".to_owned()));
+    }
     let mut pairings = save::load_pairings(data_directory)?;
     let store = JsonStateStore::new(data_directory.join(paths::STATE_FILE));
     if store.load().accounts.iter().any(|stored| stored.id == account.id) {
