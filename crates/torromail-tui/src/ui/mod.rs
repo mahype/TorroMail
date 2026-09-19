@@ -116,9 +116,9 @@ fn key_hints(app: &App) -> Line<'static> {
             return Line::from(spans);
         }
         Section::Accounts if app.account_tab == 1 => {
-            hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit"), ("n", "new account")]);
+            hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit"), ("t", "test"), ("n", "new account"), ("D", "remove")]);
         }
-        Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab"), ("n", "new account")]),
+        Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab"), ("t", "test"), ("n", "new account"), ("D", "remove")]),
         Section::Clients if app.focus == crate::app::Focus::Detail => {
             hints.extend([("↑↓", "select"), (lang.t("space"), "toggle"), (lang.t("ctrl+s"), "save"), ("esc", "back")]);
             let mut spans = vec![Span::raw(" ")];

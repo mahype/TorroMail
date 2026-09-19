@@ -226,5 +226,5 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some(problem) = &app.snapshot.pairings_problem {
         lines.push(Line::styled(problem.clone(), Style::new().fg(theme::ACCENT)));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.detail_scroll, 0)), body);
 }

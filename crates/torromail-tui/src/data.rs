@@ -236,6 +236,39 @@ impl Backend {
         .map_err(|error| error.to_string())
     }
 
+    /// The "Test Connection" button: a real login, and — because the user
+    /// asked for it — a record in the health log like any other check.
+    pub fn test_connection(&self, account_id: &str) -> Result<(), String> {
+        use torromail_control::enroll::CheckOutcome;
+        use torromail_mcp::health::{self, HealthOutcome};
+        let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
+        let token = torromail_control::enroll::app_token(self.secrets.as_ref())?;
+        let policy = self.data_directory.join(paths::POLICY_FILE);
+        let outcome = (self.checker)(&binary, &policy, &token, account_id);
+        let (word, detail) = match &outcome {
+            CheckOutcome::Ok => (HealthOutcome::Ok, ""),
+            CheckOutcome::Rejected(reason) => (HealthOutcome::Rejected, reason.as_str()),
+            CheckOutcome::Unreachable(reason) => (HealthOutcome::Unreachable, reason.as_str()),
+        };
+        health::append(&self.data_directory.join(paths::HEALTH_LOG), account_id, word, "manual", detail);
+        match outcome {
+            CheckOutcome::Ok => Ok(()),
+            CheckOutcome::Rejected(reason) | CheckOutcome::Unreachable(reason) => Err(reason),
+        }
+    }
+
+    /// Removes an account and what this machine kept for it. Returns what
+    /// could not be cleaned up, in words.
+    pub fn remove_account(&self, account_id: &str) -> Result<Vec<String>, String> {
+        torromail_control::remove::remove_account(
+            &self.data_directory,
+            self.secrets.as_ref(),
+            &torromail_control::save::default_context(),
+            account_id,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     fn pairing<T>(&self, act: impl FnOnce(&Pairing<'_>) -> Result<T, torromail_control::connect::ConnectError>) -> Result<T, String> {
         let environment = self.environment.as_ref().ok_or("HOME is not set")?;
         let context = torromail_control::save::default_context();

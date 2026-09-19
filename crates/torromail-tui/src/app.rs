@@ -89,6 +89,8 @@ pub enum Request {
     RevealKey(String),
     /// Check the candidate and, if it passes, store it.
     Enroll(Box<MailAccount>, Secret),
+    TestConnection(String),
+    RemoveAccount(String),
 }
 
 /// The editable rows of the permissions tab, top to bottom.
@@ -132,6 +134,9 @@ pub struct App {
     pub revealed: Option<(String, String)>,
     /// The add-account wizard, while it is open. It takes every key.
     pub wizard: Option<Wizard>,
+    pub confirm_remove: bool,
+    /// How far the detail pane is scrolled; it can be taller than the terminal.
+    pub detail_scroll: u16,
 }
 
 impl App {
@@ -159,6 +164,8 @@ impl App {
             confirm_disconnect: false,
             revealed: None,
             wizard: None,
+            confirm_remove: false,
+            detail_scroll: 0,
         }
     }
 
@@ -333,6 +340,13 @@ impl App {
             self.on_detail_key(key);
             return;
         }
+        if self.confirm_remove {
+            self.confirm_remove = false;
+            if let (KeyCode::Char('y' | 'j'), Some(view)) = (key.code, self.snapshot.accounts.get(self.account_index)) {
+                self.request = Some(Request::RemoveAccount(view.account.id.clone()));
+            }
+            return;
+        }
         if self.confirm_disconnect {
             self.confirm_disconnect = false;
             if let (KeyCode::Char('y' | 'j'), Some(client)) = (key.code, self.snapshot.clients.get(self.client_index)) {
@@ -350,9 +364,12 @@ impl App {
             KeyCode::Char(digit @ '1'..='7') => {
                 self.section = Section::ALL[digit as usize - '1' as usize];
                 self.revealed = None;
+                self.detail_scroll = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::PageUp if self.section != Section::Log => self.detail_scroll = self.detail_scroll.saturating_sub(8),
+            KeyCode::PageDown if self.section != Section::Log => self.detail_scroll = (self.detail_scroll + 8).min(200),
             KeyCode::PageUp => self.move_selection(-10),
             KeyCode::PageDown => self.move_selection(10),
             KeyCode::Home => self.move_selection(isize::MIN),
@@ -362,6 +379,15 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Left if self.section == Section::Accounts => {
                 self.account_tab = (self.account_tab + ACCOUNT_TABS.len() - 1) % ACCOUNT_TABS.len();
+            }
+            KeyCode::Char('t') if self.section == Section::Accounts => {
+                if let Some(view) = self.snapshot.accounts.get(self.account_index) {
+                    self.message = Some(Message { text: "Checking the connection…", detail: String::new(), is_error: false });
+                    self.request = Some(Request::TestConnection(view.account.id.clone()));
+                }
+            }
+            KeyCode::Char('D') if self.section == Section::Accounts && !self.snapshot.accounts.is_empty() => {
+                self.confirm_remove = true;
             }
             KeyCode::Char('n') if matches!(self.section, Section::Accounts | Section::Overview) => {
                 self.section = Section::Accounts;
@@ -434,5 +460,7 @@ impl App {
         };
         let last = count.saturating_sub(1);
         *index = index.saturating_add_signed(delta).min(last);
+        // A different item: its detail starts at the top.
+        self.detail_scroll = 0;
     }
 }
