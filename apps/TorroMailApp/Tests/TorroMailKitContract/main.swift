@@ -1671,6 +1671,75 @@ require(
     "the client catalog carries the ids the Rust catalog carries"
 )
 
+// MARK: - Provider discovery, shared with Rust
+
+// `contracts/provider-discovery.json`: what an address implies about where to
+// connect. The Rust side (crates/torromail-control/tests/provider_discovery.rs)
+// runs the same file, so the wizard here and the one in the terminal lead an
+// address to the same servers and the same login path.
+func sharedAuthObject(_ auth: AuthPath?) -> Any {
+    switch auth {
+    case nil: return NSNull()
+    case .oauth(let issuer): return ["kind": "oauth", "issuer": issuer.rawValue]
+    case .password: return ["kind": "password"]
+    case .appPassword(let setupURL): return ["kind": "app_password", "setup_url": setupURL.absoluteString]
+    }
+}
+
+func sharedConfigObject(_ config: DiscoveredConfig?) -> Any {
+    guard let config else { return NSNull() }
+    return [
+        "imap_host": config.imapHost,
+        "imap_port": config.imapPort,
+        "imap_security": config.imapSecurity.rawValue,
+        "smtp_host": config.smtpHost,
+        "smtp_port": config.smtpPort,
+        "smtp_security": config.smtpSecurity.rawValue,
+        "auth": sharedAuthObject(config.auth),
+        "provider_label": config.providerLabel,
+        "provider": config.provider.rawValue,
+        "source": config.source
+    ] as [String: Any]
+}
+
+let discoveryCasesURL = policyCasesURL.deletingLastPathComponent().appendingPathComponent("provider-discovery.json")
+let discoveryCasesFile = (try? Data(contentsOf: discoveryCasesURL))
+    .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+require(discoveryCasesFile != nil, "the shared discovery cases are readable at \(discoveryCasesURL.path)")
+
+let discoverySections: [(String, ([String: Any]) -> Any)] = [
+    ("domains", { sharedConfigObject(ProviderCatalog.lookup(domain: $0["input"] as? String ?? "")) }),
+    ("mx", { sharedConfigObject(ProviderCatalog.fromMXHost($0["input"] as? String ?? "")) }),
+    ("spf", { sharedConfigObject(ProviderCatalog.fromSPF($0["input"] as? String ?? "")) }),
+    ("app_password_fallback", { discoveryCase in
+        sharedAuthObject(
+            ProviderCatalog.lookup(domain: discoveryCase["input"] as? String ?? "")
+                .flatMap { ProviderCatalog.appPasswordFallback(for: $0) }
+        )
+    }),
+    ("email_domains", { Autodiscovery.domain(of: $0["input"] as? String ?? "") as Any? ?? NSNull() }),
+    ("autoconfig", { discoveryCase in
+        sharedConfigObject(AutoconfigParser.parse(
+            Data((discoveryCase["xml"] as? String ?? "").utf8),
+            source: discoveryCase["source"] as? String ?? ""
+        ))
+    }),
+    ("mailbox_names", { AccountMailboxList.displayName($0["input"] as? String ?? "") })
+]
+for (section, resolve) in discoverySections {
+    let sectionCases = discoveryCasesFile?[section] as? [[String: Any]] ?? []
+    require(!sectionCases.isEmpty, "the shared discovery section “\(section)” is not empty")
+    for discoveryCase in sectionCases {
+        let label = (discoveryCase["name"] ?? discoveryCase["input"]) as? String ?? "unnamed"
+        let resolved = resolve(discoveryCase) as? NSObject
+        let expected = discoveryCase["expected"] as? NSObject
+        if resolved != expected {
+            FileHandle.standardError.write(Data("Swift resolved “\(label)” to: \(String(describing: resolved))\n".utf8))
+        }
+        require(resolved == expected, "shared discovery case (\(section)): \(label)")
+    }
+}
+
 // The writer is the server binary now. Without it there is no document — and
 // "no document" must be an error the caller sees, never an empty or partial
 // file the server would then read its rights from.

@@ -9,7 +9,9 @@
 
 pub mod account;
 pub mod clients;
+pub mod mailbox_names;
 pub mod policy;
+pub mod providers;
 pub mod state;
 
 pub use account::{
