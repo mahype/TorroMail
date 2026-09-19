@@ -1816,6 +1816,9 @@ fn an_account_with_no_connection_says_so_rather_than_reporting_it_missing() {
 /// way out would break it silently. The Swift side matches the first line
 /// against the outcome word exactly: pad it and the classification is lost.
 #[test]
+// Asserts the macOS keychain verdict ("a missing secret never becomes
+// readable"). On Linux the secret backend is still undecided — see #12, B1.
+#[cfg_attr(not(target_os = "macos"), ignore = "asserts macOS keychain semantics; Linux secret backend pending (#12)")]
 fn a_failed_check_writes_the_outcome_word_alone_on_the_first_stderr_line() {
     let path = temp_policy_path("stderr-contract");
     checkable_account_document(&path, "");
@@ -2307,6 +2310,9 @@ fn sweepable_document(path: &std::path::Path, clients: &str) {
 }
 
 #[test]
+// Asserts the macOS keychain verdict ("a missing secret never becomes
+// readable"). On Linux the secret backend is still undecided — see #12, B1.
+#[cfg_attr(not(target_os = "macos"), ignore = "asserts macOS keychain semantics; Linux secret backend pending (#12)")]
 fn the_sweep_records_every_account_that_is_due() {
     let dir = temp_audit_dir("sweep-due");
     let policy = dir.join("policy.json");

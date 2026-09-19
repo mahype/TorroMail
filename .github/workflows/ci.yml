@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-linux:
+    name: Rust (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build -p torromail-mcp
+
+  macos:
+    name: Rust + Swift (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 16 (Swift 6)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      # The Swift contract suite and the app supervisor look for the server in
+      # target/debug, so it is built before anything Swift runs.
+      - run: cargo build -p torromail-mcp
+      - name: Build Swift contract suite
+        run: swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build --product TorroMailKitContract
+      - name: Swift contract suite
+        run: apps/TorroMailApp/.build/debug/TorroMailKitContract
+      - name: Why the suite died (only on failure)
+        if: failure()
+        run: |
+          codesign -dvvv --entitlements - apps/TorroMailApp/.build/debug/TorroMailKitContract || true
+          log show --last 3m --style compact --predicate 'eventMessage CONTAINS "TorroMailKitContract"' | tail -40 || true
+          ls -t ~/Library/Logs/DiagnosticReports 2>/dev/null | head -5 || true
+      - name: Swift app build
+        run: swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
