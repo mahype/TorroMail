@@ -21,6 +21,18 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build -p torromail-mcp
 
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --no-fail-fast: while the port is under way, every broken test is
+      # worth knowing about, not only the first crate's.
+      - run: cargo test --workspace --no-fail-fast
+
   macos:
     name: Rust + Swift (macOS)
     runs-on: macos-15
