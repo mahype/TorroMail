@@ -28,6 +28,7 @@ fn main() -> std::io::Result<()> {
         secrets: Box::new(torromail_control::secrets::SecretToolStore::default()),
         checker: Box::new(data::check_account),
         discoverer: Box::new(torromail_discovery::discover),
+        mailbox_lister: Box::new(data::list_account_mailboxes),
     };
     let mut app = App::new(Lang::from_environment(), backend.load());
 
