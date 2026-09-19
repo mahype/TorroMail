@@ -5,13 +5,14 @@ use torromail_mcp::{LineMcpServer, ToolCatalog};
 
 /// Where the app publishes account permissions. The env override exists for
 /// development and the app supervisor; MCP clients that spawn the server
-/// themselves land on the same Application Support path.
+/// themselves land on the platform's shared directory — Application Support
+/// on macOS, the XDG state directory elsewhere.
 fn policy_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TORROMAIL_POLICY_PATH") {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Application Support/TorroMail/policy.json"))
+    torromail_control::paths::default_data_directory()
+        .map(|directory| directory.join(torromail_control::paths::POLICY_FILE))
 }
 
 fn main() -> io::Result<()> {
