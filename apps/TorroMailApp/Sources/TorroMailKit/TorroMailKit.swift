@@ -1157,7 +1157,7 @@ public enum AccountTrial {
                 name: "TorroMail",
                 tokenSHA256: MCPClientKeyStore.sha256Hex(appToken)
             )
-            try PolicyDocument.data(for: [account], clients: [appPairing])
+            try PolicyDocument.data(for: [account], clients: [appPairing], executableName: executableName)
                 .write(to: url, options: .atomic)
         } catch {
             return .failed(error.localizedDescription)
@@ -1886,16 +1886,30 @@ public enum PolicyDocument {
             .appendingPathComponent("policy.json")
     }
 
+    /// What went wrong asking the server binary for the document. Shown in
+    /// the log only — a failed publication is a diagnostic, not a decision.
+    public struct Failure: LocalizedError, Hashable, Sendable {
+        public let reason: String
+        public var errorDescription: String? { reason }
+    }
+
+    /// The document for these accounts, as `torromail-mcp --policy-document`
+    /// writes it. The writer lives in Rust (`torromail-control`) so every
+    /// configuration surface publishes the same document from the same code;
+    /// this side only states the facts: the accounts as `state.json` stores
+    /// them, who is paired, and what belongs to this platform and build.
+    ///
     /// `clients` is deliberately not defaulted: the allowlist is what stands
     /// between the accounts and any process that spawns the server, so every
     /// caller has to say who is allowed — an empty list means "nobody yet".
     public static func data(
         for accounts: [MailAccount],
-        clients: [MCPClientKeyStore.Pairing]
+        clients: [MCPClientKeyStore.Pairing],
+        executableName: String = GeneralSettings().mcpExecutable,
+        timeout: TimeInterval = 10
     ) throws -> Data {
-        let document: [String: Any] = [
-            "version": version,
-            "accounts": accounts.map(accountObject(for:)),
+        let request: [String: Any] = [
+            "accounts": try JSONSerialization.jsonObject(with: JSONEncoder().encode(accounts)),
             "clients": clients.map { pairing in
                 [
                     "id": pairing.clientID,
@@ -1903,9 +1917,71 @@ public enum PolicyDocument {
                     "token_sha256": pairing.tokenSHA256,
                     "account_access": pairing.accountAccess.policyObject
                 ]
-            }
+            },
+            "context": [
+                "secret_ref_prefix": KeychainStore.secretReference(forAccount: ""),
+                "google_client_id": OAuthIssuer.google.clientID,
+                "microsoft_client_id": OAuthIssuer.microsoft.clientID
+            ]
         ]
-        return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+        // Handed over as a file rather than through a pipe: nothing here has
+        // to feed a child's stdin while also draining its stdout. It names
+        // hosts and usernames, so it is owner-only and gone when we return.
+        let requestURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("torromail-policy-request-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: requestURL) }
+        try JSONSerialization.data(withJSONObject: request).write(to: requestURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: requestURL.path)
+
+        let locator = MCPExecutableLocator(
+            executableName: executableName,
+            workspaceRoot: FileManager.default.currentDirectoryPath
+        )
+        guard let command = locator.resolve() else {
+            throw Failure(reason: "MCP executable “\(executableName)” not found")
+        }
+        let process = Process()
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments + ["--policy-document", requestURL.path]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+        } catch {
+            throw Failure(reason: error.localizedDescription)
+        }
+
+        let output = PipeCapture(limit: 8 * 1024 * 1024)
+        let errors = PipeCapture(limit: 8 * 1024)
+        let drained = DispatchGroup()
+        for (capture, handle) in [
+            (output, outputPipe.fileHandleForReading),
+            (errors, errorPipe.fileHandleForReading)
+        ] {
+            drained.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                capture.consume(handle)
+                drained.leave()
+            }
+        }
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            throw Failure(reason: "the policy document was not written in time")
+        }
+        _ = drained.wait(timeout: .now() + 2)
+        guard process.terminationStatus == 0 else {
+            throw Failure(reason: errors.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        // An exit of zero with nothing usable behind it must not reach the
+        // file the server reads its rights from.
+        guard (try? JSONSerialization.jsonObject(with: output.data)) is [String: Any] else {
+            throw Failure(reason: "the MCP executable returned no policy document")
+        }
+        return output.data
     }
 
     /// Writes atomically so a reloading server never sees a half document.
@@ -1924,89 +2000,6 @@ public enum PolicyDocument {
         // Connection facts and the allowlist are nobody else's read: the
         // document stays owner-only, like the configs that carry the keys.
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
-    }
-
-    private static func accountObject(for account: MailAccount) -> [String: Any] {
-        var object: [String: Any] = [
-            "id": account.id,
-            // Labels, not rights: `mail_list_accounts` has to name the
-            // account the way the user does, or nobody can pick one.
-            "name": account.name,
-            "email": account.email,
-            "read": name(for: account.permissions.read),
-            "write": [
-                "drafts": account.permissions.write.drafts,
-                "mark": account.permissions.write.mark,
-                "move": account.permissions.write.move,
-                "trash": account.permissions.write.trash,
-                "permanent_delete": account.permissions.write.permanentDelete
-            ],
-            "send": account.permissions.send,
-            "per_folder": account.permissions.perFolder,
-            "folder_rules": account.permissions.folderRules.mapValues { rule in
-                ["read": rule.read, "write": rule.write]
-            },
-            // The server acts on this: it is the write-through ceiling for
-            // the account's local cache, capped again by the read level.
-            "cache": [
-                "level": account.searchCache.level.rawValue
-            ]
-        ]
-        let overrides = account.specialMailboxes.policyOverrides
-        if !overrides.isEmpty {
-            object["mailbox_overrides"] = overrides
-        }
-        // Connection facts travel once the account has them, whatever the
-        // login method — the secret itself stays in the keychain, only the
-        // reference moves. An account without this block has no mail to give:
-        // the server refuses it rather than inventing any.
-        if account.hasIMAPConnection {
-            var imap: [String: Any] = [
-                "host": account.imapHost,
-                "port": account.imapPort,
-                "security": account.imapSecurity.rawValue,
-                "username": account.username,
-                "secret_ref": KeychainStore.secretReference(forAccount: account.id)
-            ]
-            // OAuth accounts keep a token set behind that reference instead of
-            // a password. The server renews it on its own, which is why the
-            // endpoint and client id have to travel with the facts: an MCP
-            // client can spawn the server while TorroMail is closed.
-            if account.loginMethod == .oauth, let issuer = account.oauthIssuer {
-                imap["auth"] = "xoauth2"
-                imap["token_endpoint"] = issuer.tokenEndpoint.absoluteString
-                imap["client_id"] = issuer.clientID
-            }
-            object["imap"] = imap
-        }
-        // Submission facts travel the same way, so mail_prepare_send can reach
-        // the outgoing server. The encryption is stated rather than inferred
-        // from the port — the server is what decides it.
-        if !account.smtpHost.isEmpty, !account.username.isEmpty {
-            var smtp: [String: Any] = [
-                "host": account.smtpHost,
-                "port": account.smtpPort,
-                "security": account.smtpSecurity.rawValue,
-                "username": account.username,
-                "secret_ref": KeychainStore.secretReference(forAccount: account.id)
-            ]
-            if account.loginMethod == .oauth, let issuer = account.oauthIssuer {
-                smtp["auth"] = "xoauth2"
-                smtp["token_endpoint"] = issuer.tokenEndpoint.absoluteString
-                smtp["client_id"] = issuer.clientID
-            }
-            object["smtp"] = smtp
-        }
-        return object
-    }
-
-    private static func name(for read: ReadAccess) -> String {
-        switch read {
-        case .none: "none"
-        case .headers: "headers"
-        case .fullMessage: "full_message"
-        case .withAttachments: "with_attachments"
-        }
     }
 }
 

@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::FormatError;
 use crate::account::{LoginMethod, MailAccount, OAuthIssuer};
 
 pub const POLICY_VERSION: u64 = 1;
@@ -34,6 +35,32 @@ impl ClientAccountAccess {
     }
 }
 
+impl ClientAccountAccess {
+    /// Strict on purpose: a grant that cannot be understood must fail the
+    /// publication rather than quietly widen to "all".
+    pub fn from_json(value: &Value) -> Result<Self, FormatError> {
+        match value.get("mode").and_then(Value::as_str) {
+            Some("all") if value.get("account_ids").is_none() => Ok(Self::All),
+            Some("all") => Err(FormatError("account_access: all accounts cannot also select ids".to_owned())),
+            Some("selected") => {
+                let ids: BTreeSet<String> = value
+                    .get("account_ids")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| FormatError("account_access: selected needs account_ids".to_owned()))?
+                    .iter()
+                    .map(|id| id.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| FormatError("account_access: an account id is not text".to_owned()))?;
+                if ids.contains("") {
+                    return Err(FormatError("account_access: empty account id".to_owned()));
+                }
+                Ok(Self::Selected(ids))
+            }
+            _ => Err(FormatError("account_access: unknown mode".to_owned())),
+        }
+    }
+}
+
 /// One client allowed to spawn the server. Only the hash of its key is ever
 /// written down; the key itself stays with the client and the keychain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +69,26 @@ pub struct ClientPairing {
     pub name: String,
     pub token_sha256: String,
     pub account_access: ClientAccountAccess,
+}
+
+impl ClientPairing {
+    pub fn from_json(value: &Value) -> Result<Self, FormatError> {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| FormatError(format!("client: {key} is missing or not text")))
+        };
+        Ok(Self {
+            id: text("id")?,
+            name: text("name")?,
+            token_sha256: text("token_sha256")?,
+            account_access: ClientAccountAccess::from_json(
+                value.get("account_access").ok_or_else(|| FormatError("client: account_access is missing".to_owned()))?,
+            )?,
+        })
+    }
 }
 
 /// What the writer cannot know from the accounts alone, because it differs by
@@ -180,4 +227,40 @@ fn connection_object(
         object.insert("client_id".into(), json!(context.client_id(issuer)));
     }
     Value::Object(object)
+}
+
+/// The document for a request as a configuration surface in another language
+/// sends it: `{"accounts": [...], "clients": [...], "context": {...}}`, with
+/// accounts in the shape `state.json` stores them. This is what
+/// `torromail-mcp --policy-document` answers, so that surface needs no writer
+/// of its own.
+pub fn document_for_request(request: &Value) -> Result<Value, FormatError> {
+    let list = |key: &str| {
+        request
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| FormatError(format!("request: {key} is missing or not a list")))
+    };
+    let accounts = list("accounts")?
+        .iter()
+        .map(MailAccount::from_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let clients = list("clients")?
+        .iter()
+        .map(ClientPairing::from_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let context_text = |key: &str| {
+        request
+            .get("context")
+            .and_then(|context| context.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| FormatError(format!("request: context.{key} is missing or not text")))
+    };
+    let context = PolicyContext {
+        secret_ref_prefix: context_text("secret_ref_prefix")?,
+        google_client_id: context_text("google_client_id")?,
+        microsoft_client_id: context_text("microsoft_client_id")?,
+    };
+    Ok(document(&accounts, &clients, &context))
 }
