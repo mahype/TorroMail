@@ -56,6 +56,37 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Where every known MCP client stands on this machine. Read-only, and it
+    // reports the hash of whatever key a config holds, never the key.
+    if arguments.iter().any(|argument| argument == "--client-status") {
+        let Some(environment) = torromail_control::clients::Environment::current() else {
+            eprintln!("HOME is not set");
+            std::process::exit(1);
+        };
+        println!("{}", torromail_control::clients::status_json(&environment));
+        return Ok(());
+    }
+
+    // Writes TorroMail into, or out of, one client's configuration.
+    if let Some(position) = arguments.iter().position(|argument| argument == "--client-setup") {
+        let Some(request_path) = arguments.get(position + 1) else {
+            eprintln!("--client-setup needs a request file");
+            std::process::exit(2);
+        };
+        let outcome = std::fs::read_to_string(request_path)
+            .map_err(|error| format!("the request cannot be read: {error}"))
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|error| format!("the request is not JSON: {error}")))
+            .and_then(|request| {
+                let environment = torromail_control::clients::Environment::current().ok_or("HOME is not set")?;
+                torromail_control::clients::apply_request(&request, &environment, &torromail_control::clients::run_tool)
+            });
+        if let Err(message) = outcome {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // The access key the spawning client carries in its MCP config. Read
     // here, hashed inside the server, and enforced per call against the
     // policy document's `clients` allowlist. Scrubbing it from the

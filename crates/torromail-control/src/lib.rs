@@ -8,6 +8,7 @@
 //! its callers noticing.
 
 pub mod account;
+pub mod clients;
 pub mod policy;
 pub mod state;
 

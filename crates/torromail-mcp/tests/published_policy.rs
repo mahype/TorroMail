@@ -148,3 +148,54 @@ fn a_missing_request_is_an_error_not_an_empty_document() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
 }
+
+// MARK: client setup from the command line
+
+#[test]
+fn client_setup_writes_the_entry_and_client_status_reports_its_hash() {
+    let home = std::env::temp_dir().join(format!("torromail-client-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".cursor")).expect("cursor is installed");
+    let run = |arguments: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_torromail-mcp"))
+            .args(arguments)
+            .env("HOME", &home)
+            .env("PATH", "")
+            .env_remove("TORROMAIL_TOKEN")
+            .output()
+            .expect("the server binary runs")
+    };
+
+    let request = request_file(
+        "client-add",
+        &serde_json::json!({ "action": "add", "client_id": "cursor", "command_path": "/opt/torromail-mcp", "token": TEST_KEY }),
+    );
+    let added = run(&["--client-setup", request.to_str().expect("utf-8 path")]);
+    std::fs::remove_file(&request).ok();
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+
+    let status = run(&["--client-status"]);
+    assert!(status.status.success());
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(!text.contains(TEST_KEY), "the key itself never leaves");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    let cursor = document["clients"]
+        .as_array()
+        .expect("clients")
+        .iter()
+        .find(|client| client["id"] == "cursor")
+        .expect("cursor is listed");
+    assert_eq!(cursor["configured"], true);
+    assert_eq!(cursor["token_sha256"], TEST_KEY_SHA256);
+
+    // Not installed: an error, and nothing is created for it.
+    let request = request_file(
+        "client-missing",
+        &serde_json::json!({ "action": "add", "client_id": "windsurf", "command_path": "/opt/t", "token": TEST_KEY }),
+    );
+    let refused = run(&["--client-setup", request.to_str().expect("utf-8 path")]);
+    std::fs::remove_file(&request).ok();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(!home.join(".codeium").exists());
+    std::fs::remove_dir_all(&home).ok();
+}

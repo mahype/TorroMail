@@ -426,7 +426,9 @@ dependencies = [
 name = "torromail-control"
 version = "0.9.0"
 dependencies = [
+ "getrandom",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
