@@ -20,12 +20,19 @@ pub const TOKEN_VARIABLE: &str = "TORROMAIL_TOKEN";
 pub enum Platform {
     MacOs,
     Linux,
+    Windows,
 }
 
 impl Platform {
     #[must_use]
     pub fn current() -> Self {
-        if cfg!(target_os = "macos") { Self::MacOs } else { Self::Linux }
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
     }
 }
 
@@ -45,7 +52,7 @@ impl Environment {
     /// The running process's own view: its home and, split, its `PATH`.
     #[must_use]
     pub fn current() -> Option<Self> {
-        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let home = crate::paths::home_directory()?;
         let executable_directories = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
@@ -292,7 +299,27 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
         }
     };
 
-    let application_support = if mac { home.join("Library/Application Support") } else { home.join(".config") };
+    let windows = environment.platform == Platform::Windows;
+    // Windows: the roaming profile, where %APPDATA% points unless a domain
+    // redirects it.
+    let application_support = if mac {
+        home.join("Library/Application Support")
+    } else if windows {
+        home.join("AppData/Roaming")
+    } else {
+        home.join(".config")
+    };
+    // A command on the PATH is `claude` on Unix; on Windows it is a program
+    // or, for anything npm installed, a `.cmd` shim.
+    let on_path = |name: &str| -> Vec<PathBuf> {
+        let names: Vec<String> =
+            if windows { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_owned()] };
+        environment
+            .executable_directories
+            .iter()
+            .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+            .collect()
+    };
     json_client("claude-desktop", application_support.join("Claude"), "claude_desktop_config.json", false);
     json_client("gemini-cli", home.join(".gemini"), "settings.json", false);
     json_client("cursor", home.join(".cursor"), "mcp.json", false);
@@ -323,7 +350,7 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
     if mac {
         codex_candidates.push(PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"));
     } else {
-        codex_candidates.extend(environment.executable_directories.iter().map(|directory| directory.join("codex")));
+        codex_candidates.extend(on_path("codex"));
     }
     if let Some(executable) = first_executable(&codex_candidates) {
         clients.push(InstalledClient {
@@ -338,7 +365,7 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
         claude_candidates.push(PathBuf::from("/usr/local/bin/claude"));
         claude_candidates.push(home.join(".local/bin/claude"));
     } else {
-        claude_candidates.extend(environment.executable_directories.iter().map(|directory| directory.join("claude")));
+        claude_candidates.extend(on_path("claude"));
     }
     if let Some(executable) = first_executable(&claude_candidates) {
         clients.push(InstalledClient {

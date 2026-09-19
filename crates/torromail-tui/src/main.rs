@@ -21,12 +21,12 @@ fn main() -> std::io::Result<()> {
         eprintln!("torromail: HOME is not set, so there is nowhere to look for the TorroMail data.");
         std::process::exit(1);
     };
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = torromail_control::paths::home_directory().unwrap_or_default();
     let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
     let backend = data::Backend {
         data_directory: directory,
         environment: Environment::current(),
-        secrets: Box::new(torromail_control::secrets::SecretToolStore::default()),
+        secrets: torromail_control::secrets::platform_store(),
         checker: Box::new(data::check_account),
         discoverer: Box::new(torromail_discovery::discover),
         mailbox_lister: Box::new(data::list_account_mailboxes),

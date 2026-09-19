@@ -203,10 +203,11 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
 /// Beside this program first — that is how a package installs the pair — then
 /// on the PATH.
 fn server_binary(environment: &Environment) -> Option<PathBuf> {
-    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("torromail-mcp")));
+    let program = torromail_control::paths::program_name("torromail-mcp");
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(&program)));
     beside
         .into_iter()
-        .chain(environment.executable_directories.iter().map(|directory| directory.join("torromail-mcp")))
+        .chain(environment.executable_directories.iter().map(|directory| directory.join(&program)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -368,6 +369,15 @@ impl Backend {
 
     /// Turns the systemd timer behind the background check on or off.
     pub fn set_autocheck(&self, on: bool) -> Result<(), String> {
+        // A systemd user timer is what runs it. Elsewhere the accounts are
+        // still checked whenever an assistant starts the server.
+        if !cfg!(target_os = "linux") {
+            return Err(if cfg!(target_os = "macos") {
+                "on a Mac the TorroMail app checks the accounts in the background".to_owned()
+            } else {
+                "not available on this system yet — accounts are still checked whenever an assistant starts".to_owned()
+            });
+        }
         if on {
             let program = std::env::current_exe().map_err(|error| error.to_string())?;
             crate::autocheck::enable(&self.unit_directory, &program, self.systemctl.as_ref())
@@ -426,7 +436,14 @@ impl Backend {
 /// text travels over stdin — it may carry a key.
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
-    for (program, arguments) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
+    let helpers: &[(&str, &[&str])] = if cfg!(windows) {
+        &[("clip", &[])]
+    } else if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])]
+    };
+    for &(program, arguments) in helpers {
         let Ok(mut child) = std::process::Command::new(program)
             .args(arguments)
             .stdin(std::process::Stdio::piped())
@@ -441,7 +458,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err("wl-copy / xclip".to_owned())
+    Err(helpers.iter().map(|(program, _)| *program).collect::<Vec<_>>().join(" / "))
 }
 
 /// `torromail-mcp --check-account`: exit 0 is a login that worked; otherwise

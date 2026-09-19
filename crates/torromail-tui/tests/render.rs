@@ -415,7 +415,7 @@ fn scene(name: &str) -> Scene {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("home/.cursor")).expect("cursor is installed");
     std::fs::create_dir_all(root.join("bin")).expect("a bin directory");
-    std::fs::write(root.join("bin/torromail-mcp"), "").expect("the server is installed");
+    std::fs::write(root.join("bin").join(torromail_control::paths::program_name("torromail-mcp")), "").expect("the server is installed");
     let state = AppState {
         accounts: vec![
             account("work", "Torro", "sven@torro.dev", json!({})),
@@ -487,11 +487,11 @@ fn c_connects_an_assistant_and_the_key_stays_off_the_screen() {
     let screen = render_at(&app, 112, 48);
     assert_shows(
         &screen,
-        &["Verbunden. Starte den Assistenten neu", "Eingerichtet", "Der Client hat seinen Zugangsschlüssel", "~/.cursor/mcp.json", "Kontozugriff", "(•) Alle Konten", "torro_cursor_••••••••••••"],
+        &["Verbunden. Starte den Assistenten neu", "Eingerichtet", "Der Client hat seinen Zugangsschlüssel", "mcp.json", "Kontozugriff", "(•) Alle Konten", "torro_cursor_••••••••••••"],
     );
     assert!(!screen.contains(&key[..24]), "the key is masked until asked for");
     assert!(scene.cursor_config().contains(&key), "Cursor's own config carries it");
-    assert!(scene.cursor_config().contains("bin/torromail-mcp"), "and names the server by absolute path");
+    assert!(scene.cursor_config().contains("torromail-mcp"), "and names the server by absolute path");
     assert_eq!(scene.policy()["clients"][0]["id"], "cursor");
 }
 
@@ -980,6 +980,8 @@ fn the_language_changes_at_once_and_is_remembered() {
     assert_eq!(torromail_tui::settings::Settings::load(&scene.backend.data_directory).language, None, "and back to the system's");
 }
 
+// systemd is Linux's; elsewhere the setting says it is not available.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_background_check_installs_a_timer_and_removes_it_again() {
     use std::sync::{Arc, Mutex};
@@ -1011,6 +1013,7 @@ fn the_background_check_installs_a_timer_and_removes_it_again() {
     assert_shows(&render(&app), &["[ ] Konten alle 15 Minuten prüfen", "Die Prüfung im Hintergrund ist aus."]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_timer_that_would_not_start_does_not_look_enabled() {
     let mut scene = scene("settings-autocheck-fails");

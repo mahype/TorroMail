@@ -160,6 +160,8 @@ fn client_setup_writes_the_entry_and_client_status_reports_its_hash() {
         std::process::Command::new(env!("CARGO_BIN_EXE_torromail-mcp"))
             .args(arguments)
             .env("HOME", &home)
+            // Windows reads the profile directory, not HOME.
+            .env("USERPROFILE", &home)
             .env("PATH", "")
             .env_remove("TORROMAIL_TOKEN")
             .output()

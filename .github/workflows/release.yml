@@ -1,7 +1,9 @@
 name: Release
 
 # One tag, one release, every platform: the signed and notarized Mac app with
-# its Sparkle appcast, and the Linux programs with their AUR package.
+# its Sparkle appcast, the Linux programs with their AUR package, and the
+# Windows programs (unsigned, and marked experimental until someone has used
+# them on a real machine).
 #
 # The release is assembled as a draft and only published once every job has
 # delivered. The Mac app's updater reads releases/latest/download/appcast.xml,
@@ -59,6 +61,36 @@ jobs:
       pkgrel: '1'
       name: torromail-${{ needs.version.outputs.version }}
       tag: ${{ github.ref_name }}
+
+  windows:
+    name: Windows
+    needs: version
+    runs-on: windows-latest
+    env:
+      NAME: torromail-${{ needs.version.outputs.version }}-x86_64-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked -p torromail-mcp -p torromail-tui
+      - name: Smoke test
+        shell: bash
+        run: |
+          target/release/torromail.exe --version
+          target/release/torromail-mcp.exe --list-tools > /dev/null
+      - name: Pack
+        shell: bash
+        run: |
+          mkdir -p "dist/$NAME"
+          cp target/release/torromail.exe target/release/torromail-mcp.exe README.md LICENSE-MIT LICENSE-APACHE "dist/$NAME/"
+          (cd dist && 7z a -tzip "$NAME.zip" "$NAME" > /dev/null && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
 
   macos:
     name: macOS — build, sign, notarize
@@ -200,7 +232,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [version, linux, macos]
+    needs: [version, linux, windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -220,7 +252,7 @@ jobs:
           ls -l assets
           # The three an installed Mac app will come looking for.
           test -f assets/appcast.xml
-          ls assets/TorroMail-*.dmg assets/torromail-*-x86_64-linux.tar.gz > /dev/null
+          ls assets/TorroMail-*.dmg assets/torromail-*-x86_64-linux.tar.gz assets/torromail-*-x86_64-windows.zip > /dev/null
 
           flags=(--draft --title "$TAG" --generate-notes)
           if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi

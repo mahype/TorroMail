@@ -21,6 +21,25 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build -p torromail-mcp
 
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --no-fail-fast: a platform nobody develops on should report every
+      # broken test at once, not only the first crate's.
+      - run: cargo test --workspace --no-fail-fast
+      # What a release packs, built and started once, so the first tag is not
+      # the first time anyone tries.
+      - run: cargo build --release --locked -p torromail-mcp -p torromail-tui
+      - shell: bash
+        run: |
+          target/release/torromail.exe --version
+          target/release/torromail-mcp.exe --list-tools > /dev/null
+
   macos:
     name: Rust + Swift (macOS)
     runs-on: macos-15
