@@ -7,6 +7,7 @@ use torromail_control::{MailAccount, PermissionPreset, ReadAccess};
 
 use crate::data::Snapshot;
 use crate::i18n::Lang;
+use crate::wizard::{Outcome, Secret, Wizard};
 
 /// The same seven places, in the same order, as the macOS app's sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,8 @@ pub enum Request {
     CopySnippet(String),
     /// Fetch the key so the snippet on screen can show it.
     RevealKey(String),
+    /// Check the candidate and, if it passes, store it.
+    Enroll(Box<MailAccount>, Secret),
 }
 
 /// The editable rows of the permissions tab, top to bottom.
@@ -127,6 +130,8 @@ pub struct App {
     pub confirm_disconnect: bool,
     /// The one client whose key is currently shown in clear, with the key.
     pub revealed: Option<(String, String)>,
+    /// The add-account wizard, while it is open. It takes every key.
+    pub wizard: Option<Wizard>,
 }
 
 impl App {
@@ -153,6 +158,7 @@ impl App {
             access_draft: None,
             confirm_disconnect: false,
             revealed: None,
+            wizard: None,
         }
     }
 
@@ -294,6 +300,18 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if let Some(wizard) = &mut self.wizard {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.should_quit = true;
+                return;
+            }
+            match wizard.on_key(key) {
+                Outcome::Stay => {}
+                Outcome::Close => self.wizard = None,
+                Outcome::Enroll(account, password) => self.request = Some(Request::Enroll(account, password)),
+            }
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 // Quitting over unsaved changes asks first, like leaving does.
@@ -344,6 +362,10 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Left if self.section == Section::Accounts => {
                 self.account_tab = (self.account_tab + ACCOUNT_TABS.len() - 1) % ACCOUNT_TABS.len();
+            }
+            KeyCode::Char('n') if matches!(self.section, Section::Accounts | Section::Overview) => {
+                self.section = Section::Accounts;
+                self.wizard = Some(Wizard::default());
             }
             KeyCode::Enter if self.section == Section::Accounts && self.account_tab == 1 => {
                 if let Some(view) = self.snapshot.accounts.get(self.account_index) {

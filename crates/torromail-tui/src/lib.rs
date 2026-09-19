@@ -10,6 +10,7 @@ pub mod data;
 pub mod i18n;
 pub mod theme;
 pub mod ui;
+pub mod wizard;
 
 use app::{App, Request};
 use data::Backend;
@@ -24,6 +25,20 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
         Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),
+        Request::Enroll(account, password) => {
+            let enrolled = backend.enroll(account, &password.0);
+            app.replace_snapshot(backend.load());
+            if let Some(wizard) = &mut app.wizard {
+                match enrolled {
+                    Ok(name) => {
+                        wizard.check_passed(name);
+                        app.account_index = app.snapshot.accounts.len().saturating_sub(1);
+                    }
+                    Err(reason) => wizard.check_failed(reason),
+                }
+            }
+            return;
+        }
         Request::RevealKey(id) => match backend.token(id) {
             Ok(Some(token)) => {
                 app.revealed = Some((id.clone(), token));
