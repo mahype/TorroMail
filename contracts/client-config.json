@@ -148,12 +148,56 @@
       "existing": "{ this is not json",
       "name": "removing from an unreadable configuration is an error and leaves it alone",
       "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "existing": "{\"$schema\": \"https://opencode.ai/config.json\", \"model\": \"anthropic/claude\", \"mcp\": {\"other\": {\"type\": \"remote\", \"url\": \"https://example.com/mcp\"}}}",
+      "expected": {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+          "other": {
+            "type": "remote",
+            "url": "https://example.com/mcp"
+          },
+          "torromail": {
+            "command": [
+              "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp"
+            ],
+            "enabled": true,
+            "environment": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            },
+            "type": "local"
+          }
+        },
+        "model": "anthropic/claude"
+      },
+      "name": "opencode keeps its servers under `mcp`, as local entries with a command list, beside its own settings",
+      "root_key": "mcp"
+    },
+    {
+      "action": "add",
+      "error": true,
+      "existing": "{\n  // my settings\n  \"model\": \"x\"\n}",
+      "name": "an opencode config with comments in it is left alone",
+      "root_key": "mcp"
+    },
+    {
+      "action": "remove",
+      "existing": "{\"model\": \"x\", \"mcp\": {\"torromail\": {\"type\": \"local\", \"command\": [\"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\"], \"environment\": {\"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"}, \"enabled\": true}}}",
+      "expected": {
+        "mcp": {},
+        "model": "x"
+      },
+      "name": "removing from opencode takes out only our entry",
+      "root_key": "mcp"
     }
   ],
   "snippets": {
     "hermes_yaml": "mcp_servers:\n  torromail:\n    command: \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\"\n    env:\n      TORROMAIL_TOKEN: \"torro_cursor_0123abcd\"",
     "mcp_servers_json": "{\n  \"mcpServers\": {\n    \"torromail\": {\n      \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n      \"env\": {\n        \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n      }\n    }\n  }\n}",
     "openclaw_json": "{\n  \"mcp\": {\n    \"servers\": {\n      \"torromail\": {\n        \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n        \"env\": {\n          \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n        }\n      }\n    }\n  }\n}",
+    "opencode_json": "{\n  \"mcp\": {\n    \"torromail\": {\n      \"type\": \"local\",\n      \"command\": [\"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\"],\n      \"environment\": {\n        \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n      },\n      \"enabled\": true\n    }\n  }\n}",
     "servers_json": "{\n  \"servers\": {\n    \"torromail\": {\n      \"type\": \"stdio\",\n      \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n      \"env\": {\n        \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n      }\n    }\n  }\n}"
   },
   "token": "torro_cursor_0123abcd"

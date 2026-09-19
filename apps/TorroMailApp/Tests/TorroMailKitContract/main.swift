@@ -1685,9 +1685,13 @@ for (index, mergeCase) in mergeCases.enumerated() {
     let sharedClient = MCPClient(
         id: "cursor",
         displayName: "Cursor",
-        setup: (mergeCase["root_key"] as? String) == "servers"
-            ? .serversJSON(configURL: configURL)
-            : .mcpServersJSON(configURL: configURL)
+        setup: {
+            switch mergeCase["root_key"] as? String {
+            case "servers": return .serversJSON(configURL: configURL)
+            case "mcp": return .openCodeJSON(configURL: configURL)
+            default: return .mcpServersJSON(configURL: configURL)
+            }
+        }()
     )
     let removing = (mergeCase["action"] as? String) == "remove"
     var failed = false
@@ -1722,7 +1726,8 @@ let snippetFormats: [(String, MCPClientDescriptor.SnippetFormat)] = [
     ("mcp_servers_json", .mcpServersJSON),
     ("servers_json", .serversJSON),
     ("hermes_yaml", .hermesYAML),
-    ("openclaw_json", .openClawJSON)
+    ("openclaw_json", .openClawJSON),
+    ("opencode_json", .openCodeJSON)
 ]
 for (formatName, format) in snippetFormats {
     require(
@@ -1735,7 +1740,7 @@ for (formatName, format) in snippetFormats {
 // stored by id, so a renamed client would lose its key on the other surface.
 require(
     Set(MCPClientRegistry.catalog.map(\.id))
-        == ["claude-desktop", "claude-code", "chatgpt", "gemini-cli", "cursor", "lm-studio",
+        == ["claude-desktop", "claude-code", "opencode", "chatgpt", "gemini-cli", "cursor", "lm-studio",
             "vscode", "windsurf", "clawbot", "hermes", "other"],
     "the client catalog carries the ids the Rust catalog carries"
 )

@@ -956,6 +956,10 @@ public struct MCPClient: Identifiable, Hashable {
         /// tags each stdio server with `"type": "stdio"`. Same merge as
         /// `mcpServersJSON`, one different root key.
         case serversJSON(configURL: URL)
+        /// OpenCode's `opencode.json`: the same merge under a top-level `mcp`
+        /// key, with its own entry shape — `"type": "local"`, the command as
+        /// a list, and the variables under `environment`.
+        case openCodeJSON(configURL: URL)
         /// ChatGPT keeps its servers in TOML and bundles the codex CLI that
         /// owns that file. Handing the edit to that tool beats writing TOML
         /// here — preserving the user's other servers stays its problem. The
@@ -982,7 +986,7 @@ public struct MCPClient: Identifiable, Hashable {
     /// manual edit has somewhere to go.
     public var configURL: URL {
         switch setup {
-        case let .mcpServersJSON(url), let .serversJSON(url),
+        case let .mcpServersJSON(url), let .serversJSON(url), let .openCodeJSON(url),
              let .codexCLI(_, url), let .claudeCodeCLI(_, url):
             return url
         }
@@ -996,8 +1000,16 @@ extension MCPClient.Setup {
     var jsonRootKey: String {
         switch self {
         case .serversJSON: return "servers"
+        case .openCodeJSON: return "mcp"
         case .mcpServersJSON, .codexCLI, .claudeCodeCLI: return "mcpServers"
         }
+    }
+
+    /// Where a server entry keeps its variables: OpenCode calls the object
+    /// `environment`, everyone else `env`.
+    var jsonEnvironmentKey: String {
+        if case .openCodeJSON = self { return "environment" }
+        return "env"
     }
 }
 
@@ -1021,6 +1033,21 @@ public enum MCPClientRegistry {
                 setup: .mcpServersJSON(
                     configURL: claudeDirectory.appendingPathComponent("claude_desktop_config.json")
                 )
+            ))
+        }
+
+        // OpenCode keeps its config under ~/.config on every platform. A
+        // `.jsonc` is used when it is the only one there; comments in it make
+        // it unreadable to a strict parser — an error, never an overwrite.
+        let openCodeDirectory = home.appendingPathComponent(".config/opencode", isDirectory: true)
+        if fileManager.fileExists(atPath: openCodeDirectory.path) {
+            let json = openCodeDirectory.appendingPathComponent("opencode.json")
+            let jsonc = openCodeDirectory.appendingPathComponent("opencode.jsonc")
+            let jsoncOnly = !fileManager.fileExists(atPath: json.path) && fileManager.fileExists(atPath: jsonc.path)
+            clients.append(MCPClient(
+                id: "opencode",
+                displayName: "OpenCode",
+                setup: .openCodeJSON(configURL: jsoncOnly ? jsonc : json)
             ))
         }
 
@@ -1212,7 +1239,7 @@ public enum MCPClientSetup {
     /// Whether a client already points at TorroMail.
     public static func isConfigured(_ client: MCPClient) -> Bool {
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .serversJSON(configURL),
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL), let .openCodeJSON(configURL),
              let .claudeCodeCLI(_, configURL):
             return jsonConfigHasServer(at: configURL, rootKey: client.setup.jsonRootKey)
         case let .codexCLI(_, configURL):
@@ -1246,9 +1273,13 @@ public enum MCPClientSetup {
             return false
         }
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .serversJSON(configURL),
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL), let .openCodeJSON(configURL),
              let .claudeCodeCLI(_, configURL):
-            return jsonConfigToken(at: configURL, rootKey: client.setup.jsonRootKey) == token
+            return jsonConfigToken(
+                at: configURL,
+                rootKey: client.setup.jsonRootKey,
+                environmentKey: client.setup.jsonEnvironmentKey
+            ) == token
         case let .codexCLI(_, configURL):
             // The key is high-entropy, so plain containment on the TOML is
             // unambiguous — better than parsing a format we never write.
@@ -1259,12 +1290,12 @@ public enum MCPClientSetup {
         }
     }
 
-    private static func jsonConfigToken(at configURL: URL, rootKey: String) -> String? {
+    private static func jsonConfigToken(at configURL: URL, rootKey: String, environmentKey: String) -> String? {
         guard let data = try? Data(contentsOf: configURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let servers = root[rootKey] as? [String: Any],
               let server = servers[MCPClientRegistry.serverName] as? [String: Any],
-              let env = server["env"] as? [String: Any] else {
+              let env = server[environmentKey] as? [String: Any] else {
             return nil
         }
         return env["TORROMAIL_TOKEN"] as? String
@@ -1347,6 +1378,21 @@ public enum MCPClientSetup {
                 env:
                   TORROMAIL_TOKEN: "\(token)"
             """
+        case .openCodeJSON:
+            return """
+            {
+              "mcp": {
+                "\(name)": {
+                  "type": "local",
+                  "command": ["\(commandPath)"],
+                  "environment": {
+                    "TORROMAIL_TOKEN": "\(token)"
+                  },
+                  "enabled": true
+                }
+              }
+            }
+            """
         case .openClawJSON:
             return """
             {
@@ -1376,7 +1422,7 @@ public enum MCPClientSetup {
         fileManager: FileManager = .default
     ) throws {
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .serversJSON(configURL):
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL), let .openCodeJSON(configURL):
             try addToJSONConfig(
                 at: configURL,
                 rootKey: client.setup.jsonRootKey,
@@ -1424,6 +1470,16 @@ public enum MCPClientSetup {
             "command": commandPath,
             "env": ["TORROMAIL_TOKEN": token]
         ]
+        // OpenCode's schema: a `local` server whose command is a list and
+        // whose variables are called `environment`.
+        if rootKey == "mcp" {
+            entry = [
+                "type": "local",
+                "command": [commandPath],
+                "environment": ["TORROMAIL_TOKEN": token],
+                "enabled": true
+            ]
+        }
         // VS Code's `servers` schema tags the transport; the `mcpServers`
         // clients infer stdio from `command` and reject an unknown key here.
         if rootKey == "servers" { entry["type"] = "stdio" }
@@ -1512,6 +1568,8 @@ public struct MCPClientDescriptor: Identifiable, Hashable, Sendable {
         /// OpenClaw's `~/.openclaw/openclaw.json`: JSON nested under
         /// `mcp.servers`.
         case openClawJSON
+        /// OpenCode's `opencode.json`: a `local` entry under `mcp`.
+        case openCodeJSON
     }
 
     public let id: String
@@ -1564,6 +1622,13 @@ extension MCPClientRegistry {
             displayName: "Claude Code",
             symbol: "terminal",
             verificationHintKey: "In a new Claude Code session run “/mcp” — “torromail” must show as connected. Or ask it: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
+            id: "opencode",
+            displayName: "OpenCode",
+            symbol: "curlybraces",
+            snippetFormat: .openCodeJSON,
+            verificationHintKey: "Restart OpenCode, or run “opencode mcp list” in a terminal; “torromail” must be listed as connected. Then ask: “List my mail accounts.”"
         ),
         MCPClientDescriptor(
             id: "chatgpt",
@@ -1758,7 +1823,7 @@ extension MCPClientSetup {
         fileManager: FileManager = .default
     ) throws {
         switch client.setup {
-        case let .mcpServersJSON(configURL), let .serversJSON(configURL):
+        case let .mcpServersJSON(configURL), let .serversJSON(configURL), let .openCodeJSON(configURL):
             try removeFromJSONConfig(
                 at: configURL,
                 rootKey: client.setup.jsonRootKey,
