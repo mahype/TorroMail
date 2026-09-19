@@ -43,6 +43,16 @@ fn main() -> std::io::Result<()> {
         if app.should_quit {
             break Ok(());
         }
+        if let Some(account) = app.save_request.take() {
+            match data::save_account(&directory, &account) {
+                Ok(()) => {
+                    app.replace_snapshot(data::load(&directory, environment.as_ref()));
+                    app.saved();
+                }
+                Err(detail) => app.save_failed(detail),
+            }
+            loaded = Instant::now();
+        }
         if app.wants_reload || loaded.elapsed() >= REFRESH {
             app.wants_reload = false;
             app.replace_snapshot(data::load(&directory, environment.as_ref()));

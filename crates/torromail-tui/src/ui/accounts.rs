@@ -7,11 +7,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use torromail_control::{
-    CacheLevel, ConnectionSecurity, LoginMethod, PermissionPreset, ReadAccess, mailbox_names,
+    CacheLevel, ConnectionSecurity, LoginMethod, PermissionPreset, PermissionSet, ReadAccess, mailbox_names,
 };
 
 use super::{field, health_mark, panel, rule};
-use crate::app::{ACCOUNT_TABS, App};
+use crate::app::{ACCOUNT_TABS, App, Focus};
 use crate::data::{AccountHealth, AccountView};
 use crate::i18n::Lang;
 use crate::theme;
@@ -82,7 +82,11 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let body = Rect { x: body.x + 1, width: body.width.saturating_sub(2), ..body };
     let lines = match app.account_tab {
         0 => connection(lang, view, body.width, app.snapshot.taken_at),
-        1 => permissions(lang, view, body.width),
+        1 => {
+            let editing = (app.focus == Focus::Detail).then_some(app);
+            let shown = app.draft.as_ref().filter(|_| editing.is_some()).map_or(&view.account.permissions, |draft| &draft.permissions);
+            permissions(lang, shown, body.width, editing)
+        }
         2 => folders(lang, view, body.width),
         _ => cache(lang, view, body.width),
     };
@@ -142,21 +146,22 @@ fn read_label(lang: Lang, read: ReadAccess) -> &'static str {
     })
 }
 
-fn permissions(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>> {
-    let permissions = &view.account.permissions;
+/// The permissions tab. While editing it shows the draft and a cursor; the
+/// row order here is the one `App::toggle_row` acts on.
+fn permissions(lang: Lang, permissions: &PermissionSet, width: u16, editing: Option<&App>) -> Vec<Line<'static>> {
     let current = permissions.matching_preset();
+    let cursor = editing.map(|app| app.cursor);
+    let mut row = 0;
+    let mut editable = |line: Line<'static>| {
+        let line = if cursor == Some(row) { line.style(theme::selected()) } else { line };
+        row += 1;
+        line
+    };
     let preset_title = |preset: PermissionPreset| match preset {
         PermissionPreset::ReadOnly => "Read only",
         PermissionPreset::ReadAndDrafts => "Read + drafts",
         PermissionPreset::TidyUp => "Tidy up",
         PermissionPreset::FullAccess => "Full access",
-    };
-    let radio = |preset: PermissionPreset| {
-        let on = current == Some(preset);
-        vec![
-            Span::styled(if on { "(•) " } else { "( ) " }, Style::new().fg(if on { theme::ACCENT } else { theme::FAINT })),
-            Span::styled(format!("{:<24}", lang.t(preset_title(preset))), if on { theme::bold() } else { Style::new() }),
-        ]
     };
     let check = |on: bool, label: &'static str, note: &'static str| {
         Line::from(vec![
@@ -167,33 +172,58 @@ fn permissions(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>>
             Span::styled(if note.is_empty() { "" } else { lang.t(note) }, theme::faint()),
         ])
     };
-    let mut preset_lines = vec![
-        Line::from([radio(PermissionPreset::ReadOnly), radio(PermissionPreset::ReadAndDrafts)].concat()),
-        Line::from([radio(PermissionPreset::TidyUp), radio(PermissionPreset::FullAccess)].concat()),
-    ];
-    if current.is_none() {
-        preset_lines.push(Line::styled(format!("    {}", lang.t("adjusted")), Style::new().fg(theme::AMBER)));
-    }
 
     let mut lines = vec![
         Line::styled(lang.t("What connected assistants may do with this account."), theme::muted()),
         Line::default(),
-        rule(lang.t("Preset"), width),
     ];
-    lines.extend(preset_lines);
-    lines.extend([
-        Line::default(),
-        rule(lang.t("Read"), width),
-        field(lang.t("Read depth"), read_label(lang, permissions.read)),
-        Line::default(),
-        rule(lang.t("Write"), width),
+    let heading = match current {
+        Some(_) => rule(lang.t("Preset"), width),
+        None => rule(&format!("{} · {}", lang.t("Preset"), lang.t("adjusted")), width),
+    };
+    lines.push(heading);
+    for preset in PermissionPreset::ALL {
+        let on = current == Some(preset);
+        lines.push(editable(Line::from(vec![
+            Span::styled(if on { "(•) " } else { "( ) " }, Style::new().fg(if on { theme::ACCENT } else { theme::FAINT })),
+            Span::styled(lang.t(preset_title(preset)), if on { theme::bold() } else { Style::new() }),
+        ])));
+    }
+    lines.extend([Line::default(), rule(lang.t("Read"), width)]);
+    lines.push(editable(Line::from(vec![
+        Span::styled(format!("{:<17} ", lang.t("Read depth")), theme::muted()),
+        Span::styled("‹ ", theme::faint()),
+        Span::styled(read_label(lang, permissions.read), theme::bold()),
+        Span::styled(" ›", theme::faint()),
+    ])));
+    lines.extend([Line::default(), rule(lang.t("Write"), width)]);
+    for line in [
         check(permissions.write.drafts, "Create drafts", ""),
         check(permissions.send, "Send", ""),
         check(permissions.write.mark, "Mark", "read state, flags"),
         check(permissions.write.r#move, "Move", ""),
         check(permissions.write.trash, "Delete", "to the Trash"),
         check(permissions.write.permanent_delete, "Permanent delete", "manual only"),
-    ]);
+    ] {
+        lines.push(editable(line));
+    }
+    lines.push(Line::default());
+
+    let Some(app) = editing else {
+        lines.push(Line::styled(lang.t("Applies to the whole account."), theme::faint()));
+        return lines;
+    };
+    if app.confirm_discard {
+        lines.push(Line::styled(lang.t("Discard unsaved changes? (y/n)"), Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD)));
+    } else if let Some(message) = &app.message {
+        let colour = if message.is_error { theme::ACCENT } else { theme::GREEN };
+        lines.push(Line::styled(lang.t(message.text), Style::new().fg(colour).add_modifier(Modifier::BOLD)));
+        if !message.detail.is_empty() {
+            lines.push(Line::styled(message.detail.clone(), theme::muted()));
+        }
+    } else if app.is_dirty() {
+        lines.push(Line::styled(format!("● {}", lang.t("Unsaved changes")), Style::new().fg(theme::AMBER)));
+    }
     lines
 }
 

@@ -91,6 +91,18 @@ impl ClientPairing {
     }
 }
 
+impl ClientPairing {
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "token_sha256": self.token_sha256,
+            "account_access": self.account_access.to_json(),
+        })
+    }
+}
+
 /// What the writer cannot know from the accounts alone, because it differs by
 /// platform or by build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,12 +136,7 @@ pub fn document(accounts: &[MailAccount], clients: &[ClientPairing], context: &P
         "accounts": accounts.iter().map(|account| account_object(account, context)).collect::<Vec<_>>(),
         "clients": clients
             .iter()
-            .map(|client| json!({
-                "id": client.id,
-                "name": client.name,
-                "token_sha256": client.token_sha256,
-                "account_access": client.account_access.to_json(),
-            }))
+            .map(ClientPairing::to_json)
             .collect::<Vec<_>>(),
     })
 }

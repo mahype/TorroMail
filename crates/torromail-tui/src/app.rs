@@ -2,6 +2,8 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use torromail_control::{MailAccount, PermissionPreset, ReadAccess};
+
 use crate::data::Snapshot;
 use crate::i18n::Lang;
 
@@ -63,6 +65,25 @@ impl LogColumn {
     }
 }
 
+/// Where the keys go inside the accounts section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    /// Editing the permissions of the selected account.
+    Detail,
+}
+
+/// The editable rows of the permissions tab, top to bottom.
+pub const PERMISSION_ROWS: usize = 11;
+const ROW_READ_DEPTH: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub text: &'static str,
+    pub detail: String,
+    pub is_error: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct App {
     pub lang: Lang,
@@ -77,6 +98,14 @@ pub struct App {
     pub log_descending: bool,
     pub wants_reload: bool,
     pub should_quit: bool,
+    pub focus: Focus,
+    /// The account being edited, apart from the stored one until it is saved.
+    pub draft: Option<MailAccount>,
+    pub cursor: usize,
+    pub confirm_discard: bool,
+    pub message: Option<Message>,
+    /// Set by ctrl+s; the event loop does the writing and reports back.
+    pub save_request: Option<MailAccount>,
 }
 
 impl App {
@@ -94,6 +123,105 @@ impl App {
             log_descending: true,
             wants_reload: false,
             should_quit: false,
+            focus: Focus::List,
+            draft: None,
+            cursor: 0,
+            confirm_discard: false,
+            message: None,
+            save_request: None,
+        }
+    }
+
+    /// Whether the draft differs from what is stored.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        match (&self.draft, self.snapshot.accounts.get(self.account_index)) {
+            (Some(draft), Some(stored)) => *draft != stored.account,
+            _ => false,
+        }
+    }
+
+    /// The event loop saved the draft: what is stored now equals it.
+    pub fn saved(&mut self) {
+        self.message = Some(Message { text: "Saved.", detail: String::new(), is_error: false });
+    }
+
+    pub fn save_failed(&mut self, detail: String) {
+        self.message = Some(Message { text: "Could not save.", detail, is_error: true });
+    }
+
+    fn leave_detail(&mut self) {
+        self.focus = Focus::List;
+        self.draft = None;
+        self.confirm_discard = false;
+    }
+
+    fn on_detail_key(&mut self, key: KeyEvent) {
+        if self.confirm_discard {
+            match key.code {
+                KeyCode::Char('y' | 'j') => self.leave_detail(),
+                KeyCode::Char('n') | KeyCode::Esc => self.confirm_discard = false,
+                _ => {}
+            }
+            return;
+        }
+        self.message = None;
+        match key.code {
+            KeyCode::Esc if self.is_dirty() => self.confirm_discard = true,
+            KeyCode::Esc => self.leave_detail(),
+            KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(PERMISSION_ROWS - 1),
+            KeyCode::Left if self.cursor == ROW_READ_DEPTH => self.step_read_depth(-1),
+            KeyCode::Right if self.cursor == ROW_READ_DEPTH => self.step_read_depth(1),
+            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_row(),
+            _ => {}
+        }
+    }
+
+    fn step_read_depth(&mut self, delta: i64) {
+        let Some(draft) = &mut self.draft else { return };
+        let rank = (draft.permissions.read.rank() as i64 + delta).clamp(0, 3) as u64;
+        if let Some(read) = ReadAccess::from_rank(rank) {
+            draft.permissions.read = read;
+        }
+    }
+
+    fn toggle_row(&mut self) {
+        let cursor = self.cursor;
+        let Some(draft) = &mut self.draft else { return };
+        let permissions = &mut draft.permissions;
+        match cursor {
+            0..=3 => {
+                let preset = PermissionPreset::ALL[cursor];
+                permissions.read = preset.read();
+                permissions.write = preset.write();
+                permissions.send = preset.send();
+            }
+            ROW_READ_DEPTH => {
+                let next = (permissions.read.rank() + 1) % 4;
+                permissions.read = ReadAccess::from_rank(next).unwrap_or(permissions.read);
+            }
+            5 => permissions.write.drafts = !permissions.write.drafts,
+            6 => permissions.send = !permissions.send,
+            7 => permissions.write.mark = !permissions.write.mark,
+            8 => permissions.write.r#move = !permissions.write.r#move,
+            9 => {
+                permissions.write.trash = !permissions.write.trash;
+                // Permanent delete cannot outlive the right it escalates.
+                if !permissions.write.trash {
+                    permissions.write.permanent_delete = false;
+                }
+            }
+            _ if permissions.write.trash => {
+                permissions.write.permanent_delete = !permissions.write.permanent_delete;
+            }
+            _ => {
+                self.message = Some(Message {
+                    text: "Permanent delete needs the Delete right first.",
+                    detail: String::new(),
+                    is_error: true,
+                });
+            }
         }
     }
 
@@ -108,11 +236,20 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if matches!(key.code, KeyCode::Char('c' | 'q')) {
-                self.should_quit = true;
+            match key.code {
+                // Quitting over unsaved changes asks first, like leaving does.
+                KeyCode::Char('c' | 'q') if self.is_dirty() && !self.confirm_discard => self.confirm_discard = true,
+                KeyCode::Char('c' | 'q') => self.should_quit = true,
+                KeyCode::Char('s') if self.is_dirty() => self.save_request = self.draft.clone(),
+                _ => {}
             }
             return;
         }
+        if self.focus == Focus::Detail {
+            self.on_detail_key(key);
+            return;
+        }
+        self.message = None;
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('r') if self.section != Section::Log => self.wants_reload = true,
@@ -130,6 +267,13 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Left if self.section == Section::Accounts => {
                 self.account_tab = (self.account_tab + ACCOUNT_TABS.len() - 1) % ACCOUNT_TABS.len();
+            }
+            KeyCode::Enter if self.section == Section::Accounts && self.account_tab == 1 => {
+                if let Some(view) = self.snapshot.accounts.get(self.account_index) {
+                    self.draft = Some(view.account.clone());
+                    self.focus = Focus::Detail;
+                    self.cursor = 0;
+                }
             }
             KeyCode::Enter if self.section == Section::Overview => {
                 // The attention card leads to where the repair is.
