@@ -8,6 +8,7 @@
 //! its callers noticing.
 
 pub mod account;
+pub mod cache_files;
 pub mod clients;
 pub mod connect;
 pub mod enroll;

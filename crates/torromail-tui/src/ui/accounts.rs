@@ -86,7 +86,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         0 => connection(lang, view, shown, body.width, app.snapshot.taken_at, editing),
         1 => permissions(lang, &shown.permissions, body.width, editing),
         2 => folders(lang, shown, body.width, editing),
-        _ => cache(lang, shown, body.width, editing),
+        _ => cache(lang, view, shown, body.width, editing, app),
     };
     if let Some(app) = editing {
         lines.push(Line::default());
@@ -367,7 +367,7 @@ fn folders(lang: Lang, account: &MailAccount, width: u16, editing: Option<&App>)
     lines
 }
 
-fn cache(lang: Lang, account: &MailAccount, width: u16, editing: Option<&App>) -> Vec<Line<'static>> {
+fn cache(lang: Lang, view: &AccountView, account: &MailAccount, width: u16, editing: Option<&App>, app: &App) -> Vec<Line<'static>> {
     let label = |level: CacheLevel| {
         lang.t(match level {
             CacheLevel::Off => "Off",
@@ -392,6 +392,26 @@ fn cache(lang: Lang, account: &MailAccount, width: u16, editing: Option<&App>) -
             format!("{} „{}“", lang.t("Limited by the read permission to"), label(ceiling)),
             Style::new().fg(theme::AMBER),
         ));
+    }
+    lines.push(field(lang.t("Storage"), torromail_control::cache_files::label(view.cache_bytes)));
+    match &app.rebuild {
+        Some((id, progress)) if *id == account.id => {
+            let detail = match progress {
+                Some(crate::rebuild::Progress::Working { mailbox, done, total, .. }) => format!("  {} {done}/{total}", mailbox_names::display_name(mailbox)),
+                _ => String::new(),
+            };
+            lines.push(Line::styled(
+                format!("⠹ {}{detail}", lang.t("Rebuilding…")),
+                Style::new().fg(theme::CYAN).add_modifier(Modifier::BOLD),
+            ));
+        }
+        _ if editing.is_none() && account.cache_level != CacheLevel::Off => {
+            lines.push(Line::from(vec![
+                Span::styled(" R ", Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", lang.t("Rebuild")), theme::muted()),
+            ]));
+        }
+        _ => {}
     }
     lines.extend([
         Line::default(),

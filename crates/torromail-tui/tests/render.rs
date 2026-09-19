@@ -53,11 +53,13 @@ fn snapshot() -> Snapshot {
                 account: account("work", "Torro", "sven@torro.dev", json!({})),
                 health: AccountHealth::Connected,
                 last_checked: Some(NOW - 120),
+                cache_bytes: 3_400_000,
             },
             AccountView {
                 account: account("home", "Privat", "privat@gmx.de", json!({})),
                 health: AccountHealth::Failed("[AUTHENTICATIONFAILED] Authentication failed.".to_owned()),
                 last_checked: Some(NOW - 300),
+                cache_bytes: 0,
             },
         ],
         clients: CATALOG
@@ -85,6 +87,7 @@ fn snapshot() -> Snapshot {
         taken_at: NOW,
         pairings_problem: None,
         home: Some(PathBuf::from("/home/sven")),
+        server_tools: Some(15),
     }
 }
 
@@ -190,7 +193,7 @@ fn the_client_list_says_where_each_assistant_stands_and_never_shows_a_key() {
     assert_shows(
         &screen,
         &[
-            "Claude Code hat sich mit dem Server verbunden", "Version 2.1.4", "~/.claude.json",
+            "Claude Code hat sich mit dem Server verbunden", "Version 2.1.4", "~/.claude.json", "TorroMail-Server antwortet — 15 Werkzeuge",
             "Nicht verbunden", "Nicht installiert", "Von Hand einrichten",
             "\"mcpServers\"", "/usr/bin/torromail-mcp", "torro_claude-code_••••••••••••",
         ],
@@ -362,6 +365,9 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
         discoverer: Box::new(|_| None),
         mailbox_lister: Box::new(|_, _, _, _| Ok(Vec::new())),
+        rebuild_command: Box::new(|_, _, _, _| std::process::Command::new("true")),
+        rebuild: std::cell::RefCell::new(None),
+        tool_count: std::cell::OnceCell::new(),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -419,6 +425,9 @@ fn scene(name: &str) -> Scene {
             checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
             discoverer: Box::new(|_| None),
             mailbox_lister: Box::new(|_, _, _, _| Ok(vec!["INBOX".to_owned(), "Entw&APw-rfe".to_owned(), "Privat".to_owned()])),
+            rebuild_command: Box::new(|_, _, _, _| std::process::Command::new("true")),
+            rebuild: std::cell::RefCell::new(None),
+            tool_count: std::cell::OnceCell::new(),
         },
         root,
     }
@@ -827,4 +836,82 @@ fn the_cache_level_steps_between_its_ends_and_is_published() {
     scene.act(&mut app);
     assert_shows(&render(&app), &["Gespeichert.", "Betreff & Absender"]);
     assert_eq!(scene.policy()["accounts"][0]["cache"]["level"], "headers");
+}
+
+
+// MARK: the cache
+
+#[test]
+fn the_cache_tab_shows_the_real_footprint() {
+    let mut app = App::new(Lang::De, snapshot());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::BackTab);
+    assert_shows(&render(&app), &["Speicher", "3.4 MB", " R ", "Neu aufbauen"]);
+}
+
+#[test]
+fn a_rebuild_runs_beside_the_surface_and_reports_as_it_goes() {
+    use torromail_tui::rebuild::{self, Progress};
+    assert_eq!(
+        rebuild::parse_line(r#"{"phase":"headers","mailbox":"INBOX","done":120,"total":480}"#),
+        Some(Progress::Working { phase: "headers".to_owned(), mailbox: "INBOX".to_owned(), done: 120, total: 480 })
+    );
+    assert_eq!(
+        rebuild::parse_line(r#"{"phase":"done","messages":480,"size_bytes":1234}"#),
+        Some(Progress::Finished { messages: 480, size_bytes: 1234 })
+    );
+    assert_eq!(rebuild::parse_line("not a progress line"), None);
+
+    // A stand-in for the server: two progress lines with a pause between, so
+    // the surface is seen mid-rebuild, then the closing line.
+    let mut scene = scene("rebuild");
+    scene.backend.rebuild_command = Box::new(|_, _, _, account| {
+        assert!(!account.is_empty());
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", r#"echo '{"phase":"headers","mailbox":"INBOX","done":120,"total":480}'; sleep 0.4; echo '{"phase":"done","messages":480,"size_bytes":1234}'"#]);
+        command
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::BackTab);
+    press(&mut app, KeyCode::Char('R'));
+    scene.act(&mut app);
+    assert!(app.rebuild.is_some());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_progress = false;
+    while app.rebuild.is_some() && std::time::Instant::now() < deadline {
+        torromail_tui::tick(&scene.backend, &mut app);
+        if render(&app).contains("INBOX 120/480") {
+            saw_progress = true;
+            // A second rebuild cannot be started on top of a running one.
+            press(&mut app, KeyCode::Char('R'));
+            assert!(app.request.is_none());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(saw_progress, "the progress line was shown while it ran");
+    assert!(app.rebuild.is_none(), "and the rebuild ended");
+    assert_shows(&render(&app), &["Der Cache wurde neu aufgebaut."]);
+}
+
+#[test]
+fn a_rebuild_that_fails_says_why() {
+    let mut scene = scene("rebuild-fails");
+    scene.backend.rebuild_command = Box::new(|_, _, _, _| {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo '[AUTHENTICATIONFAILED] no' >&2; exit 1"]);
+        command
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::BackTab);
+    press(&mut app, KeyCode::Char('R'));
+    scene.act(&mut app);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.rebuild.is_some() && std::time::Instant::now() < deadline {
+        torromail_tui::tick(&scene.backend, &mut app);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_shows(&render(&app), &["Der Cache konnte nicht neu aufgebaut werden.", "[AUTHENTICATIONFAILED] no"]);
 }

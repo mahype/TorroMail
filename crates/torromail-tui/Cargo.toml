@@ -20,6 +20,4 @@ torromail-discovery = { path = "../torromail-discovery" }
 torromail-mcp = { path = "../torromail-mcp" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ratatui = "0.30"
-
-[dev-dependencies]
 serde_json = "1"

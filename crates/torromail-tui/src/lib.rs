@@ -8,6 +8,7 @@
 pub mod app;
 pub mod data;
 pub mod i18n;
+pub mod rebuild;
 pub mod theme;
 pub mod ui;
 pub mod wizard;
@@ -43,6 +44,13 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
                 Ok(()) => Ok("Saved."),
                 Err(error) => Err(error),
             }
+        }
+        Request::RebuildCache(id) => {
+            match backend.start_rebuild(id) {
+                Ok(()) => app.rebuild = Some((id.clone(), None)),
+                Err(reason) => app.failed("Could not rebuild the cache.", reason),
+            }
+            return;
         }
         Request::LoadMailboxes(id) => {
             match backend.list_mailboxes(id) {
@@ -139,4 +147,25 @@ fn end_editing(app: &mut App) {
     app.draft = None;
     app.extras = app::EditExtras::default();
     app.focus = app::Focus::List;
+}
+
+/// Looks in on a running rebuild; called by the event loop between frames.
+pub fn tick(backend: &Backend, app: &mut App) {
+    let Some(progress) = backend.poll_rebuild() else { return };
+    match progress {
+        rebuild::Progress::Working { .. } => {
+            if let Some((_, shown)) = &mut app.rebuild {
+                *shown = Some(progress);
+            }
+        }
+        rebuild::Progress::Finished { .. } => {
+            app.rebuild = None;
+            app.replace_snapshot(backend.load());
+            app.succeeded("The cache was rebuilt.");
+        }
+        rebuild::Progress::Failed(reason) => {
+            app.rebuild = None;
+            app.failed("Could not rebuild the cache.", reason);
+        }
+    }
 }
