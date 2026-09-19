@@ -289,6 +289,17 @@ pub struct MailAccount {
     pub cache_level: CacheLevel,
 }
 
+/// Whether an account id is safe to build a file name from. Ids are UUIDs
+/// either surface made, but they are read back out of a file — and
+/// `cache/<id>.sqlite` with an id of `../../something` is a path nobody meant.
+#[must_use]
+pub fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        && !id.starts_with('.')
+}
+
 impl MailAccount {
     /// Whether this account carries the facts a mailbox can be opened from —
     /// the line between an account the server can serve and one it refuses as

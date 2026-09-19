@@ -631,3 +631,61 @@ fn an_unknown_domain_asks_for_the_servers_and_gmail_explains_the_app_password() 
     press(&mut app, KeyCode::Enter);
     assert_shows(&render_at(&app, 112, 44), &["Gmail", "Ein-Klick-Anmeldung", "https://myaccount.google.com/apppasswords", "App-Passwort"]);
 }
+
+
+// MARK: testing and removing an account
+
+#[test]
+fn t_logs_in_for_real_and_the_result_lands_in_the_health_log() {
+    let mut scene = scene("test-connection");
+    scene.backend.checker = Box::new(|_, policy, _, _| {
+        assert!(policy.ends_with("policy.json"), "a test runs against the live document, not a trial");
+        CheckOutcome::Rejected("[AUTHENTICATIONFAILED] Invalid credentials".to_owned())
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('t'));
+    assert_shows(&render(&app), &["Verbindung wird geprüft"]);
+    scene.act(&mut app);
+
+    assert_shows(&render(&app), &["TorroMail erreicht dieses Konto nicht mehr.", "[AUTHENTICATIONFAILED] Invalid credentials", "▲ Nicht erreichbar"]);
+    let log = std::fs::read_to_string(scene.root.join("data/health.jsonl")).expect("a record was written");
+    assert!(log.contains(r#""source":"manual""#) && log.contains(r#""outcome":"rejected""#), "got: {log}");
+
+    scene.backend.checker = Box::new(|_, _, _, _| CheckOutcome::Ok);
+    press(&mut app, KeyCode::Char('t'));
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["● Verbunden"]);
+}
+
+#[test]
+fn removing_an_account_says_what_goes_and_asks_first() {
+    let scene = scene("remove");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('D'));
+    assert_shows(&render(&app), &["Entfernen: „Torro“? (j/n)", "lokalen Cache"]);
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.request.is_none());
+
+    press(&mut app, KeyCode::Char('D'));
+    press(&mut app, KeyCode::Char('j'));
+    scene.act(&mut app);
+    assert_eq!(app.snapshot.accounts.len(), 1);
+    assert_shows(&render(&app), &["Konto entfernt.", "Privat"]);
+    assert_eq!(scene.policy()["accounts"].as_array().expect("accounts").len(), 1);
+}
+
+#[test]
+fn page_down_scrolls_a_detail_that_is_taller_than_the_terminal() {
+    let scene = scene("scroll");
+    let mut app = scene.app_on_cursor();
+    press(&mut app, KeyCode::Char('c'));
+    scene.act(&mut app);
+    assert!(!render(&app).contains("behandle ihn wie"), "the end of the detail is below the fold at 34 rows");
+    press(&mut app, KeyCode::PageDown);
+    press(&mut app, KeyCode::PageDown);
+    assert_shows(&render(&app), &["behandle ihn wie"]);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.detail_scroll, 0, "another client starts at the top");
+}

@@ -25,6 +25,27 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
         Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),
+        Request::TestConnection(id) => {
+            let outcome = backend.test_connection(id);
+            app.replace_snapshot(backend.load());
+            match outcome {
+                Ok(()) => app.succeeded("Connected"),
+                Err(reason) => app.failed("TorroMail can no longer reach this account.", reason),
+            }
+            return;
+        }
+        Request::RemoveAccount(id) => match backend.remove_account(id) {
+            Ok(leftovers) => {
+                app.replace_snapshot(backend.load());
+                if leftovers.is_empty() {
+                    app.succeeded("Account removed. Your mail stays on the server.");
+                } else {
+                    app.failed("Account removed, but not everything could be cleaned up.", leftovers.join(" · "));
+                }
+                return;
+            }
+            Err(error) => Err(error),
+        },
         Request::Enroll(account, password) => {
             let enrolled = backend.enroll(account, &password.0);
             app.replace_snapshot(backend.load());

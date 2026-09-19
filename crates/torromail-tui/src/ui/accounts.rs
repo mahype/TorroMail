@@ -90,7 +90,32 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         2 => folders(lang, view, body.width),
         _ => cache(lang, view, body.width),
     };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    // Outside of editing, the account's last message sits on top of any tab.
+    let mut lines = lines;
+    if app.focus != Focus::Detail {
+        if app.confirm_remove {
+            lines.splice(0..0, [
+                Line::styled(
+                    format!("{} „{}“? {}", lang.t("Remove"), view.account.name, lang.t("(y/n)")),
+                    Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(
+                    lang.t("This removes the configuration, the stored password and the local cache. Your mail stays on the server."),
+                    theme::muted(),
+                ),
+                Line::default(),
+            ]);
+        } else if let Some(message) = &app.message {
+            let colour = if message.is_error { theme::ACCENT } else { theme::GREEN };
+            let mut shown = vec![Line::styled(lang.t(message.text), Style::new().fg(colour).add_modifier(Modifier::BOLD))];
+            if !message.detail.is_empty() {
+                shown.push(Line::styled(message.detail.clone(), theme::muted()));
+            }
+            shown.push(Line::default());
+            lines.splice(0..0, shown);
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.detail_scroll, 0)), body);
 }
 
 fn connection(lang: Lang, view: &AccountView, width: u16, now: u64) -> Vec<Line<'static>> {
