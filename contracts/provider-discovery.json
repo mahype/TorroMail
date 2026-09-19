@@ -1,0 +1,505 @@
+{
+  "about": "What a mail address implies about where to connect: the provider table, the MX and SPF inference, Mozilla autoconfig parsing, and modified-UTF-7 folder names. Run by crates/torromail-control/tests/provider_discovery.rs and by the Swift contract suite. `expected` null means: nothing can be said, show the manual fields.",
+  "app_password_fallback": [
+    {
+      "expected": {
+        "kind": "app_password",
+        "setup_url": "https://myaccount.google.com/apppasswords"
+      },
+      "input": "gmail.com"
+    },
+    {
+      "expected": null,
+      "input": "outlook.com"
+    },
+    {
+      "expected": null,
+      "input": "gmx.de"
+    }
+  ],
+  "autoconfig": [
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "imap.example.org",
+        "imap_port": 143,
+        "imap_security": "starttls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "Example Mail",
+        "smtp_host": "smtp.example.org",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "ispdb"
+      },
+      "name": "the first imap server wins, pop is skipped, and the stated encryption is kept",
+      "source": "ispdb",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<clientConfig version=\"1.1\">\n  <emailProvider id=\"example.org\">\n    <domain>example.org</domain>\n    <displayName>Example Mail</displayName>\n    <displayShortName>Example</displayShortName>\n    <incomingServer type=\"pop3\">\n      <hostname>pop.example.org</hostname>\n      <port>995</port>\n      <socketType>SSL</socketType>\n      <authentication>password-cleartext</authentication>\n    </incomingServer>\n    <incomingServer type=\"imap\">\n      <hostname>imap.example.org</hostname>\n      <port>143</port>\n      <socketType>STARTTLS</socketType>\n      <username>%EMAILADDRESS%</username>\n      <authentication>password-cleartext</authentication>\n    </incomingServer>\n    <incomingServer type=\"imap\">\n      <hostname>imap2.example.org</hostname>\n      <port>993</port>\n      <socketType>SSL</socketType>\n    </incomingServer>\n    <outgoingServer type=\"smtp\">\n      <hostname>smtp.example.org</hostname>\n      <port>465</port>\n      <socketType>SSL</socketType>\n      <authentication>password-cleartext</authentication>\n    </outgoingServer>\n  </emailProvider>\n</clientConfig>"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Google Mail",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "autoconfig"
+      },
+      "name": "oauth2 anywhere in the list counts when the issuer is one we can talk to",
+      "source": "autoconfig",
+      "xml": "<clientConfig version=\"1.1\"><emailProvider id=\"googlemail.com\">\n<displayName>Google Mail</displayName>\n<incomingServer type=\"imap\"><hostname>imap.gmail.com</hostname><port>993</port><socketType>SSL</socketType>\n<authentication>OAuth2</authentication><authentication>password-cleartext</authentication></incomingServer>\n<outgoingServer type=\"smtp\"><hostname>smtp.gmail.com</hostname><port>465</port><socketType>SSL</socketType><authentication>OAuth2</authentication></outgoingServer>\n</emailProvider></clientConfig>"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "mail.corp.example",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "mail.corp.example",
+        "smtp_host": "",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "autoconfig"
+      },
+      "name": "oauth2 from an issuer we have no registration with degrades to a password, plain is not honoured, and a missing smtp server stays empty",
+      "source": "autoconfig",
+      "xml": "<clientConfig version=\"1.1\"><emailProvider id=\"corp.example\">\n<incomingServer type=\"imap\"><hostname>mail.corp.example</hostname><port>993</port><socketType>plain</socketType>\n<authentication>password-cleartext</authentication><authentication>OAuth2</authentication></incomingServer>\n</emailProvider></clientConfig>"
+    },
+    {
+      "expected": null,
+      "name": "a document with no imap server says nothing",
+      "source": "ispdb",
+      "xml": "<clientConfig version=\"1.1\"><emailProvider id=\"old.example\"><displayName>Old</displayName>\n<incomingServer type=\"pop3\"><hostname>pop.old.example</hostname><port>995</port><socketType>SSL</socketType></incomingServer>\n</emailProvider></clientConfig>"
+    },
+    {
+      "expected": null,
+      "name": "something that is not xml says nothing",
+      "source": "autoconfig",
+      "xml": "<html><body>404"
+    }
+  ],
+  "domains": [
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Gmail",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "catalog"
+      },
+      "input": "gmail.com"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Gmail",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "catalog"
+      },
+      "input": "GoogleMail.com"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "microsoft",
+          "kind": "oauth"
+        },
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Microsoft 365",
+        "provider_label": "Microsoft",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "outlook.de"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "app_password",
+          "setup_url": "https://account.apple.com/account/manage"
+        },
+        "imap_host": "imap.mail.me.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "iCloud",
+        "smtp_host": "smtp.mail.me.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "icloud.com"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "imap.gmx.net",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "GMX",
+        "smtp_host": "mail.gmx.net",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "gmx.at"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "imap.web.de",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "WEB.DE",
+        "smtp_host": "smtp.web.de",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "web.de"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "imap.mailbox.org",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "mailbox.org",
+        "smtp_host": "smtp.mailbox.org",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "mailbox.org"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "posteo.de",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "Posteo",
+        "smtp_host": "posteo.de",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "posteo.de"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "app_password",
+          "setup_url": "https://app.fastmail.com/settings/security/apps"
+        },
+        "imap_host": "imap.fastmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "Fastmail",
+        "smtp_host": "smtp.fastmail.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "fastmail.fm"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "password"
+        },
+        "imap_host": "secureimap.t-online.de",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "Telekom",
+        "smtp_host": "securesmtp.t-online.de",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "magenta.de"
+    },
+    {
+      "expected": {
+        "auth": {
+          "kind": "app_password",
+          "setup_url": "https://login.yahoo.com/account/security"
+        },
+        "imap_host": "imap.mail.yahoo.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "IMAP/SMTP",
+        "provider_label": "Yahoo",
+        "smtp_host": "smtp.mail.yahoo.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "catalog"
+      },
+      "input": "yahoo.de"
+    },
+    {
+      "expected": null,
+      "input": "torro.dev"
+    }
+  ],
+  "email_domains": [
+    {
+      "expected": "torro.dev",
+      "input": "sven@torro.dev"
+    },
+    {
+      "expected": "torro.dev",
+      "input": "Sven@Torro.DEV "
+    },
+    {
+      "expected": null,
+      "input": "no-at-sign"
+    },
+    {
+      "expected": "at.example",
+      "input": "two@@at.example"
+    },
+    {
+      "expected": null,
+      "input": "a@b@c.example"
+    },
+    {
+      "expected": null,
+      "input": "user@localhost"
+    },
+    {
+      "expected": null,
+      "input": "@example.com"
+    }
+  ],
+  "mailbox_names": [
+    {
+      "expected": "INBOX",
+      "input": "INBOX"
+    },
+    {
+      "expected": "Entwürfe",
+      "input": "Entw&APw-rfe"
+    },
+    {
+      "expected": "Gelöschte Elemente",
+      "input": "Gel&APY-schte Elemente"
+    },
+    {
+      "expected": "Tom & Jerry",
+      "input": "Tom &- Jerry"
+    },
+    {
+      "expected": "台北",
+      "input": "&U,BTFw-"
+    },
+    {
+      "expected": "日本語/台北",
+      "input": "&ZeVnLIqe-/&U,BTFw-"
+    },
+    {
+      "expected": "broken &AP",
+      "input": "broken &AP"
+    },
+    {
+      "expected": "&!!!-",
+      "input": "&!!!-"
+    },
+    {
+      "expected": "Sent",
+      "input": "Sent"
+    }
+  ],
+  "mx": [
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Google Workspace",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "mx"
+      },
+      "input": "aspmx.l.google.com"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Google Workspace",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "mx"
+      },
+      "input": "ALT1.ASPMX.L.GOOGLE.COM"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "microsoft",
+          "kind": "oauth"
+        },
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Microsoft 365",
+        "provider_label": "Microsoft 365",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "mx"
+      },
+      "input": "firma-de.mail.protection.outlook.com"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "microsoft",
+          "kind": "oauth"
+        },
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Microsoft 365",
+        "provider_label": "Microsoft 365",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "mx"
+      },
+      "input": "mx.office365.com"
+    },
+    {
+      "expected": null,
+      "input": "mx01.hornetsecurity.com"
+    },
+    {
+      "expected": null,
+      "input": "mxext1.mailbox.org"
+    }
+  ],
+  "spf": [
+    {
+      "expected": {
+        "auth": {
+          "issuer": "microsoft",
+          "kind": "oauth"
+        },
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Microsoft 365",
+        "provider_label": "Microsoft 365",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "spf"
+      },
+      "input": "v=spf1 include:spf.protection.outlook.com -all"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "google",
+          "kind": "oauth"
+        },
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Gmail",
+        "provider_label": "Google Workspace",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+        "smtp_security": "tls",
+        "source": "spf"
+      },
+      "input": "V=SPF1 include:_spf.google.com include:sendgrid.net ~all"
+    },
+    {
+      "expected": {
+        "auth": {
+          "issuer": "microsoft",
+          "kind": "oauth"
+        },
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "imap_security": "tls",
+        "provider": "Microsoft 365",
+        "provider_label": "Microsoft 365",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "source": "spf"
+      },
+      "input": "v=spf1 include:_spf.google.com include:spf.protection.outlook.com -all"
+    },
+    {
+      "expected": null,
+      "input": "v=spf1 include:sendgrid.net -all"
+    },
+    {
+      "expected": null,
+      "input": "google-site-verification=abc include:_spf.google.com"
+    }
+  ]
+}
