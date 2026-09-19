@@ -1,0 +1,39 @@
+# Maintainer: Sven Wagener (mahype)
+#
+# The release workflow (.github/workflows/release-linux.yml) fills in pkgver,
+# pkgrel and the checksums, builds and installs this package in a clean Arch
+# container, and attaches the result — PKGBUILD plus .SRCINFO — to the release
+# as torromail-bin-aur.tar.gz. That archive is what goes to the AUR; the copy
+# here is the template.
+
+pkgname=torromail-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Local mail access layer for AI agents: an MCP server and its terminal control surface"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mahype/TorroMail"
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs' 'glibc' 'libsecret')
+optdepends=('gnome-keyring: a Secret Service to keep passwords in, if the desktop has none'
+            'libnotify: a notification when an account stops working'
+            'wl-clipboard: copy an access key on Wayland'
+            'xclip: copy an access key on X11')
+provides=('torromail')
+conflicts=('torromail')
+# Prebuilt programs: there are no debug symbols to split off.
+options=('!debug')
+source_x86_64=("torromail-${pkgver}-${pkgrel}-x86_64-linux.tar.gz::${url}/releases/download/linux-v${pkgver}-${pkgrel}/torromail-${pkgver}-${pkgrel}-x86_64-linux.tar.gz")
+source_aarch64=("torromail-${pkgver}-${pkgrel}-aarch64-linux.tar.gz::${url}/releases/download/linux-v${pkgver}-${pkgrel}/torromail-${pkgver}-${pkgrel}-aarch64-linux.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "torromail-${pkgver}-${pkgrel}-${CARCH}-linux"
+  # Side by side: the surface looks for the server next to itself and writes
+  # that absolute path into an assistant's configuration.
+  install -Dm755 torromail "${pkgdir}/usr/bin/torromail"
+  install -Dm755 torromail-mcp "${pkgdir}/usr/bin/torromail-mcp"
+  install -Dm644 LICENSE-MIT "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

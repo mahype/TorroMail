@@ -54,6 +54,13 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 On Linux, `scripts/install-linux.sh` builds a release and installs `torromail` and
 `torromail-mcp` into `~/.local/bin` (no root; `--uninstall` removes them again).
 
+Prebuilt Linux programs come from their own releases, tagged `linux-v<version>-<build>`
+([release-linux.yml](.github/workflows/release-linux.yml)): tarballs for x86_64 and aarch64
+and the `torromail-bin` AUR package ([packaging/aur](packaging/aur/torromail-bin/PKGBUILD)),
+which the workflow builds and installs in a clean Arch container before anything is
+published. These releases are never marked "latest" — the Mac app's updater reads its
+appcast from the latest release.
+
 To try the terminal surface from a checkout: `cargo run -p torromail-tui`. It reads the shared data directory —
 `~/Library/Application Support/TorroMail` on macOS, `$XDG_STATE_HOME/torromail`
 (default `~/.local/state/torromail`) elsewhere, and keeps secrets in the desktop's Secret
