@@ -46,7 +46,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(format!(
                 " {}",
-                lang.t("Accounts are added in the macOS app for now; this surface shows them.")
+                lang.t("Press n to add your first account.")
             ))
             .style(theme::muted())
             .wrap(Wrap { trim: false }),

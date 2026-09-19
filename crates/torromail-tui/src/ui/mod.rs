@@ -6,6 +6,7 @@ mod clients;
 mod log;
 mod overview;
 mod simple;
+mod wizard;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -34,6 +35,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Section::Clients => clients::draw(frame, content, app),
         Section::Log => log::draw(frame, content, app),
         Section::Settings | Section::Updates | Section::Help => simple::draw(frame, content, app),
+    }
+    if let Some(wizard) = &app.wizard {
+        wizard::draw(frame, body, app.lang, wizard);
     }
     frame.render_widget(Paragraph::new(key_hints(app)), hints);
 }
@@ -88,6 +92,19 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn key_hints(app: &App) -> Line<'static> {
     let lang = app.lang;
     let mut hints: Vec<(&str, &str)> = Vec::new();
+    if let Some(wizard) = &app.wizard {
+        hints.extend([("tab", "next field"), ("enter", "continue")]);
+        if wizard.step == crate::wizard::Step::SignIn {
+            hints.push((lang.t("ctrl+d"), "server details"));
+        }
+        hints.push(("esc", "back"));
+        let mut spans = vec![Span::raw(" ")];
+        for (key, label) in hints {
+            spans.push(Span::styled(format!(" {key} "), Style::new().bg(theme::KEY).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(format!(" {}   ", lang.t(label)), theme::muted()));
+        }
+        return Line::from(spans);
+    }
     match app.section {
         Section::Accounts if app.focus == crate::app::Focus::Detail => {
             hints.extend([("↑↓", "select"), (lang.t("space"), "toggle"), (lang.t("ctrl+s"), "save"), ("esc", "back")]);
@@ -98,8 +115,10 @@ fn key_hints(app: &App) -> Line<'static> {
             }
             return Line::from(spans);
         }
-        Section::Accounts if app.account_tab == 1 => hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit")]),
-        Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab")]),
+        Section::Accounts if app.account_tab == 1 => {
+            hints.extend([("↑↓", "select"), ("tab", "tab"), ("enter", "edit"), ("n", "new account")]);
+        }
+        Section::Accounts => hints.extend([("↑↓", "select"), ("tab", "tab"), ("n", "new account")]),
         Section::Clients if app.focus == crate::app::Focus::Detail => {
             hints.extend([("↑↓", "select"), (lang.t("space"), "toggle"), (lang.t("ctrl+s"), "save"), ("esc", "back")]);
             let mut spans = vec![Span::raw(" ")];

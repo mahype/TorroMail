@@ -199,7 +199,13 @@ pub struct Backend {
     pub data_directory: PathBuf,
     pub environment: Option<Environment>,
     pub secrets: Box<dyn SecretStore>,
+    /// How a candidate account is checked: server binary, policy document,
+    /// key, account id. The real one logs into the mailbox; tests put their
+    /// own verdict here.
+    pub checker: Box<CheckAccount>,
 }
+
+pub type CheckAccount = dyn Fn(&Path, &Path, &str, &str) -> torromail_control::enroll::CheckOutcome;
 
 impl Backend {
     #[must_use]
@@ -211,6 +217,23 @@ impl Backend {
     pub fn save_account(&self, account: &MailAccount) -> Result<(), String> {
         torromail_control::save::save_account(&self.data_directory, account, &torromail_control::save::default_context())
             .map_err(|error| error.to_string())
+    }
+
+    /// Checks the candidate against the real server and stores it if it
+    /// passes. Returns the account's name, or the reason in words.
+    pub fn enroll(&self, account: &MailAccount, password: &str) -> Result<String, String> {
+        let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
+        let check = |policy: &Path, token: &str, account_id: &str| (self.checker)(&binary, policy, token, account_id);
+        torromail_control::enroll::enroll(
+            &self.data_directory,
+            self.secrets.as_ref(),
+            &torromail_control::save::default_context(),
+            account.clone(),
+            password,
+            &check,
+        )
+        .map(|account| account.name)
+        .map_err(|error| error.to_string())
     }
 
     fn pairing<T>(&self, act: impl FnOnce(&Pairing<'_>) -> Result<T, torromail_control::connect::ConnectError>) -> Result<T, String> {
@@ -267,4 +290,47 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
         }
     }
     Err("wl-copy / xclip".to_owned())
+}
+
+/// `torromail-mcp --check-account`: exit 0 is a login that worked; otherwise
+/// stderr carries the outcome word alone on its first line and the reason
+/// after it. Never waits longer than half a minute — a hung TLS handshake must
+/// not freeze the surface for good.
+pub fn check_account(binary: &Path, policy: &Path, token: &str, account_id: &str) -> torromail_control::enroll::CheckOutcome {
+    use torromail_control::enroll::CheckOutcome;
+    let spawned = std::process::Command::new(binary)
+        .args(["--check-account", account_id])
+        .env("TORROMAIL_POLICY_PATH", policy)
+        .env("TORROMAIL_TOKEN", token)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => return CheckOutcome::Unreachable(format!("torromail-mcp could not be started: {error}")),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CheckOutcome::Unreachable("the connection check timed out".to_owned());
+            }
+        }
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return CheckOutcome::Unreachable("the connection check could not be read".to_owned());
+    };
+    if output.status.success() {
+        return CheckOutcome::Ok;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = stderr.lines();
+    let word = lines.next().unwrap_or_default();
+    let reason = lines.collect::<Vec<_>>().join(" ").trim().to_owned();
+    if word == "rejected" { CheckOutcome::Rejected(reason) } else { CheckOutcome::Unreachable(reason) }
 }

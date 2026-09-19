@@ -26,6 +26,7 @@ fn main() -> std::io::Result<()> {
         data_directory: directory,
         environment: Environment::current(),
         secrets: Box::new(torromail_control::secrets::SecretToolStore::default()),
+        checker: Box::new(data::check_account),
     };
     let mut app = App::new(Lang::from_environment(), backend.load());
 
@@ -48,6 +49,10 @@ fn main() -> std::io::Result<()> {
             break Ok(());
         }
         if let Some(request) = app.request.take() {
+            // A check can take a while: say so on screen before it starts.
+            if let Err(error) = terminal.draw(|frame| ui::draw(frame, &app)) {
+                break Err(error);
+            }
             torromail_tui::perform(&backend, &mut app, request);
             loaded = Instant::now();
         }
