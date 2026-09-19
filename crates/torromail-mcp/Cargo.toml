@@ -11,14 +11,12 @@ workspace = true
 
 [dependencies]
 torromail-cache = { path = "../torromail-cache" }
+torromail-control = { path = "../torromail-control" }
 torromail-core = { path = "../torromail-core" }
 torromail-imap-tls = { path = "../torromail-imap-tls" }
 torromail-oauth = { path = "../torromail-oauth" }
 serde_json = "1"
 sha2 = "0.10"
-
-[dev-dependencies]
-torromail-control = { path = "../torromail-control" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
