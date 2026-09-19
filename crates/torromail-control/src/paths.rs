@@ -39,6 +39,7 @@ pub fn default_data_directory() -> Option<PathBuf> {
 
 pub const STATE_FILE: &str = "state.json";
 pub const POLICY_FILE: &str = "policy.json";
+pub const PAIRINGS_FILE: &str = "clients.json";
 pub const AUDIT_LOG: &str = "audit.jsonl";
 pub const CONNECTIONS_LOG: &str = "connections.jsonl";
 pub const HEALTH_LOG: &str = "health.jsonl";

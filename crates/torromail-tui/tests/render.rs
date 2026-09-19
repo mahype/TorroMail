@@ -248,3 +248,128 @@ fn the_quiet_screens_and_a_narrow_terminal_draw_without_panicking() {
     press(&mut app, KeyCode::Char('q'));
     assert!(app.should_quit);
 }
+
+// MARK: editing permissions
+
+fn ctrl(app: &mut App, character: char) {
+    app.on_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL));
+}
+
+fn editing() -> App {
+    let mut app = App::new(Lang::De, snapshot());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    app
+}
+
+#[test]
+fn a_preset_is_applied_to_a_draft_and_nothing_is_saved_until_asked() {
+    let mut app = editing();
+    assert_shows(&render(&app), &["(•) Aufräumen", "leertaste", "strg+s"]);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Char(' '));
+    assert_shows(&render(&app), &["(•) Voller Zugriff", "[✓] Senden", "E-Mail und Anhänge", "Ungespeicherte Änderungen"]);
+    assert!(app.save_request.is_none(), "a change is a draft until ctrl+s");
+    assert!(!app.snapshot.accounts[0].account.permissions.send, "the stored account is untouched");
+
+    ctrl(&mut app, 's');
+    let requested = app.save_request.take().expect("ctrl+s asks the event loop to save");
+    assert!(requested.permissions.send);
+}
+
+#[test]
+fn leaving_with_unsaved_changes_asks_first() {
+    let mut app = editing();
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.is_dirty());
+
+    press(&mut app, KeyCode::Char('1'));
+    assert_eq!(app.section, Section::Accounts, "a menu key does not throw an edit away");
+    press(&mut app, KeyCode::Esc);
+    assert_shows(&render(&app), &["Ungespeicherte Änderungen verwerfen? (j/n)"]);
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.is_dirty(), "n keeps editing");
+
+    ctrl(&mut app, 'c');
+    assert!(!app.should_quit, "quitting over unsaved changes asks too");
+    press(&mut app, KeyCode::Char('j'));
+    assert!(app.draft.is_none());
+    assert_shows(&render(&app), &["(•) Aufräumen"]);
+
+    // Nothing changed: esc just leaves.
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    assert!(app.draft.is_none() && !app.confirm_discard);
+}
+
+#[test]
+fn permanent_delete_cannot_outlive_the_delete_right() {
+    let mut app = editing();
+    press(&mut app, KeyCode::End);
+    for _ in 0..10 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.draft.as_ref().expect("editing").permissions.write.permanent_delete, "trash is on, so it may be set");
+
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Char(' '));
+    let write = app.draft.as_ref().expect("editing").permissions.write;
+    assert!(!write.trash && !write.permanent_delete, "taking Delete away takes its escalation with it");
+
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(!app.draft.as_ref().expect("editing").permissions.write.permanent_delete);
+    assert_shows(&render(&app), &["braucht zuerst das"]);
+}
+
+#[test]
+fn the_read_depth_steps_and_stops_at_its_ends() {
+    let mut app = editing();
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Down);
+    }
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Right);
+    }
+    assert_shows(&render(&app), &["‹ E-Mail und Anhänge ›"]);
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Left);
+    }
+    assert_shows(&render(&app), &["‹ Kein Lesezugriff ›", "Voreinstellung · angepasst"]);
+}
+
+#[test]
+fn a_saved_change_reaches_the_policy_document_the_server_reads() {
+    use torromail_control::{AppState, JsonStateStore, StateStore, paths};
+    let directory = std::env::temp_dir().join(format!("torromail-tui-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let state = AppState { accounts: vec![account("work", "Torro", "sven@torro.dev", json!({}))], ..AppState::default() };
+    JsonStateStore::new(directory.join(paths::STATE_FILE)).save(&state).expect("seeds");
+
+    let mut app = App::new(Lang::De, torromail_tui::data::load(&directory, None));
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Char(' '));
+    ctrl(&mut app, 's');
+
+    // What the event loop does with a save request.
+    let requested = app.save_request.take().expect("a save was requested");
+    torromail_tui::data::save_account(&directory, &requested).expect("saves");
+    app.replace_snapshot(torromail_tui::data::load(&directory, None));
+    app.saved();
+
+    assert!(!app.is_dirty(), "what is stored now equals the draft");
+    assert_shows(&render(&app), &["[✓] Senden", "Gespeichert."]);
+    let policy: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join(paths::POLICY_FILE)).expect("published")).expect("JSON");
+    assert_eq!(policy["accounts"][0]["send"], true);
+    std::fs::remove_dir_all(&directory).ok();
+}
