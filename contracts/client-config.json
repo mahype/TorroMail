@@ -1,0 +1,160 @@
+{
+  "about": "How TorroMail writes itself into an MCP client's JSON config, and the snippets it offers for pasting. Run by crates/torromail-control/tests/client_setup.rs and by the Swift contract suite. `existing` is the file's text before (null = no file); `expected` is the file afterwards, compared as JSON. Snippets are compared as text — they are shown and copied verbatim.",
+  "command_path": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+  "merges": [
+    {
+      "action": "add",
+      "existing": null,
+      "expected": {
+        "mcpServers": {
+          "torromail": {
+            "command": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            "env": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            }
+          }
+        }
+      },
+      "name": "no file yet is a fresh start",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "existing": "",
+      "expected": {
+        "mcpServers": {
+          "torromail": {
+            "command": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            "env": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            }
+          }
+        }
+      },
+      "name": "an empty placeholder file is a fresh start, not a corrupt config",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "existing": "{\"theme\": \"dark\", \"mcpServers\": {\"other\": {\"command\": \"/usr/local/bin/other-server\", \"args\": [\"--flag\"]}}}",
+      "expected": {
+        "mcpServers": {
+          "other": {
+            "args": [
+              "--flag"
+            ],
+            "command": "/usr/local/bin/other-server"
+          },
+          "torromail": {
+            "command": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            "env": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            }
+          }
+        },
+        "theme": "dark"
+      },
+      "name": "servers the user configured elsewhere survive, and so do unrelated settings",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "existing": "{\"mcpServers\": {\"torromail\": {\"command\": \"/old/path\", \"env\": {\"TORROMAIL_TOKEN\": \"torro_cursor_old\"}}}}",
+      "expected": {
+        "mcpServers": {
+          "torromail": {
+            "command": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            "env": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            }
+          }
+        }
+      },
+      "name": "reconnecting replaces the old entry and its old key",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "existing": "{\"inputs\": [{\"id\": \"x\", \"type\": \"promptString\"}], \"servers\": {\"other\": {\"command\": \"/usr/local/bin/other-server\", \"args\": [\"--flag\"]}}}",
+      "expected": {
+        "inputs": [
+          {
+            "id": "x",
+            "type": "promptString"
+          }
+        ],
+        "servers": {
+          "other": {
+            "args": [
+              "--flag"
+            ],
+            "command": "/usr/local/bin/other-server"
+          },
+          "torromail": {
+            "command": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            "env": {
+              "TORROMAIL_TOKEN": "torro_cursor_0123abcd"
+            },
+            "type": "stdio"
+          }
+        }
+      },
+      "name": "vs code keeps its servers under `servers`, tagged stdio, beside inputs it owns",
+      "root_key": "servers"
+    },
+    {
+      "action": "add",
+      "error": true,
+      "existing": "{ this is not json",
+      "name": "a configuration that cannot be read is an error and is never overwritten",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "add",
+      "error": true,
+      "existing": "[1, 2, 3]",
+      "name": "a configuration that is valid json but not an object is refused too",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "remove",
+      "existing": "{\"theme\": \"dark\", \"mcpServers\": {\"other\": {\"command\": \"/usr/local/bin/other-server\", \"args\": [\"--flag\"]}, \"torromail\": {\"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\", \"env\": {\"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"}}}}",
+      "expected": {
+        "mcpServers": {
+          "other": {
+            "args": [
+              "--flag"
+            ],
+            "command": "/usr/local/bin/other-server"
+          }
+        },
+        "theme": "dark"
+      },
+      "name": "removing takes out only our entry",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "remove",
+      "existing": "{\"theme\": \"dark\"}",
+      "expected": {
+        "theme": "dark"
+      },
+      "name": "removing from a config without a servers object changes nothing",
+      "root_key": "mcpServers"
+    },
+    {
+      "action": "remove",
+      "error": true,
+      "existing": "{ this is not json",
+      "name": "removing from an unreadable configuration is an error and leaves it alone",
+      "root_key": "mcpServers"
+    }
+  ],
+  "snippets": {
+    "hermes_yaml": "mcp_servers:\n  torromail:\n    command: \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\"\n    env:\n      TORROMAIL_TOKEN: \"torro_cursor_0123abcd\"",
+    "mcp_servers_json": "{\n  \"mcpServers\": {\n    \"torromail\": {\n      \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n      \"env\": {\n        \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n      }\n    }\n  }\n}",
+    "openclaw_json": "{\n  \"mcp\": {\n    \"servers\": {\n      \"torromail\": {\n        \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n        \"env\": {\n          \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n        }\n      }\n    }\n  }\n}",
+    "servers_json": "{\n  \"servers\": {\n    \"torromail\": {\n      \"type\": \"stdio\",\n      \"command\": \"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\",\n      \"env\": {\n        \"TORROMAIL_TOKEN\": \"torro_cursor_0123abcd\"\n      }\n    }\n  }\n}"
+  },
+  "token": "torro_cursor_0123abcd"
+}

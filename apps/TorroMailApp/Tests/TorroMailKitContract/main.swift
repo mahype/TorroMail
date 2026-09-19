@@ -1579,6 +1579,92 @@ for policyCase in policyCases {
     }
 }
 
+// MARK: - Client configs and snippets, shared with Rust
+
+// `contracts/client-config.json`: how TorroMail writes itself into a client's
+// JSON config, and the snippets it offers for pasting. The Rust side
+// (crates/torromail-control/tests/client_setup.rs) runs the same file, so the
+// terminal surface and this app leave a client's config in the same state.
+let clientCasesURL = policyCasesURL.deletingLastPathComponent().appendingPathComponent("client-config.json")
+let clientCasesFile = (try? Data(contentsOf: clientCasesURL))
+    .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+require(clientCasesFile != nil, "the shared client cases are readable at \(clientCasesURL.path)")
+let sharedCommandPath = clientCasesFile?["command_path"] as? String ?? ""
+let sharedToken = clientCasesFile?["token"] as? String ?? ""
+let mergeCases = clientCasesFile?["merges"] as? [[String: Any]] ?? []
+require(!mergeCases.isEmpty, "the shared merge cases are not empty")
+for (index, mergeCase) in mergeCases.enumerated() {
+    let caseName = mergeCase["name"] as? String ?? "unnamed"
+    let configURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("torromail-contract-merge-\(index)", isDirectory: true)
+        .appendingPathComponent("config.json")
+    try? FileManager.default.removeItem(at: configURL.deletingLastPathComponent())
+    let existing = mergeCase["existing"] as? String
+    if let existing {
+        try? FileManager.default.createDirectory(
+            at: configURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? Data(existing.utf8).write(to: configURL)
+    }
+    let sharedClient = MCPClient(
+        id: "cursor",
+        displayName: "Cursor",
+        setup: (mergeCase["root_key"] as? String) == "servers"
+            ? .serversJSON(configURL: configURL)
+            : .mcpServersJSON(configURL: configURL)
+    )
+    let removing = (mergeCase["action"] as? String) == "remove"
+    var failed = false
+    do {
+        if removing {
+            try MCPClientSetup.remove(from: sharedClient)
+        } else {
+            try MCPClientSetup.add(to: sharedClient, commandPath: sharedCommandPath, token: sharedToken)
+        }
+    } catch {
+        failed = true
+    }
+    if mergeCase["error"] as? Bool == true {
+        require(failed, "shared client case fails as written: \(caseName)")
+        require(
+            (try? String(contentsOf: configURL, encoding: .utf8)) == existing,
+            "shared client case leaves the file untouched: \(caseName)"
+        )
+        continue
+    }
+    require(!failed, "shared client case succeeds: \(caseName)")
+    let written = (try? Data(contentsOf: configURL))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? NSDictionary
+    require(written == mergeCase["expected"] as? NSDictionary, "shared client case: \(caseName)")
+    require(
+        MCPClientSetup.isConfigured(sharedClient) == !removing,
+        "shared client case reads back as \(removing ? "not configured" : "configured"): \(caseName)"
+    )
+}
+let sharedSnippets = clientCasesFile?["snippets"] as? [String: String] ?? [:]
+let snippetFormats: [(String, MCPClientDescriptor.SnippetFormat)] = [
+    ("mcp_servers_json", .mcpServersJSON),
+    ("servers_json", .serversJSON),
+    ("hermes_yaml", .hermesYAML),
+    ("openclaw_json", .openClawJSON)
+]
+for (formatName, format) in snippetFormats {
+    require(
+        MCPClientSetup.configSnippet(commandPath: sharedCommandPath, format: format, token: sharedToken)
+            == sharedSnippets[formatName],
+        "shared snippet: \(formatName)"
+    )
+}
+// Every client Rust knows, this app knows under the same id — access keys are
+// stored by id, so a renamed client would lose its key on the other surface.
+require(
+    Set(MCPClientRegistry.catalog.map(\.id))
+        == ["claude-desktop", "claude-code", "chatgpt", "gemini-cli", "cursor", "lm-studio",
+            "vscode", "windsurf", "clawbot", "hermes", "other"],
+    "the client catalog carries the ids the Rust catalog carries"
+)
+
 // The writer is the server binary now. Without it there is no document — and
 // "no document" must be an error the caller sees, never an empty or partial
 // file the server would then read its rights from.
