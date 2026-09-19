@@ -1034,6 +1034,75 @@ require(
     "the quiet account's rejection still derives red after the round trip"
 )
 
+// MARK: - The health rule, shared with Rust
+
+// `contracts/health-derive.json` is the rule as cases. The Rust side runs the
+// same file (crates/torromail-mcp/tests/health_log.rs), so the dot in this app
+// and the dot in any other surface cannot come to disagree without one of the
+// two suites going red.
+struct SharedHealthCases: Decodable {
+    struct Record: Decodable {
+        let account: String
+        let ts: Double
+        let outcome: String
+        let detail: String?
+    }
+    struct Expectation: Decodable {
+        let state: String?
+        let reason: String?
+    }
+    struct Case: Decodable {
+        let name: String
+        let account: String
+        let records: [Record]
+        let expect: Expectation
+    }
+    let grace: Int
+    let cases: [Case]
+}
+
+// apps/TorroMailApp/Tests/TorroMailKitContract/main.swift → the repository
+// root is five levels up.
+let sharedHealthCasesURL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("contracts/health-derive.json")
+let sharedHealthCases = (try? Data(contentsOf: sharedHealthCasesURL))
+    .flatMap { try? JSONDecoder().decode(SharedHealthCases.self, from: $0) }
+require(sharedHealthCases != nil, "the shared health cases are readable at \(sharedHealthCasesURL.path)")
+require(
+    sharedHealthCases?.grace == HealthLog.unreachableGrace,
+    "the shared cases and the app agree on the grace period"
+)
+for sharedCase in sharedHealthCases?.cases ?? [] {
+    let records = sharedCase.records.map { record in
+        HealthRecord(
+            accountID: record.account,
+            at: Date(timeIntervalSince1970: record.ts),
+            outcome: HealthOutcome(rawValue: record.outcome) ?? .unreachable,
+            source: "periodic",
+            detail: record.detail ?? ""
+        )
+    }
+    // `.needsTest` stands in for "whatever the account showed before": a case
+    // that settles nothing must hand exactly that back.
+    let derived = HealthLog.derive(
+        records: records,
+        accountID: sharedCase.account,
+        fallback: .needsTest
+    )
+    let expected: ConnectionState
+    switch sharedCase.expect.state {
+    case "connected": expected = .connected
+    case "failed": expected = .failed(sharedCase.expect.reason ?? "")
+    default: expected = .needsTest
+    }
+    require(derived == expected, "shared health case: \(sharedCase.name)")
+}
+
 // MARK: - What the check made of stderr
 
 // The binary writes the outcome word alone on the first line and the reason

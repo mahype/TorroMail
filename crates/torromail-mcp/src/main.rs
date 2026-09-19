@@ -85,6 +85,15 @@ fn main() -> io::Result<()> {
             eprintln!("{message}");
             std::process::exit(1);
         }
+    // What the health log adds up to, for any surface that shows a status dot.
+    // Read-only and local: no login, no secrets, so it sits in front of the
+    // pairing gate like `--list-tools`.
+    if arguments.iter().any(|argument| argument == "--health-status") {
+        let records = policy_path()
+            .and_then(|path| path.parent().map(|dir| dir.join("health.jsonl")))
+            .map(|path| torromail_mcp::health::load(&path))
+            .unwrap_or_default();
+        println!("{}", torromail_mcp::health::status_json(&records));
         return Ok(());
     }
 
