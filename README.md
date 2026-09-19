@@ -29,6 +29,9 @@ configuration and user confirmation.
 
 - `crates/torromail-core`: portable Rust domain model for accounts, policies, cache defaults, pending actions, and reusable search result sets.
 - `crates/torromail-mcp`: explicit MCP tool surface and stdio line server facade.
+- `crates/torromail-control`: the configuration model every surface shares — accounts and their state file, the policy document writer, MCP client setup, provider discovery, log readers, platform paths.
+- `crates/torromail-tui`: terminal control surface (`torromail`), the Linux counterpart to the macOS app. Read-only for now. This is not a mail client UI either.
+- `contracts`: behaviour pinned as shared cases. The Rust tests and the Swift contract suite run the same files, so the two implementations cannot drift apart silently.
 - `apps/TorroMailApp`: macOS SwiftUI configuration/control app. This is not a mail client UI.
 - `docs`: architecture notes and product decisions.
 
@@ -46,6 +49,11 @@ cargo build -p torromail-mcp
 swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build TorroMailKitContract
 swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
+
+To try the terminal surface: `cargo run -p torromail-tui`. It reads the shared data directory —
+`~/Library/Application Support/TorroMail` on macOS, `$XDG_STATE_HOME/torromail`
+(default `~/.local/state/torromail`) elsewhere. Keys: `1`–`7` sections, arrows to select,
+`tab` for account tabs, `q` to quit.
 
 In development, build `torromail-mcp` before launching the SwiftUI app if you want the app supervisor to start the MCP process automatically from `target/debug/torromail-mcp`.
 

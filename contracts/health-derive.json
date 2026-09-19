@@ -1,0 +1,106 @@
+{
+  "about": "The account-health rule, as cases. Both implementations run these: crates/torromail-mcp/tests/health_log.rs and the Swift contract suite. A rule change is a change to this file first.",
+  "grace": 3,
+  "cases": [
+    {
+      "name": "with no records at all the stored state stands",
+      "account": "work",
+      "records": [],
+      "expect": { "state": null }
+    },
+    {
+      "name": "a successful check is green whatever the stored state said",
+      "account": "work",
+      "records": [{ "account": "work", "ts": 100, "outcome": "ok", "detail": "" }],
+      "expect": { "state": "connected" }
+    },
+    {
+      "name": "refused credentials go red immediately, in the server's own words",
+      "account": "work",
+      "records": [{ "account": "work", "ts": 100, "outcome": "rejected", "detail": "credentials rejected: NO" }],
+      "expect": { "state": "failed", "reason": "credentials rejected: NO" }
+    },
+    {
+      "name": "a rejection without a reason still says why",
+      "account": "work",
+      "records": [{ "account": "work", "ts": 100, "outcome": "rejected", "detail": "" }],
+      "expect": { "state": "failed", "reason": "credentials rejected" }
+    },
+    {
+      "name": "two unreachable checks are a flaky network, not a broken account",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "ok", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "timed out" },
+        { "account": "work", "ts": 300, "outcome": "unreachable", "detail": "timed out" }
+      ],
+      "expect": { "state": "connected" }
+    },
+    {
+      "name": "three in a row is a problem worth showing",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "ok", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 300, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 400, "outcome": "unreachable", "detail": "" }
+      ],
+      "expect": { "state": "failed", "reason": "server not reachable" }
+    },
+    {
+      "name": "a success in between resets the count",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 300, "outcome": "ok", "detail": "" },
+        { "account": "work", "ts": 400, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 500, "outcome": "unreachable", "detail": "" }
+      ],
+      "expect": { "state": "connected" }
+    },
+    {
+      "name": "another account's trouble is not this account's",
+      "account": "work",
+      "records": [{ "account": "other", "ts": 100, "outcome": "rejected", "detail": "" }],
+      "expect": { "state": null }
+    },
+    {
+      "name": "a short outage after a rejection keeps the rejection, reason and all",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "rejected", "detail": "credentials rejected: NO" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 300, "outcome": "unreachable", "detail": "" }
+      ],
+      "expect": { "state": "failed", "reason": "credentials rejected: NO" }
+    },
+    {
+      "name": "a short outage with nothing before it settles nothing",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "unreachable", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "" }
+      ],
+      "expect": { "state": null }
+    },
+    {
+      "name": "records are judged in time order, not file order",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 300, "outcome": "ok", "detail": "" },
+        { "account": "work", "ts": 100, "outcome": "rejected", "detail": "old" }
+      ],
+      "expect": { "state": "connected" }
+    },
+    {
+      "name": "records sharing a second keep their file order",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "rejected", "detail": "first" },
+        { "account": "work", "ts": 100, "outcome": "ok", "detail": "" }
+      ],
+      "expect": { "state": "connected" }
+    }
+  ]
+}

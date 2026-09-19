@@ -530,3 +530,49 @@ fn cache_level_from_json(value: &Value, context: &str) -> Result<CacheLevel, For
         CacheLevel::Headers
     })
 }
+
+/// The named starting points. A preset is a fact about the current values —
+/// derived, never stored — so a "custom" state can never drift out of sync
+/// with the switches. Folder exceptions do not count: presets decide the
+/// groups, exceptions only scope them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionPreset {
+    ReadOnly,
+    ReadAndDrafts,
+    TidyUp,
+    FullAccess,
+}
+
+impl PermissionPreset {
+    pub const ALL: [Self; 4] = [Self::ReadOnly, Self::ReadAndDrafts, Self::TidyUp, Self::FullAccess];
+
+    #[must_use]
+    pub fn read(self) -> ReadAccess {
+        if self == Self::FullAccess { ReadAccess::WithAttachments } else { ReadAccess::FullMessage }
+    }
+
+    #[must_use]
+    pub fn write(self) -> WriteAccess {
+        match self {
+            Self::ReadOnly => WriteAccess::default(),
+            Self::ReadAndDrafts => WriteAccess { drafts: true, ..WriteAccess::default() },
+            Self::TidyUp => WriteAccess { mark: true, r#move: true, trash: true, ..WriteAccess::default() },
+            // Everything except permanent deletion, which is never preset.
+            Self::FullAccess => WriteAccess { drafts: true, mark: true, r#move: true, trash: true, permanent_delete: false },
+        }
+    }
+
+    #[must_use]
+    pub fn send(self) -> bool {
+        self == Self::FullAccess
+    }
+}
+
+impl PermissionSet {
+    #[must_use]
+    pub fn matching_preset(&self) -> Option<PermissionPreset> {
+        PermissionPreset::ALL
+            .into_iter()
+            .find(|preset| preset.read() == self.read && preset.write() == self.write && preset.send() == self.send)
+    }
+}

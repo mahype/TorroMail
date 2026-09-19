@@ -395,3 +395,93 @@ fn a_stale_record_makes_a_check_due_again() {
         "past the window the account is due again"
     );
 }
+
+// MARK: what the records add up to
+
+use torromail_mcp::health::{HealthRecord, HealthVerdict};
+
+/// The rule lives in `contracts/health-derive.json`, and the Swift contract
+/// suite runs the same file — so the two implementations cannot drift apart
+/// without one of them going red.
+#[test]
+fn the_shared_health_cases_derive_as_written() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/health-derive.json");
+    let file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).expect("the shared cases are in the repository"),
+    )
+    .expect("the shared cases are JSON");
+    let grace = file["grace"].as_u64().expect("grace is a number") as usize;
+    assert_eq!(grace, health::UNREACHABLE_GRACE, "the file and the constant agree");
+
+    let cases = file["cases"].as_array().expect("cases is a list");
+    assert!(!cases.is_empty());
+    for case in cases {
+        let name = case["name"].as_str().expect("every case is named");
+        let records: Vec<HealthRecord> = case["records"]
+            .as_array()
+            .expect("records is a list")
+            .iter()
+            .map(|record| HealthRecord {
+                ts: record["ts"].as_u64().expect("ts"),
+                account: record["account"].as_str().expect("account").to_owned(),
+                outcome: HealthOutcome::parse(record["outcome"].as_str().expect("outcome"))
+                    .expect("a known outcome"),
+                source: "periodic".to_owned(),
+                detail: record["detail"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect();
+        let expected = match case["expect"]["state"].as_str() {
+            None => None,
+            Some("connected") => Some(HealthVerdict::Connected),
+            Some("failed") => Some(HealthVerdict::Failed(
+                case["expect"]["reason"].as_str().expect("a failed case names its reason").to_owned(),
+            )),
+            Some(other) => panic!("{name}: unknown state {other}"),
+        };
+        let derived = health::derive(&records, case["account"].as_str().expect("account"), grace);
+        assert_eq!(derived, expected, "{name}");
+    }
+}
+
+#[test]
+fn a_fractional_timestamp_from_the_app_still_counts() {
+    // The app writes `Date().timeIntervalSince1970`, a double. Read as an
+    // integer only, its records vanished — and a starting server logged in
+    // again to every account the app had checked a moment before.
+    let path = temp_path("fractional");
+    let stamp = now();
+    std::fs::write(
+        &path,
+        format!(r#"{{"ts":{stamp}.734,"account":"work","outcome":"ok","source":"periodic","detail":""}}"#) + "\n",
+    )
+    .expect("the log is writable");
+
+    let records = health::load(&path);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].ts, stamp);
+    assert!(!health::needs_check(&records, "work", now(), health::SERVER_START_WINDOW));
+}
+
+#[test]
+fn the_status_document_names_every_account_with_its_verdict() {
+    let record = |account: &str, ts: u64, outcome: HealthOutcome, detail: &str| HealthRecord {
+        ts,
+        account: account.to_owned(),
+        outcome,
+        source: "periodic".to_owned(),
+        detail: detail.to_owned(),
+    };
+    let records = vec![
+        record("work", 10, HealthOutcome::Ok, ""),
+        record("home", 20, HealthOutcome::Rejected, "NO"),
+        record("flaky", 30, HealthOutcome::Unreachable, ""),
+    ];
+    let status = health::status_json(&records);
+
+    assert_eq!(status["accounts"]["work"]["state"], "connected");
+    assert_eq!(status["accounts"]["work"]["last_checked"], 10);
+    assert_eq!(status["accounts"]["home"]["state"], "failed");
+    assert_eq!(status["accounts"]["home"]["reason"], "NO");
+    assert!(status["accounts"]["flaky"]["state"].is_null(), "one missed check settles nothing");
+    assert_eq!(status["accounts"]["flaky"]["last_checked"], 30);
+}
