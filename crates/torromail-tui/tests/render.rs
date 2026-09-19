@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use torromail_control::MailAccount;
 use torromail_control::clients::CATALOG;
+use torromail_control::enroll::CheckOutcome;
 use torromail_control::logs::{AuditEntry, ClientConnection};
 use torromail_tui::app::{App, Focus, Request, Section};
 use torromail_tui::data::{AccountHealth, AccountView, Backend, ClientView, Snapshot};
@@ -147,7 +148,7 @@ fn a_healthy_setup_shows_no_attention_card() {
 #[test]
 fn a_first_start_explains_itself_instead_of_showing_empty_boxes() {
     let mut app = App::new(Lang::En, Snapshot::default());
-    assert_shows(&render(&app), &["Not reachable for assistants", "No assistant connected", "No accounts yet.", "No activity yet."]);
+    assert_shows(&render(&app), &["Not reachable for assistants", "No assistant connected", "No accounts yet.", "Press n to add your first account.", "No activity yet."]);
     press(&mut app, KeyCode::Char('2'));
     assert_shows(&render(&app), &["No accounts yet."]);
     press(&mut app, KeyCode::Char('6'));
@@ -358,6 +359,7 @@ fn a_saved_change_reaches_the_policy_document_the_server_reads() {
         data_directory: directory.clone(),
         environment: None,
         secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
+        checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
     };
     let mut app = App::new(Lang::De, backend.load());
     press(&mut app, KeyCode::Char('2'));
@@ -412,6 +414,7 @@ fn scene(name: &str) -> Scene {
                 executable_directories: vec![root.join("bin")],
             }),
             secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
+            checker: Box::new(|_, _, _, _| CheckOutcome::Ok),
         },
         root,
     }
@@ -533,4 +536,98 @@ fn an_assistant_that_is_not_installed_offers_no_connect() {
     press(&mut app, KeyCode::Char('c'));
     assert!(app.request.is_none(), "Claude Desktop is not on this machine");
     assert!(!render(&app).contains(" c "), "and the key is not advertised");
+}
+
+
+// MARK: adding an account
+
+fn type_text(app: &mut App, text: &str) {
+    for character in text.chars() {
+        press(app, KeyCode::Char(character));
+    }
+}
+
+#[test]
+fn a_known_provider_needs_only_an_address_and_a_password() {
+    let scene = scene("wizard");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.section, Section::Accounts, "n on the overview goes where accounts live");
+    assert_shows(&render(&app), &["Neues Konto", "● E-Mail", "○ Anmeldung", "Absendername"]);
+
+    // q, 1, j are letters now, not commands.
+    type_text(&mut app, "jq1@mailbox.org");
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "Sven");
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.should_quit);
+    assert_shows(&render(&app), &["✓ E-Mail", "Einstellungen gefunden · mailbox.org", "imap.mailbox.org:993", "smtp.mailbox.org:587", "Passwort"]);
+
+    type_text(&mut app, "hunter2-secret");
+    let screen = render(&app);
+    assert!(!screen.contains("hunter2"), "a password is never drawn");
+    assert_shows(&screen, &["••••••••••••••"]);
+
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Was dürfen verbundene Assistenten", "(•) Lesen + Entwürfe"]);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Verbindung wird geprüft"]);
+    assert!(!format!("{app:?}").contains("hunter2"), "nor does it reach a debug print");
+
+    scene.act(&mut app);
+    assert_shows(&render(&app), &["Verbunden als Sven", "✓ Berechtigungen"]);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.wizard.is_none());
+
+    let created = &app.snapshot.accounts[app.account_index];
+    assert_eq!((created.account.email.as_str(), created.account.imap_host.as_str()), ("jq1@mailbox.org", "imap.mailbox.org"));
+    assert_eq!(created.account.permissions.matching_preset(), Some(torromail_control::PermissionPreset::TidyUp));
+    assert_eq!(created.health, AccountHealth::Connected);
+    let stored_password = scene.backend.secrets.get("TorroMail", &created.account.id).expect("readable");
+    assert_eq!(stored_password.as_deref(), Some("hunter2-secret"));
+    assert_eq!(scene.policy()["accounts"].as_array().expect("accounts").len(), 3);
+}
+
+#[test]
+fn a_refused_login_returns_to_the_password_with_the_servers_words() {
+    let mut scene = scene("wizard-refused");
+    scene.backend.checker = Box::new(|_, _, _, _| CheckOutcome::Rejected("[AUTHENTICATIONFAILED] Invalid credentials".to_owned()));
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('n'));
+    type_text(&mut app, "sven@gmx.de");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "wrong");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    scene.act(&mut app);
+
+    let wizard = app.wizard.as_ref().expect("still open");
+    assert_eq!(wizard.step, torromail_tui::wizard::Step::SignIn);
+    assert_eq!(wizard.email, "sven@gmx.de", "nothing typed is lost");
+    assert_shows(&render(&app), &["[AUTHENTICATIONFAILED] Invalid credentials", "● Anmeldung"]);
+    assert_eq!(app.snapshot.accounts.len(), 2, "no account came to exist");
+}
+
+#[test]
+fn an_unknown_domain_asks_for_the_servers_and_gmail_explains_the_app_password() {
+    let scene = scene("wizard-unknown");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('n'));
+    type_text(&mut app, "hallo@lindenhof-design.de");
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Für diese Domain war nichts zu finden", "IMAP-Server", "SMTP-Port", "587"]);
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["Server von Hand eintragen."]);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    assert!(app.wizard.is_none(), "esc walks back out");
+
+    press(&mut app, KeyCode::Char('n'));
+    assert_shows(&render(&app), &["Neues Konto", "E-Mail"]);
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render(&app), &["TorroMail braucht eine Adresse"]);
+    type_text(&mut app, "sven@gmail.com");
+    press(&mut app, KeyCode::Enter);
+    assert_shows(&render_at(&app, 112, 44), &["Gmail", "Ein-Klick-Anmeldung", "https://myaccount.google.com/apppasswords", "App-Passwort"]);
 }

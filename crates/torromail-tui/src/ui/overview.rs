@@ -103,7 +103,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Paragraph::new(vec![
                 Line::raw(format!(" {}", lang.t("No accounts yet."))),
                 Line::styled(
-                    format!(" {}", lang.t("Accounts are added in the macOS app for now; this surface shows them.")),
+                    format!(" {}", lang.t("Press n to add your first account.")),
                     theme::muted(),
                 ),
             ]),

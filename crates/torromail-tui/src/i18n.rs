@@ -21,6 +21,16 @@ impl Lang {
         if locale.to_lowercase().starts_with("de") { Self::De } else { Self::En }
     }
 
+    /// For text that arrives at run time: one of our own sentences is
+    /// translated, anything else — a mail server's words — is shown as it came.
+    #[must_use]
+    pub fn t_owned(self, text: &str) -> String {
+        if self == Self::En {
+            return text.to_owned();
+        }
+        GERMAN.iter().find(|(key, _)| *key == text).map_or_else(|| text.to_owned(), |(_, german)| (*german).to_owned())
+    }
+
     #[must_use]
     pub fn t(self, english: &'static str) -> &'static str {
         if self == Self::En {
@@ -101,7 +111,7 @@ const GERMAN: &[(&str, &str)] = &[
     ("Recent Activity", "Letzte Aktivität"),
     ("No activity yet. It appears here the moment an assistant does something.", "Noch keine Aktivität. Sie erscheint hier, sobald ein Assistent etwas tut."),
     ("No accounts yet.", "Noch keine Konten."),
-    ("Accounts are added in the macOS app for now; this surface shows them.", "Konten werden vorerst in der macOS-App angelegt; diese Oberfläche zeigt sie an."),
+    ("Press n to add your first account.", "Drücke n, um dein erstes Konto hinzuzufügen."),
     ("Listed accounts", "Konten aufgelistet"),
     ("Searched mail", "E-Mails durchsucht"),
     ("Refined a search", "Suche verfeinert"),
@@ -217,6 +227,30 @@ const GERMAN: &[(&str, &str)] = &[
     ("Report a problem", "Problem melden"),
     ("Every action an assistant takes is recorded in the log — that is the first place to look when something went differently than expected.", "Jede Aktion eines Assistenten steht im Protokoll — dort schaust du zuerst nach, wenn etwas anders lief als erwartet."),
     ("edit", "bearbeiten"),
+    ("new account", "neues konto"),
+    ("next field", "nächstes feld"),
+    ("continue", "weiter"),
+    ("server details", "serverdaten"),
+    ("ctrl+d", "strg+d"),
+    ("New Account", "Neues Konto"),
+    ("Email", "E-Mail"),
+    ("Done", "Fertig"),
+    ("Login for", "Anmeldung für"),
+    ("Settings found", "Einstellungen gefunden"),
+    ("IMAP Port", "IMAP-Port"),
+    ("SMTP Port", "SMTP-Port"),
+    ("App password", "App-Passwort"),
+    ("The name and address anything you approve is sent as.", "Der Name und die Adresse, unter der alles rausgeht, was du freigibst."),
+    ("TorroMail needs an address to work with.", "TorroMail braucht eine Adresse, mit der es arbeiten kann."),
+    ("Enter the server by hand.", "Server von Hand eintragen."),
+    ("Nothing could be found for this domain — the server details have to come from you.", "Für diese Domain war nichts zu finden — die Server-Angaben musst du selbst eintragen."),
+    ("Your normal password will not work for mail apps. Create an app password and paste it here — it is a password just for TorroMail, and you can revoke it any time.", "Dein normales Passwort funktioniert bei Mail-Programmen nicht. Erstelle ein App-Passwort und füge es hier ein — es gilt nur für TorroMail und du kannst es jederzeit widerrufen."),
+    ("The one-click sign-in is not available in this version yet. An app password works just as well and needs two-factor to be on.", "Die Ein-Klick-Anmeldung ist in dieser Version noch nicht verfügbar. Ein App-Passwort funktioniert genauso gut — dafür muss die Zwei-Faktor-Anmeldung aktiv sein."),
+    ("What may connected assistants do with this account?", "Was dürfen verbundene Assistenten mit diesem Konto tun?"),
+    ("You can change this any time.", "Du kannst das jederzeit ändern."),
+    ("Checking the connection…", "Verbindung wird geprüft …"),
+    ("Connected as", "Verbunden als"),
+    ("Connect an assistant in the MCP Clients section so it can use this account.", "Verbinde im Bereich MCP-Clients einen Assistenten, damit er dieses Konto nutzen kann."),
     ("connect", "verbinden"),
     ("reconnect", "neu verbinden"),
     ("disconnect", "trennen"),
