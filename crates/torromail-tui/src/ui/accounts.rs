@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use torromail_control::{
-    CacheLevel, ConnectionSecurity, LoginMethod, PermissionPreset, PermissionSet, ReadAccess, mailbox_names,
+    CacheLevel, ConnectionSecurity, LoginMethod, MailAccount, PermissionPreset, PermissionSet, ReadAccess, mailbox_names,
 };
 
 use super::{field, health_mark, panel, rule};
@@ -80,18 +80,19 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(vec![Line::from(names), Line::from(underline)]), tabs);
 
     let body = Rect { x: body.x + 1, width: body.width.saturating_sub(2), ..body };
-    let lines = match app.account_tab {
-        0 => connection(lang, view, body.width, app.snapshot.taken_at),
-        1 => {
-            let editing = (app.focus == Focus::Detail).then_some(app);
-            let shown = app.draft.as_ref().filter(|_| editing.is_some()).map_or(&view.account.permissions, |draft| &draft.permissions);
-            permissions(lang, shown, body.width, editing)
-        }
-        2 => folders(lang, view, body.width),
-        _ => cache(lang, view, body.width),
+    let editing = (app.focus == Focus::Detail).then_some(app);
+    let shown = app.draft.as_ref().filter(|_| editing.is_some()).unwrap_or(&view.account);
+    let mut lines = match app.account_tab {
+        0 => connection(lang, view, shown, body.width, app.snapshot.taken_at, editing),
+        1 => permissions(lang, &shown.permissions, body.width, editing),
+        2 => folders(lang, shown, body.width, editing),
+        _ => cache(lang, shown, body.width, editing),
     };
+    if let Some(app) = editing {
+        lines.push(Line::default());
+        lines.extend(edit_status(lang, app));
+    }
     // Outside of editing, the account's last message sits on top of any tab.
-    let mut lines = lines;
     if app.focus != Focus::Detail {
         if app.confirm_remove {
             lines.splice(0..0, [
@@ -118,8 +119,14 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.detail_scroll, 0)), body);
 }
 
-fn connection(lang: Lang, view: &AccountView, width: u16, now: u64) -> Vec<Line<'static>> {
-    let account = &view.account;
+fn connection(
+    lang: Lang,
+    view: &AccountView,
+    account: &MailAccount,
+    width: u16,
+    now: u64,
+    editing: Option<&App>,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let AccountHealth::Failed(reason) = &view.health {
         lines.push(Line::styled(
@@ -141,24 +148,54 @@ fn connection(lang: Lang, view: &AccountView, width: u16, now: u64) -> Vec<Line<
         ConnectionSecurity::Tls => "SSL/TLS",
         ConnectionSecurity::StartTls => "STARTTLS",
     };
-    lines.extend([
-        rule(lang.t("Identity"), width),
-        field(lang.t("Sender Name"), account.name.clone()),
-        field("E-Mail", account.email.clone()),
-        Line::default(),
-        rule(lang.t("Connection"), width),
-        field(lang.t("Provider"), account.provider.clone()),
-        field(
-            lang.t("Login"),
-            match account.login_method {
-                LoginMethod::Password => lang.t("Password").to_owned(),
-                LoginMethod::OAuth => format!("OAuth · {}", account.oauth_issuer.map_or("", |issuer| issuer.as_str())),
-            },
-        ),
-        field(lang.t("Username"), account.username.clone()),
-        field(lang.t("IMAP Server"), format!("{}:{} · {}", account.imap_host, account.imap_port, security(account.imap_security))),
-        field(lang.t("SMTP Server"), format!("{}:{} · {}", account.smtp_host, account.smtp_port, security(account.smtp_security))),
-    ]);
+
+    let Some(app) = editing else {
+        lines.extend([
+            rule(lang.t("Identity"), width),
+            field(lang.t("Sender Name"), account.name.clone()),
+            field("E-Mail", account.email.clone()),
+            Line::default(),
+            rule(lang.t("Connection"), width),
+            field(lang.t("Provider"), account.provider.clone()),
+            field(
+                lang.t("Login"),
+                match account.login_method {
+                    LoginMethod::Password => lang.t("Password").to_owned(),
+                    LoginMethod::OAuth => format!("OAuth · {}", account.oauth_issuer.map_or("", |issuer| issuer.as_str())),
+                },
+            ),
+            field(lang.t("Username"), account.username.clone()),
+            field(lang.t("IMAP Server"), format!("{}:{} · {}", account.imap_host, account.imap_port, security(account.imap_security))),
+            field(lang.t("SMTP Server"), format!("{}:{} · {}", account.smtp_host, account.smtp_port, security(account.smtp_security))),
+        ]);
+        return lines;
+    };
+
+    // Editing: one row per fact, the row order `App::connection_text` uses.
+    let masked = "•".repeat(app.extras.password.0.chars().count());
+    let rows: [(&str, String, bool); 9] = [
+        ("Sender Name", account.name.clone(), true),
+        ("Username", account.username.clone(), true),
+        ("IMAP Server", account.imap_host.clone(), true),
+        ("IMAP Port", app.extras.imap_port.clone(), true),
+        ("IMAP encryption", format!("‹ {} ›", security(account.imap_security)), false),
+        ("SMTP Server", account.smtp_host.clone(), true),
+        ("SMTP Port", app.extras.smtp_port.clone(), true),
+        ("SMTP encryption", format!("‹ {} ›", security(account.smtp_security)), false),
+        ("New password", masked, true),
+    ];
+    lines.push(rule(lang.t("Connection"), width));
+    for (index, (label, value, is_text)) in rows.into_iter().enumerate() {
+        let on = index == app.cursor;
+        let mut spans = vec![Span::styled(format!("{:<17} ", lang.t(label)), theme::muted()), Span::raw(value)];
+        if on && is_text {
+            spans.push(Span::styled("█", Style::new().fg(theme::SILVER)));
+        }
+        let line = Line::from(spans);
+        lines.push(if on { line.style(theme::selected()) } else { line });
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled(lang.t("Leave the password empty to keep the stored one. Saving checks the connection."), theme::faint()));
     lines
 }
 
@@ -234,44 +271,73 @@ fn permissions(lang: Lang, permissions: &PermissionSet, width: u16, editing: Opt
     }
     lines.push(Line::default());
 
-    let Some(app) = editing else {
+    if editing.is_none() {
         lines.push(Line::styled(lang.t("Applies to the whole account."), theme::faint()));
-        return lines;
-    };
-    if app.confirm_discard {
-        lines.push(Line::styled(lang.t("Discard unsaved changes? (y/n)"), Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD)));
-    } else if let Some(message) = &app.message {
-        let colour = if message.is_error { theme::ACCENT } else { theme::GREEN };
-        lines.push(Line::styled(lang.t(message.text), Style::new().fg(colour).add_modifier(Modifier::BOLD)));
-        if !message.detail.is_empty() {
-            lines.push(Line::styled(message.detail.clone(), theme::muted()));
-        }
-    } else if app.is_dirty() {
-        lines.push(Line::styled(format!("● {}", lang.t("Unsaved changes")), Style::new().fg(theme::AMBER)));
     }
     lines
 }
 
-fn folders(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>> {
-    let account = &view.account;
-    let permissions = &account.permissions;
-    let mut lines = vec![
-        rule(lang.t("Per-folder permissions"), width),
-        field(lang.t("Per-folder permissions"), lang.t(if permissions.per_folder { "on" } else { "off" })),
-        field(lang.t("Standard"), lang.t("Standard – all folders")),
-    ];
-    for (mailbox, folder_rule) in &permissions.folder_rules {
-        let (word, colour) = match (folder_rule.read, folder_rule.write) {
-            (true, true) => continue,
-            (false, false) => (lang.t("no access"), theme::ACCENT),
-            (true, false) => (lang.t("read only"), theme::AMBER),
-            (false, true) => (lang.t("write only"), theme::AMBER),
-        };
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {:<16}", mailbox_names::display_name(mailbox))),
-            Span::styled(format!("{} · {word}", lang.t("adjusted")), Style::new().fg(colour)),
-        ]));
+/// What an edit in progress has to say for itself: the question before a
+/// discard, the last message, or that there is something unsaved.
+fn edit_status(lang: Lang, app: &App) -> Vec<Line<'static>> {
+    if app.confirm_discard {
+        return vec![Line::styled(lang.t("Discard unsaved changes? (y/n)"), Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD))];
     }
+    if let Some(message) = &app.message {
+        let colour = if message.is_error { theme::ACCENT } else { theme::GREEN };
+        let mut lines = vec![Line::styled(lang.t(message.text), Style::new().fg(colour).add_modifier(Modifier::BOLD))];
+        if !message.detail.is_empty() {
+            lines.push(Line::styled(message.detail.clone(), theme::muted()));
+        }
+        return lines;
+    }
+    if app.is_dirty() {
+        return vec![Line::styled(format!("● {}", lang.t("Unsaved changes")), Style::new().fg(theme::AMBER))];
+    }
+    Vec::new()
+}
+
+fn folders(lang: Lang, account: &MailAccount, width: u16, editing: Option<&App>) -> Vec<Line<'static>> {
+    let permissions = &account.permissions;
+    let cursor = editing.map(|app| app.cursor);
+    let mut row = 0;
+    let mut editable = |line: Line<'static>| {
+        let line = if cursor == Some(row) { line.style(theme::selected()) } else { line };
+        row += 1;
+        line
+    };
+    let rule_words = |folder_rule: Option<&torromail_control::FolderRule>| match folder_rule.map(|rule| (rule.read, rule.write)) {
+        None | Some((true, true)) => (lang.t("Standard").to_owned(), theme::MUTED),
+        Some((false, false)) => (format!("{} · {}", lang.t("adjusted"), lang.t("no access")), theme::ACCENT),
+        Some((true, false)) => (format!("{} · {}", lang.t("adjusted"), lang.t("read only")), theme::AMBER),
+        Some((false, true)) => (format!("{} · {}", lang.t("adjusted"), lang.t("write only")), theme::AMBER),
+    };
+
+    let mut lines = vec![rule(lang.t("Per-folder permissions"), width)];
+    lines.push(editable(Line::from(vec![
+        Span::styled("[", theme::faint()),
+        Span::styled(if permissions.per_folder { "✓" } else { " " }, Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled("] ", theme::faint()),
+        Span::raw(lang.t("Per-folder permissions")),
+    ])));
+    // While editing, every folder the server has; otherwise only the ones
+    // that differ, because "standard" is not news.
+    let listed: Vec<String> = match editing {
+        Some(app) => app.extras.folders.clone(),
+        None => permissions.folder_rules.keys().cloned().collect(),
+    };
+    for mailbox in &listed {
+        let (words, colour) = rule_words(permissions.folder_rules.get(mailbox));
+        let line = Line::from(vec![
+            Span::raw(format!("  {:<22}", mailbox_names::display_name(mailbox))),
+            Span::styled(words, Style::new().fg(colour)),
+        ]);
+        lines.push(if editing.is_some() { editable(line) } else { line });
+    }
+    if editing.is_none() {
+        lines.push(Line::styled(lang.t("Off: all folders use the permissions above."), theme::faint()));
+    }
+
     lines.extend([Line::default(), rule(lang.t("Special folders"), width)]);
     let special = &account.special_mailboxes;
     for (label, chosen) in [
@@ -286,13 +352,22 @@ fn folders(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>> {
         } else {
             lang.t("Automatic").to_owned()
         };
-        lines.push(field(lang.t(label), value));
+        let line = if editing.is_some() {
+            Line::from(vec![
+                Span::styled(format!("{:<17} ", lang.t(label)), theme::muted()),
+                Span::styled("‹ ", theme::faint()),
+                Span::raw(value),
+                Span::styled(" ›", theme::faint()),
+            ])
+        } else {
+            field(lang.t(label), value)
+        };
+        lines.push(if editing.is_some() { editable(line) } else { line });
     }
     lines
 }
 
-fn cache(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>> {
-    let account = &view.account;
+fn cache(lang: Lang, account: &MailAccount, width: u16, editing: Option<&App>) -> Vec<Line<'static>> {
     let label = |level: CacheLevel| {
         lang.t(match level {
             CacheLevel::Off => "Off",
@@ -302,7 +377,16 @@ fn cache(lang: Lang, view: &AccountView, width: u16) -> Vec<Line<'static>> {
         })
     };
     let ceiling = CacheLevel::ceiling(account.permissions.read);
-    let mut lines = vec![rule(lang.t("Search & Cache"), width), field(lang.t("Cache"), label(account.cache_level))];
+    let level = Line::from(vec![
+        Span::styled(format!("{:<17} ", lang.t("Cache")), theme::muted()),
+        Span::styled("‹ ", theme::faint()),
+        Span::styled(label(account.cache_level), theme::bold()),
+        Span::styled(" ›", theme::faint()),
+    ]);
+    let mut lines = vec![
+        rule(lang.t("Search & Cache"), width),
+        if editing.is_some() { level.style(theme::selected()) } else { level },
+    ];
     if account.cache_level > ceiling {
         lines.push(Line::styled(
             format!("{} „{}“", lang.t("Limited by the read permission to"), label(ceiling)),

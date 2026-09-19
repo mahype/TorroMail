@@ -20,7 +20,37 @@ use data::Backend;
 /// does, over scratch directories.
 pub fn perform(backend: &Backend, app: &mut App, request: Request) {
     let outcome = match &request {
-        Request::SaveAccount(account) => backend.save_account(account).map(|()| "Saved."),
+        Request::SaveAccount(account, password) => {
+            // Did anything change that a login depends on? Then the save is
+            // followed by a real check, so the dot tells the truth at once.
+            let stored = app.snapshot.accounts.iter().find(|view| view.account.id == account.id).map(|view| &view.account);
+            let relogin = password.is_some()
+                || stored.is_none_or(|stored| {
+                    (&stored.username, &stored.imap_host, stored.imap_port, stored.imap_security, &stored.smtp_host, stored.smtp_port, stored.smtp_security)
+                        != (&account.username, &account.imap_host, account.imap_port, account.imap_security, &account.smtp_host, account.smtp_port, account.smtp_security)
+                });
+            match backend.save_account(account, password.as_ref().map(|password| password.0.as_str())) {
+                Ok(()) if relogin => {
+                    let checked = backend.test_connection(&account.id);
+                    app.replace_snapshot(backend.load());
+                    end_editing(app);
+                    match checked {
+                        Ok(()) => app.succeeded("Saved. The connection works."),
+                        Err(reason) => app.failed("Saved, but the connection does not work.", reason),
+                    }
+                    return;
+                }
+                Ok(()) => Ok("Saved."),
+                Err(error) => Err(error),
+            }
+        }
+        Request::LoadMailboxes(id) => {
+            match backend.list_mailboxes(id) {
+                Ok(folders) => app.mailboxes_loaded(folders),
+                Err(reason) => app.failed("Could not load folders. Check the connection and try again.", reason),
+            }
+            return;
+        }
         Request::Connect(id) => backend.connect(id).map(|()| "Connected. Restart the assistant to load it."),
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
@@ -80,9 +110,8 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
     match outcome {
         Ok(text) => {
             // What is stored now is what the draft said; editing is over.
-            if matches!(request, Request::SetAccess(..)) {
-                app.access_draft = None;
-                app.focus = app::Focus::List;
+            if matches!(request, Request::SetAccess(..) | Request::SaveAccount(..)) {
+                end_editing(app);
             }
             app.succeeded(text);
         }
@@ -103,4 +132,11 @@ fn snippet(backend: &Backend, app: &App, client_id: &str) -> Result<String, Stri
     let format = torromail_control::clients::descriptor(client_id).ok_or("unknown client")?.snippet_format;
     let command = app.snapshot.server_binary.as_ref().map_or_else(|| "torromail-mcp".to_owned(), |path| path.display().to_string());
     Ok(torromail_control::clients::config_snippet(&command, format, &token))
+}
+
+fn end_editing(app: &mut App) {
+    app.access_draft = None;
+    app.draft = None;
+    app.extras = app::EditExtras::default();
+    app.focus = app::Focus::List;
 }

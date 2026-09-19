@@ -206,7 +206,11 @@ pub struct Backend {
     /// How an address outside the provider table is looked up. The real one
     /// asks DNS and HTTPS under a budget of a few seconds.
     pub discoverer: Box<Discover>,
+    /// How an account's folders are listed: a real login through the server.
+    pub mailbox_lister: Box<ListMailboxes>,
 }
+
+pub type ListMailboxes = dyn Fn(&Path, &Path, &str, &str) -> Result<Vec<String>, String>;
 
 pub type Discover = dyn Fn(&str) -> Option<torromail_control::providers::DiscoveredConfig>;
 
@@ -218,10 +222,38 @@ impl Backend {
         load(&self.data_directory, self.environment.as_ref())
     }
 
-    /// Saves one edited account: state and policy document, together.
-    pub fn save_account(&self, account: &MailAccount) -> Result<(), String> {
+    /// Saves one edited account: state and policy document, together. A new
+    /// password goes into the secret store first — a saved account whose
+    /// password did not make it would be worse than no save at all.
+    pub fn save_account(&self, account: &MailAccount, password: Option<&str>) -> Result<(), String> {
+        if let Some(password) = password {
+            self.secrets
+                .set(torromail_control::secrets::SERVICE, &account.id, password)
+                .map_err(|error| error.to_string())?;
+        }
         torromail_control::save::save_account(&self.data_directory, account, &torromail_control::save::default_context())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // A lowered cache level or read right leaves mail on disk nobody may
+        // read any more; the server's trim drops it. Local and quick, and a
+        // failure here must not undo a save that already happened.
+        if let Some(binary) = self.environment.as_ref().and_then(server_binary) {
+            let _ = std::process::Command::new(binary)
+                .args(["--trim-cache", &account.id])
+                .env("TORROMAIL_POLICY_PATH", self.data_directory.join(paths::POLICY_FILE))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        Ok(())
+    }
+
+    /// The account's folders as the server names them, for the folder rules
+    /// and the special-folder pickers.
+    pub fn list_mailboxes(&self, account_id: &str) -> Result<Vec<String>, String> {
+        let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
+        let token = torromail_control::enroll::app_token(self.secrets.as_ref())?;
+        (self.mailbox_lister)(&binary, &self.data_directory.join(paths::POLICY_FILE), &token, account_id)
     }
 
     /// Checks the candidate against the real server and stores it if it
@@ -371,4 +403,21 @@ pub fn check_account(binary: &Path, policy: &Path, token: &str, account_id: &str
     let word = lines.next().unwrap_or_default();
     let reason = lines.collect::<Vec<_>>().join(" ").trim().to_owned();
     if word == "rejected" { CheckOutcome::Rejected(reason) } else { CheckOutcome::Unreachable(reason) }
+}
+
+/// `torromail-mcp --list-account-mailboxes`: a JSON array of wire names on
+/// stdout, or the reason on stderr.
+pub fn list_account_mailboxes(binary: &Path, policy: &Path, token: &str, account_id: &str) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new(binary)
+        .args(["--list-account-mailboxes", account_id])
+        .env("TORROMAIL_POLICY_PATH", policy)
+        .env("TORROMAIL_TOKEN", token)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("torromail-mcp could not be started: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    torromail_control::logs::parse_string_array(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| "invalid folder list from the server".to_owned())
 }
