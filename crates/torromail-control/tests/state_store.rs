@@ -73,12 +73,14 @@ fn a_missing_file_is_an_empty_state() {
 fn settings_another_surface_wrote_survive_a_save() {
     let path = temp_path("settings");
     let store = JsonStateStore::new(&path);
-    let mut state = AppState::default();
-    state.settings = json!({ "launchAtLogin": true, "showDockIcon": false, "somethingNewer": [1, 2] });
-    state.accounts = contract_accounts()
-        .iter()
-        .map(|stored| MailAccount::from_json(stored).expect("reads"))
-        .collect();
+    let state = AppState {
+        settings: json!({ "launchAtLogin": true, "showDockIcon": false, "somethingNewer": [1, 2] }),
+        accounts: contract_accounts()
+            .iter()
+            .map(|stored| MailAccount::from_json(stored).expect("reads"))
+            .collect(),
+        ..AppState::default()
+    };
     store.save(&state).expect("the state saves");
 
     assert_eq!(store.load(), state);
@@ -109,4 +111,19 @@ fn the_saved_file_is_owner_only_and_leaves_no_temporary_behind() {
     assert_eq!(mode, 0o600);
     let siblings = std::fs::read_dir(path.parent().expect("a parent")).expect("listable").count();
     assert_eq!(siblings, 1, "only state.json remains");
+}
+
+#[test]
+fn a_preset_is_recognised_from_the_values_and_lost_when_one_switch_moves() {
+    use torromail_control::{PermissionPreset, PermissionSet};
+    let mut permissions = PermissionSet::default();
+    assert_eq!(permissions.matching_preset(), Some(PermissionPreset::ReadAndDrafts));
+    for preset in PermissionPreset::ALL {
+        permissions.read = preset.read();
+        permissions.write = preset.write();
+        permissions.send = preset.send();
+        assert_eq!(permissions.matching_preset(), Some(preset));
+    }
+    permissions.write.permanent_delete = true;
+    assert_eq!(permissions.matching_preset(), None, "permanent delete is never part of a preset");
 }

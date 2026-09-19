@@ -25,7 +25,8 @@ fn the_shared_discovery_cases_resolve_as_written() {
     let bless = std::env::var_os("TORROMAIL_BLESS").is_some();
     let config = |found: Option<providers::DiscoveredConfig>| found.map_or(Value::Null, |found| found.to_json());
 
-    let sections: [(&str, &dyn Fn(&Value) -> Value); 7] = [
+    type Resolve<'a> = &'a dyn Fn(&Value) -> Value;
+    let sections: [(&str, Resolve<'_>); 7] = [
         ("domains", &|case| config(providers::lookup(case["input"].as_str().expect("input")))),
         ("mx", &|case| config(providers::from_mx_host(case["input"].as_str().expect("input")))),
         ("spf", &|case| config(providers::from_spf(case["input"].as_str().expect("input")))),

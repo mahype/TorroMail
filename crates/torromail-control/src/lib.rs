@@ -18,7 +18,7 @@ pub mod state;
 
 pub use account::{
     CacheLevel, ConnectionSecurity, FolderRule, LoginMethod, MailAccount, OAuthIssuer,
-    PermissionSet, ReadAccess, SpecialMailboxes, WriteAccess,
+    PermissionPreset, PermissionSet, ReadAccess, SpecialMailboxes, WriteAccess,
 };
 pub use policy::{ClientAccountAccess, ClientPairing, PolicyContext};
 pub use state::{AppState, JsonStateStore, StateStore};
