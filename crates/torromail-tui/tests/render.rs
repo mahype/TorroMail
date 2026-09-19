@@ -487,7 +487,7 @@ fn c_connects_an_assistant_and_the_key_stays_off_the_screen() {
     let screen = render_at(&app, 112, 48);
     assert_shows(
         &screen,
-        &["Verbunden. Starte den Assistenten neu", "Eingerichtet", "Der Client hat seinen Zugangsschlüssel", "~/.cursor/mcp.json", "Kontozugriff", "(•) Alle Konten", "torro_cursor_••••••••••••"],
+        &["Verbunden. Starte den Assistenten neu", "Eingerichtet", "Der Client hat seinen Zugangsschlüssel", "mcp.json", "Kontozugriff", "(•) Alle Konten", "torro_cursor_••••••••••••"],
     );
     assert!(!screen.contains(&key[..24]), "the key is masked until asked for");
     assert!(scene.cursor_config().contains(&key), "Cursor's own config carries it");
@@ -980,6 +980,8 @@ fn the_language_changes_at_once_and_is_remembered() {
     assert_eq!(torromail_tui::settings::Settings::load(&scene.backend.data_directory).language, None, "and back to the system's");
 }
 
+// systemd is Linux's; elsewhere the setting says it is not available.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_background_check_installs_a_timer_and_removes_it_again() {
     use std::sync::{Arc, Mutex};

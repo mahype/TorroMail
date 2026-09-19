@@ -114,19 +114,8 @@ fn store(service: &str, account: &str, secret: &str) -> CoreResult<()> {
 /// login, and says nothing about the account: that stays `ProviderFailure`,
 /// which the health log grants its three strikes.
 #[cfg(not(target_os = "macos"))]
-fn secret_store() -> torromail_control::secrets::SecretToolStore {
-    // The override exists for tests and for installations that keep
-    // `secret-tool` off the PATH a client spawns the server with.
-    match std::env::var_os("TORROMAIL_SECRET_TOOL") {
-        Some(program) => torromail_control::secrets::SecretToolStore::with_program(program),
-        None => torromail_control::secrets::SecretToolStore::default(),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
 fn lookup(service: &str, account: &str) -> CoreResult<String> {
-    use torromail_control::secrets::SecretStore;
-    match secret_store().get(service, account) {
+    match torromail_control::secrets::platform_store().get(service, account) {
         Ok(Some(secret)) => Ok(secret),
         Ok(None) => Err(unreadable_secret("nothing is stored for this account")),
         Err(error) => Err(CoreError::ProviderFailure(error.to_string())),
@@ -135,8 +124,7 @@ fn lookup(service: &str, account: &str) -> CoreResult<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn store(service: &str, account: &str, secret: &str) -> CoreResult<()> {
-    use torromail_control::secrets::SecretStore;
-    secret_store()
+    torromail_control::secrets::platform_store()
         .set(service, account, secret)
         .map_err(|error| CoreError::ProviderFailure(format!("secret write failed: {error}")))
 }

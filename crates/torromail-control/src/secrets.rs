@@ -1,6 +1,7 @@
 //! Where passwords, token sets and client keys are kept. Never in a file of
-//! ours: on macOS the keychain holds them, elsewhere the desktop's Secret
-//! Service (gnome-keyring, KWallet). There is no plaintext fallback — a
+//! ours: on macOS the keychain holds them, on Windows the Credential Manager,
+//! elsewhere the desktop's Secret Service (gnome-keyring, KWallet). There is
+//! no plaintext fallback — a
 //! machine without a secret service cannot hold an account, and saying so is
 //! better than pretending.
 //!
@@ -127,6 +128,73 @@ impl SecretStore for SecretToolStore {
     fn delete(&self, service: &str, account: &str) -> Result<(), SecretError> {
         let output = self.run(&["clear", "service", service, "account", account], None)?;
         if output.status.success() || output.stderr.is_empty() { Ok(()) } else { Err(Self::failure(&output)) }
+    }
+}
+
+/// The Windows Credential Manager: generic credentials of the signed-in user,
+/// encrypted with their logon. One limit is Windows' own — a credential holds
+/// at most 2560 bytes, which a password never reaches.
+#[cfg(windows)]
+#[derive(Debug, Clone, Default)]
+pub struct CredentialManagerStore;
+
+#[cfg(windows)]
+impl CredentialManagerStore {
+    fn entry(service: &str, account: &str) -> Result<keyring::Entry, SecretError> {
+        keyring::Entry::new(service, account).map_err(Self::error)
+    }
+
+    fn error(error: keyring::Error) -> SecretError {
+        match error {
+            keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_) => {
+                SecretError::Unavailable(error.to_string())
+            }
+            other => SecretError::Failed(other.to_string()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl SecretStore for CredentialManagerStore {
+    fn get(&self, service: &str, account: &str) -> Result<Option<String>, SecretError> {
+        match Self::entry(service, account)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(Self::error(error)),
+        }
+    }
+
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), SecretError> {
+        Self::entry(service, account)?.set_password(secret).map_err(Self::error)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), SecretError> {
+        match Self::entry(service, account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(Self::error(error)),
+        }
+    }
+}
+
+/// The store this platform keeps secrets in: the Credential Manager on
+/// Windows, the Secret Service everywhere else this is called. (On macOS the
+/// app and the server talk to the keychain themselves.)
+///
+/// `TORROMAIL_SECRET_TOOL` names another `secret-tool` — for tests, and for
+/// installations that keep it off the `PATH` an assistant starts the server
+/// with.
+#[must_use]
+pub fn platform_store() -> Box<dyn SecretStore> {
+    #[cfg(windows)]
+    {
+        Box::new(CredentialManagerStore)
+    }
+    #[cfg(not(windows))]
+    {
+        match std::env::var_os("TORROMAIL_SECRET_TOOL") {
+            Some(program) => Box::new(SecretToolStore::with_program(program)),
+            None => Box::new(SecretToolStore::default()),
+        }
     }
 }
 

@@ -53,6 +53,20 @@ fn each_client_keeps_its_latest_handshake() {
 }
 
 #[test]
+fn the_data_directory_on_windows_is_the_local_profile() {
+    let profile = PathBuf::from("C:\\Users\\sven");
+    assert_eq!(
+        paths::data_directory(Platform::Windows, Some(profile.clone().into_os_string()), None),
+        Some(profile.join("AppData/Local/TorroMail")),
+        "the local half: the mail cache lives here and must not roam"
+    );
+    assert_eq!(paths::data_directory(Platform::Windows, None, None), None, "no profile, no invented location");
+    assert_eq!(paths::program_name("torromail-mcp"), format!("torromail-mcp{}", std::env::consts::EXE_SUFFIX));
+}
+
+// `/data/state` is an absolute path only where paths start with a slash.
+#[cfg(unix)]
+#[test]
 fn the_data_directory_follows_the_platform() {
     let home = || Some(OsString::from("/home/sven"));
     assert_eq!(
