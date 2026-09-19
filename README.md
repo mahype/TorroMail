@@ -51,7 +51,10 @@ swift run --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.bui
 swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
 ```
 
-To try the terminal surface: `cargo run -p torromail-tui`. It reads the shared data directory —
+On Linux, `scripts/install-linux.sh` builds a release and installs `torromail` and
+`torromail-mcp` into `~/.local/bin` (no root; `--uninstall` removes them again).
+
+To try the terminal surface from a checkout: `cargo run -p torromail-tui`. It reads the shared data directory —
 `~/Library/Application Support/TorroMail` on macOS, `$XDG_STATE_HOME/torromail`
 (default `~/.local/state/torromail`) elsewhere, and keeps secrets in the desktop's Secret
 Service (`secret-tool` from libsecret must be installed). Keys: `1`–`7` sections, arrows to
