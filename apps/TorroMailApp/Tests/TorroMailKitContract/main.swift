@@ -1510,4 +1510,73 @@ do {
     require(false, "account access persistence: \(error)")
 }
 
+// MARK: - The policy document, shared with Rust
+
+// `contracts/policy-document.json` holds accounts in the shape `state.json`
+// stores them, clients, and the document both must publish. The Rust writer
+// (crates/torromail-control) runs the same file, so this `PolicyDocument` and
+// that one cannot come to disagree without one of the two suites going red.
+//
+// apps/TorroMailApp/Tests/TorroMailKitContract/main.swift → the repository
+// root is five levels up.
+let policyCasesURL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("contracts/policy-document.json")
+// The file names the OAuth client ids by placeholder, because they belong to
+// the build: swap in the ones this build carries before reading a single case.
+let policyCasesText = ((try? String(contentsOf: policyCasesURL, encoding: .utf8)) ?? "")
+    .replacingOccurrences(of: "$GOOGLE_CLIENT_ID", with: OAuthIssuer.google.clientID)
+    .replacingOccurrences(of: "$MICROSOFT_CLIENT_ID", with: OAuthIssuer.microsoft.clientID)
+let policyCasesFile = (try? JSONSerialization.jsonObject(with: Data(policyCasesText.utf8))) as? [String: Any]
+require(policyCasesFile != nil, "the shared policy cases are readable at \(policyCasesURL.path)")
+require(
+    policyCasesFile?["secret_ref_prefix"] as? String == KeychainStore.secretReference(forAccount: ""),
+    "the shared cases and the app agree on where secrets are referenced"
+)
+let policyCases = policyCasesFile?["cases"] as? [[String: Any]] ?? []
+require(!policyCases.isEmpty, "the shared policy cases are not empty")
+for policyCase in policyCases {
+    let caseName = policyCase["name"] as? String ?? "unnamed"
+    do {
+        let accountsData = try JSONSerialization.data(withJSONObject: policyCase["accounts"] ?? [])
+        let caseAccounts = try JSONDecoder().decode([MailAccount].self, from: accountsData)
+        let casePairings = try (policyCase["clients"] as? [[String: Any]] ?? []).map { client in
+            MCPClientKeyStore.Pairing(
+                clientID: client["id"] as? String ?? "",
+                name: client["name"] as? String ?? "",
+                tokenSHA256: client["token_sha256"] as? String ?? "",
+                accountAccess: try JSONDecoder().decode(
+                    ClientAccountAccess.self,
+                    from: JSONSerialization.data(withJSONObject: client["account_access"] ?? [:])
+                )
+            )
+        }
+        let published = try JSONSerialization.jsonObject(
+            with: PolicyDocument.data(for: caseAccounts, clients: casePairings)
+        ) as? NSDictionary
+        let expected = policyCase["expected"] as? NSDictionary
+        if published != expected {
+            // Both documents, so a red CI run says what differs without anyone
+            // needing a Mac to find out.
+            let shown = (try? JSONSerialization.data(
+                withJSONObject: published ?? [:],
+                options: [.sortedKeys, .prettyPrinted]
+            )).flatMap { String(data: $0, encoding: .utf8) } ?? "unprintable"
+            FileHandle.standardError.write(Data("Swift published for “\(caseName)”:\n\(shown)\n".utf8))
+        }
+        require(published == expected, "shared policy case: \(caseName)")
+
+        // The same accounts must survive this app's own save and load, or the
+        // two surfaces could not share a state file.
+        let reread = try JSONDecoder().decode([MailAccount].self, from: JSONEncoder().encode(caseAccounts))
+        require(reread == caseAccounts, "shared policy case round-trips through state.json: \(caseName)")
+    } catch {
+        require(false, "shared policy case “\(caseName)” could not be read: \(error)")
+    }
+}
+
 print("TorroMailKit control-surface contract passed")

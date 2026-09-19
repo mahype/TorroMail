@@ -423,6 +423,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "torromail-control"
+version = "0.9.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "torromail-core"
 version = "0.9.0"
 
@@ -443,6 +450,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "torromail-cache",
+ "torromail-control",
  "torromail-core",
  "torromail-imap-tls",
  "torromail-oauth",
