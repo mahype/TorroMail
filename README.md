@@ -54,6 +54,10 @@ swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.b
 On Linux, `scripts/install-linux.sh` builds a release and installs `torromail` and
 `torromail-mcp` into `~/.local/bin` (no root; `--uninstall` removes them again).
 
+On Windows (experimental) the same two programs keep their data in
+`%LOCALAPPDATA%\TorroMail` and passwords in the Credential Manager; the background check is
+not available there yet.
+
 Prebuilt Linux programs are part of every release: tarballs for x86_64 and aarch64 and the
 `torromail-bin` AUR package ([packaging/aur](packaging/aur/torromail-bin/PKGBUILD)), which
 the release builds and installs in a clean Arch container before anything is published.

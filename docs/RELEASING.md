@@ -68,7 +68,13 @@ halves side by side.
    clean Arch container. `PKGBUILD` and `.SRCINFO` become
    `torromail-bin-aur.tar.gz`; its contents are what is pushed to the AUR.
 
-**Publish**, only once both halves succeeded: the release is created as a
+**Windows** (`windows-latest` runner): builds `torromail.exe` and
+`torromail-mcp.exe` for `x86_64` and packs them into a zip. The programs are
+not code-signed, so SmartScreen warns on first start; the platform counts as
+experimental until it has been used on a real machine — CI builds it and runs
+the test suite there, no more.
+
+**Publish**, only once every part succeeded: the release is created as a
 **draft** with every file attached, and then published. Installed Mac apps poll
 `releases/latest/download/appcast.xml`, and a draft is nobody's "latest" — so
 the feed, the file it advertises and the Linux downloads become visible
