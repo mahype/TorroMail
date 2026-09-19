@@ -139,6 +139,10 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .to_owned(),
         ));
         if client.is_paired() || client.configured {
+            lines.push(match app.snapshot.server_tools {
+                Some(count) => tick(true, format!("{} — {count} {}", lang.t("TorroMail server answers"), lang.t("tools"))),
+                None => tick(false, lang.t("TorroMail server did not answer").to_owned()),
+            });
             lines.push(tick(
                 client.has_current_key,
                 lang.t(if client.has_current_key {

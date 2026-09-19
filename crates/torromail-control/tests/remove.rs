@@ -74,3 +74,23 @@ fn an_account_that_is_not_there_is_an_error_and_an_odd_id_never_leaves_the_direc
     assert!(directory.join("../outside.sqlite").exists(), "nothing outside the directory was touched");
     std::fs::remove_file(directory.join("../outside.sqlite")).ok();
 }
+
+#[test]
+fn the_footprint_counts_the_cache_its_wal_files_and_the_kept_attachments() {
+    use torromail_control::cache_files;
+    let directory = directory("footprint");
+    std::fs::create_dir_all(directory.join("cache")).expect("cache");
+    std::fs::create_dir_all(directory.join("attachments/ACC/m1")).expect("attachments");
+    std::fs::write(directory.join("cache/ACC.sqlite"), vec![0_u8; 1000]).expect("writable");
+    std::fs::write(directory.join("cache/ACC.sqlite-wal"), vec![0_u8; 200]).expect("writable");
+    std::fs::write(directory.join("cache/OTHER.sqlite"), vec![0_u8; 5000]).expect("writable");
+    std::fs::write(directory.join("attachments/ACC/m1/a.pdf"), vec![0_u8; 34]).expect("writable");
+
+    assert_eq!(cache_files::size_bytes(&directory, "ACC"), 1234);
+    assert_eq!(cache_files::size_bytes(&directory, "NOBODY"), 0);
+    assert_eq!(cache_files::size_bytes(&directory, "../cache"), 0, "an odd id measures nothing");
+    assert_eq!(
+        [0, 999, 1234, 3_400_000, 250_000_000, 7_300_000_000].map(cache_files::label),
+        ["0 B", "999 B", "1.2 KB", "3.4 MB", "250 MB", "7.3 GB"]
+    );
+}

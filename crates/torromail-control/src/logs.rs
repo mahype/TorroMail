@@ -101,3 +101,17 @@ pub fn parse_string_array(text: &str) -> Option<Vec<String>> {
         .map(|item| item.as_str().map(str::to_owned))
         .collect()
 }
+
+/// A flat JSON object as text-valued pairs — numbers and booleans in their
+/// JSON spelling. What a progress line is, and all a reader of one needs.
+#[must_use]
+pub fn parse_flat_object(text: &str) -> Option<HashMap<String, String>> {
+    Some(
+        serde_json::from_str::<Value>(text)
+            .ok()?
+            .as_object()?
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_str().map_or_else(|| value.to_string(), str::to_owned)))
+            .collect(),
+    )
+}

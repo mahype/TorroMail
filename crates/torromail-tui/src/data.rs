@@ -34,6 +34,8 @@ pub struct AccountView {
     pub health: AccountHealth,
     /// Unix seconds of the last check the log knows of.
     pub last_checked: Option<u64>,
+    /// What the account keeps on this machine: cache and retained attachments.
+    pub cache_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +83,9 @@ pub struct Snapshot {
     pub pairings_problem: Option<String>,
     /// For showing paths the way people write them.
     pub home: Option<PathBuf>,
+    /// How many tools the server binary offered when asked — the half of "is
+    /// it set up?" this surface can prove by itself. `None`: it did not answer.
+    pub server_tools: Option<usize>,
 }
 
 impl Snapshot {
@@ -139,7 +144,12 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
                 None if account.has_imap_connection() => AccountHealth::NeedsTest,
                 None => AccountHealth::NotConfigured,
             };
-            AccountView { last_checked: last_checked.get(&account.id).copied(), health, account }
+            AccountView {
+                last_checked: last_checked.get(&account.id).copied(),
+                cache_bytes: torromail_control::cache_files::size_bytes(data_directory, &account.id),
+                health,
+                account,
+            }
         })
         .collect();
 
@@ -179,6 +189,7 @@ pub fn load(data_directory: &Path, environment: Option<&Environment>) -> Snapsho
         taken_at: now(),
         pairings_problem,
         home: environment.map(|environment| environment.home.clone()),
+        server_tools: None,
     }
 }
 
@@ -208,7 +219,15 @@ pub struct Backend {
     pub discoverer: Box<Discover>,
     /// How an account's folders are listed: a real login through the server.
     pub mailbox_lister: Box<ListMailboxes>,
+    /// The command a cache rebuild runs: server binary, policy, key, account.
+    pub rebuild_command: Box<RebuildCommand>,
+    pub rebuild: std::cell::RefCell<Option<crate::rebuild::Rebuild>>,
+    /// Asked once: launching the server for every two-second reload would be
+    /// a process per frame for an answer that does not change.
+    pub tool_count: std::cell::OnceCell<Option<usize>>,
 }
+
+pub type RebuildCommand = dyn Fn(&Path, &Path, &str, &str) -> std::process::Command;
 
 pub type ListMailboxes = dyn Fn(&Path, &Path, &str, &str) -> Result<Vec<String>, String>;
 
@@ -219,7 +238,27 @@ pub type CheckAccount = dyn Fn(&Path, &Path, &str, &str) -> torromail_control::e
 impl Backend {
     #[must_use]
     pub fn load(&self) -> Snapshot {
-        load(&self.data_directory, self.environment.as_ref())
+        let mut snapshot = load(&self.data_directory, self.environment.as_ref());
+        snapshot.server_tools = *self.tool_count.get_or_init(|| snapshot.server_binary.as_deref().and_then(count_tools));
+        snapshot
+    }
+
+    pub fn start_rebuild(&self, account_id: &str) -> Result<(), String> {
+        let binary = self.environment.as_ref().and_then(server_binary).ok_or("torromail-mcp was not found")?;
+        let token = torromail_control::enroll::app_token(self.secrets.as_ref())?;
+        let command = (self.rebuild_command)(&binary, &self.data_directory.join(paths::POLICY_FILE), &token, account_id);
+        *self.rebuild.borrow_mut() = Some(crate::rebuild::Rebuild::start(account_id, command)?);
+        Ok(())
+    }
+
+    /// What the running rebuild has to report, if one is running.
+    pub fn poll_rebuild(&self) -> Option<crate::rebuild::Progress> {
+        let mut slot = self.rebuild.borrow_mut();
+        let progress = slot.as_mut()?.poll();
+        if slot.as_ref().is_some_and(crate::rebuild::Rebuild::is_finished) {
+            *slot = None;
+        }
+        progress
     }
 
     /// Saves one edited account: state and policy document, together. A new
@@ -420,4 +459,24 @@ pub fn list_account_mailboxes(binary: &Path, policy: &Path, token: &str, account
     }
     torromail_control::logs::parse_string_array(&String::from_utf8_lossy(&output.stdout))
         .ok_or_else(|| "invalid folder list from the server".to_owned())
+}
+
+/// `--rebuild-cache <id>` behind the same key and policy a connection check
+/// uses, because it logs into the real mailbox.
+#[must_use]
+pub fn rebuild_command(binary: &Path, policy: &Path, token: &str, account_id: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(binary);
+    command.args(["--rebuild-cache", account_id]).env("TORROMAIL_POLICY_PATH", policy).env("TORROMAIL_TOKEN", token);
+    command
+}
+
+/// `--list-tools` prints `{"tools":[…]}`; how many is proof the exact binary a
+/// client would spawn starts and speaks.
+fn count_tools(binary: &Path) -> Option<usize> {
+    let output = std::process::Command::new(binary).arg("--list-tools").stdin(std::process::Stdio::null()).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    document.get("tools")?.as_array().map(Vec::len)
 }
