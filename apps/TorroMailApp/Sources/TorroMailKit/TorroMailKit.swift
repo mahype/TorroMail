@@ -943,6 +943,26 @@ private final class LineBuffer: @unchecked Sendable {
     }
 }
 
+/// Drains a child process pipe while it is running. Waiting for process exit
+/// before reading can deadlock once a verbose CLI fills the kernel pipe buffer
+/// (`openclaw mcp doctor --probe --json` may print a large tool catalog).
+private final class ProcessOutputBuffer: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func string() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
 /// An assistant TorroMail can wire itself into. A client is defined by where
 /// it keeps its MCP servers, not by what it is called: Claude Desktop, Gemini
 /// CLI and Cursor all read a JSON file with a top-level `mcpServers` object,
@@ -970,6 +990,12 @@ public struct MCPClient: Identifiable, Hashable {
         /// so we register through its `claude mcp add -s user` CLI and only
         /// read the file to detect our server.
         case claudeCodeCLI(executableURL: URL, configURL: URL)
+        /// OpenClaw owns a JSON5 configuration and may redirect it through
+        /// `OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH`. Its CLI is therefore
+        /// the only safe writer: direct JSON serialization would discard JSON5
+        /// comments and can target the wrong profile. The executable is nil
+        /// when the desktop app is present but its managed CLI is not ready.
+        case openClawCLI(executableURL: URL?, settings: OpenClawSettings)
     }
 
     public let id: String
@@ -989,6 +1015,8 @@ public struct MCPClient: Identifiable, Hashable {
         case let .mcpServersJSON(url), let .serversJSON(url), let .openCodeJSON(url),
              let .codexCLI(_, url), let .claudeCodeCLI(_, url):
             return url
+        case let .openClawCLI(_, settings):
+            return settings.configURL()
         }
     }
 }
@@ -1001,7 +1029,7 @@ extension MCPClient.Setup {
         switch self {
         case .serversJSON: return "servers"
         case .openCodeJSON: return "mcp"
-        case .mcpServersJSON, .codexCLI, .claudeCodeCLI: return "mcpServers"
+        case .mcpServersJSON, .codexCLI, .claudeCodeCLI, .openClawCLI: return "mcpServers"
         }
     }
 
@@ -1013,6 +1041,66 @@ extension MCPClient.Setup {
     }
 }
 
+/// Optional overrides for an OpenClaw installation whose CLI or state lives
+/// outside the standard locations. Empty values mean "let OpenClaw decide".
+/// The app passes the two documented environment variables to every CLI call,
+/// so the command that writes the config and the command that verifies it see
+/// the same profile.
+public struct OpenClawSettings: Hashable, Codable, Sendable {
+    public var executablePath: String
+    public var stateDirectory: String
+    public var configPath: String
+
+    public init(
+        executablePath: String = "",
+        stateDirectory: String = "",
+        configPath: String = ""
+    ) {
+        self.executablePath = executablePath
+        self.stateDirectory = stateDirectory
+        self.configPath = configPath
+    }
+
+    public var hasOverrides: Bool {
+        !executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !stateDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public func environment() -> [String: String] {
+        var result: [String: String] = [:]
+        if let state = normalized(stateDirectory) {
+            result["OPENCLAW_STATE_DIR"] = state
+        }
+        if let config = normalized(configPath) {
+            result["OPENCLAW_CONFIG_PATH"] = config
+        }
+        return result
+    }
+
+    public func configURL(fileManager: FileManager = .default) -> URL {
+        if let config = normalized(configPath) {
+            return URL(fileURLWithPath: config)
+        }
+        if let state = normalized(stateDirectory) {
+            return URL(fileURLWithPath: state, isDirectory: true)
+                .appendingPathComponent("openclaw.json")
+        }
+        return fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".openclaw/openclaw.json")
+    }
+
+    public func executableURL() -> URL? {
+        normalized(executablePath).map { URL(fileURLWithPath: $0) }
+    }
+
+    private func normalized(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return NSString(string: trimmed).expandingTildeInPath
+    }
+}
+
 /// The clients TorroMail knows how to configure, and where each keeps its
 /// servers. Only what is installed is listed: TorroMail does not offer to
 /// set up an assistant that is not on this Mac.
@@ -1020,7 +1108,10 @@ public enum MCPClientRegistry {
     /// The name TorroMail registers itself under in every client.
     public static let serverName = "torromail"
 
-    public static func installed(fileManager: FileManager = .default) -> [MCPClient] {
+    public static func installed(
+        fileManager: FileManager = .default,
+        openClawSettings: OpenClawSettings = OpenClawSettings()
+    ) -> [MCPClient] {
         let home = fileManager.homeDirectoryForCurrentUser
         var clients: [MCPClient] = []
 
@@ -1159,7 +1250,74 @@ public enum MCPClientRegistry {
             ))
         }
 
+        let openClaw = resolveOpenClawExecutable(
+            settings: openClawSettings,
+            fileManager: fileManager
+        )
+        let openClawAppInstalled = [
+            URL(fileURLWithPath: "/Applications/OpenClaw.app", isDirectory: true),
+            home.appendingPathComponent("Applications/OpenClaw.app", isDirectory: true)
+        ].contains { fileManager.fileExists(atPath: $0.path) }
+        let openClawConfigExists = fileManager.fileExists(
+            atPath: openClawSettings.configURL(fileManager: fileManager).path
+        )
+        if openClaw != nil || openClawAppInstalled || openClawConfigExists
+            || openClawSettings.hasOverrides {
+            // Keep the historical internal id. Builds that showed "Clawbot"
+            // may already have a key and account grants under this id; changing
+            // it would silently revoke a working manual setup.
+            clients.append(MCPClient(
+                id: "clawbot",
+                displayName: "OpenClaw",
+                setup: .openClawCLI(
+                    executableURL: openClaw,
+                    settings: openClawSettings
+                )
+            ))
+        }
+
         return clients
+    }
+
+    /// Find and verify the OpenClaw CLI without relying on the GUI app's PATH.
+    /// The desktop app installs a managed launcher below `~/.openclaw`; the
+    /// remaining candidates cover the supported package-manager installs.
+    public static func resolveOpenClawExecutable(
+        settings: OpenClawSettings = OpenClawSettings(),
+        fileManager: FileManager = .default
+    ) -> URL? {
+        let home = fileManager.homeDirectoryForCurrentUser
+        var candidates: [String] = []
+        if let explicit = settings.executableURL()?.path {
+            candidates.append(explicit)
+        }
+        candidates.append(contentsOf: [
+            home.appendingPathComponent(".openclaw/bin/openclaw").path,
+            "/opt/homebrew/bin/openclaw",
+            "/usr/local/bin/openclaw",
+            home.appendingPathComponent(".local/bin/openclaw").path,
+            home.appendingPathComponent(".npm-global/bin/openclaw").path,
+            home.appendingPathComponent(".bun/bin/openclaw").path,
+            home.appendingPathComponent("Library/pnpm/openclaw").path
+        ])
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map {
+                URL(fileURLWithPath: String($0), isDirectory: true)
+                    .appendingPathComponent("openclaw").path
+            })
+        }
+
+        for path in candidates where fileManager.isExecutableFile(atPath: path) {
+            let url = URL(fileURLWithPath: path)
+            if MCPClientSetup.commandSucceeds(
+                executableURL: url,
+                arguments: ["--version"],
+                environmentOverrides: settings.environment()
+            ) {
+                return url
+            }
+        }
+        return nil
     }
 
     /// First executable candidate that exists, or nil. Used for CLIs whose
@@ -1244,8 +1402,14 @@ public enum MCPClientSetup {
     /// carrying a working key. Read from their own configuration — the app
     /// does not guess, and does not pretend: an entry whose key would be
     /// refused is not "connected".
-    public static func configuredClientNames(fileManager: FileManager = .default) -> [String] {
-        MCPClientRegistry.installed(fileManager: fileManager)
+    public static func configuredClientNames(
+        fileManager: FileManager = .default,
+        openClawSettings: OpenClawSettings = OpenClawSettings()
+    ) -> [String] {
+        MCPClientRegistry.installed(
+            fileManager: fileManager,
+            openClawSettings: openClawSettings
+        )
             .filter { isConfigured($0) && hasCurrentKey($0) }
             .map(\.displayName)
     }
@@ -1263,6 +1427,19 @@ public enum MCPClientSetup {
                 return false
             }
             return text.contains("[mcp_servers.\(MCPClientRegistry.serverName)]")
+        case let .openClawCLI(executableURL, settings):
+            guard let executableURL,
+                  let result = try? runCLI(
+                    executableURL: executableURL,
+                    arguments: ["mcp", "status", "--json"],
+                    environmentOverrides: settings.environment()
+                  ),
+                  let data = result.standardOutput.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let servers = root["servers"] as? [[String: Any]] else {
+                return false
+            }
+            return servers.contains { $0["name"] as? String == MCPClientRegistry.serverName }
         }
     }
 
@@ -1301,6 +1478,18 @@ public enum MCPClientSetup {
                 return false
             }
             return text.contains(token)
+        case let .openClawCLI(_, settings):
+            // OpenClaw intentionally masks credential-looking values in its
+            // CLI output. Reading the owned config as text is enough here: the
+            // key is high-entropy, so exact containment is unambiguous and does
+            // not require parsing or rewriting the JSON5 document.
+            guard let text = try? String(
+                contentsOf: settings.configURL(),
+                encoding: .utf8
+            ) else {
+                return false
+            }
+            return text.contains(token)
         }
     }
 
@@ -1322,7 +1511,8 @@ public enum MCPClientSetup {
     @discardableResult
     public static func refreshManagedKeys(
         executableName: String,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        openClawSettings: OpenClawSettings = OpenClawSettings()
     ) -> Bool {
         guard let commandPath = serverCommandPath(executableName: executableName) else {
             return false
@@ -1332,7 +1522,8 @@ public enum MCPClientSetup {
             guard
                 let client = MCPClientRegistry.installedClient(
                     id: descriptor.id,
-                    fileManager: fileManager
+                    fileManager: fileManager,
+                    openClawSettings: openClawSettings
                 ),
                 isConfigured(client),
                 !hasCurrentKey(client),
@@ -1460,6 +1651,23 @@ public enum MCPClientSetup {
                 environmentArguments: ["-e", "TORROMAIL_TOKEN=\(token)"],
                 commandPath: commandPath
             )
+        case let .openClawCLI(executableURL, settings):
+            guard let executableURL else {
+                throw Failure("OpenClaw is installed, but its setup tool was not found.")
+            }
+            let definition: [String: Any] = [
+                "command": commandPath,
+                "env": ["TORROMAIL_TOKEN": token]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: definition, options: [.sortedKeys])
+            guard let json = String(data: data, encoding: .utf8) else {
+                throw Failure("Could not build the OpenClaw configuration.")
+            }
+            try runCLI(
+                executableURL: executableURL,
+                arguments: ["mcp", "set", MCPClientRegistry.serverName, json],
+                environmentOverrides: settings.environment()
+            )
         }
     }
 
@@ -1532,22 +1740,72 @@ public enum MCPClientSetup {
         )
     }
 
-    private static func runCLI(executableURL: URL, arguments: [String]) throws {
+    private struct CLIResult {
+        var standardOutput: String
+        var standardError: String
+    }
+
+    @discardableResult
+    private static func runCLI(
+        executableURL: URL,
+        arguments: [String],
+        environmentOverrides: [String: String] = [:]
+    ) throws -> CLIResult {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        var environment = ProcessInfo.processInfo.environment
+        environmentOverrides.forEach { environment[$0.key] = $0.value }
+        process.environment = environment
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
 
         do {
             try process.run()
         } catch {
             throw Failure("The assistant's setup tool could not be started.")
         }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw Failure("The assistant's setup tool reported an error.")
+        let outputBuffer = ProcessOutputBuffer()
+        let errorBuffer = ProcessOutputBuffer()
+        let readers = DispatchGroup()
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputBuffer.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
         }
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errorBuffer.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        process.waitUntilExit()
+        readers.wait()
+        let output = outputBuffer.string()
+        let error = errorBuffer.string()
+        guard process.terminationStatus == 0 else {
+            let detail = error.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw Failure(detail.isEmpty
+                ? "The assistant's setup tool reported an error."
+                : detail)
+        }
+        return CLIResult(standardOutput: output, standardError: error)
+    }
+
+    /// A small capability probe used during client discovery. It deliberately
+    /// checks the executable rather than treating a directory or stale symlink
+    /// as an installed assistant.
+    public static func commandSucceeds(
+        executableURL: URL,
+        arguments: [String],
+        environmentOverrides: [String: String] = [:]
+    ) -> Bool {
+        (try? runCLI(
+            executableURL: executableURL,
+            arguments: arguments,
+            environmentOverrides: environmentOverrides
+        )) != nil
     }
 }
 
@@ -1689,12 +1947,11 @@ extension MCPClientRegistry {
         ),
         MCPClientDescriptor(
             id: "clawbot",
-            displayName: "Clawbot",
+            displayName: "OpenClaw",
             symbol: "pawprint",
-            kind: .manual,
             snippetFormat: .openClawJSON,
             manualConfigPath: "~/.openclaw/openclaw.json",
-            verificationHintKey: "Add the snippet below under “mcp.servers” in Clawbot’s config (or run “openclaw mcp add”), then restart it and ask it to list your mail accounts."
+            verificationHintKey: "Run “openclaw mcp doctor torromail --probe” to verify the connection, then start a new OpenClaw session and ask it to list your mail accounts."
         ),
         MCPClientDescriptor(
             id: "hermes",
@@ -1720,8 +1977,15 @@ extension MCPClientRegistry {
 
     /// The installed, path-resolved client for a catalog id, or nil when the
     /// assistant is not on this Mac.
-    public static func installedClient(id: String, fileManager: FileManager = .default) -> MCPClient? {
-        installed(fileManager: fileManager).first { $0.id == id }
+    public static func installedClient(
+        id: String,
+        fileManager: FileManager = .default,
+        openClawSettings: OpenClawSettings = OpenClawSettings()
+    ) -> MCPClient? {
+        installed(
+            fileManager: fileManager,
+            openClawSettings: openClawSettings
+        ).first { $0.id == id }
     }
 }
 
@@ -1730,6 +1994,12 @@ extension MCPClientRegistry {
 /// server binary actually answers. The first two are cheap file facts; the
 /// third is a real launch of the bundled server.
 public struct MCPClientSetupStatus: Hashable, Sendable {
+    public enum SetupAvailability: Hashable, Sendable {
+        case ready
+        case setupToolMissing
+        case mcpUnavailable
+    }
+
     public enum Server: Hashable, Sendable {
         case unknown
         case responds(toolCount: Int)
@@ -1737,6 +2007,7 @@ public struct MCPClientSetupStatus: Hashable, Sendable {
     }
 
     public var isInstalled: Bool
+    public var setupAvailability: SetupAvailability
     public var isConfigured: Bool
     /// Whether the config carries the client's current access key. A client
     /// that is configured without one points at the server but will be
@@ -1746,11 +2017,13 @@ public struct MCPClientSetupStatus: Hashable, Sendable {
 
     public init(
         isInstalled: Bool,
+        setupAvailability: SetupAvailability = .ready,
         isConfigured: Bool,
         hasCurrentKey: Bool = false,
         server: Server = .unknown
     ) {
         self.isInstalled = isInstalled
+        self.setupAvailability = setupAvailability
         self.isConfigured = isConfigured
         self.hasCurrentKey = hasCurrentKey
         self.server = server
@@ -1812,10 +2085,35 @@ extension MCPClientSetup {
         for descriptor: MCPClientDescriptor,
         executableName: String,
         runServerTest: Bool = true,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        openClawSettings: OpenClawSettings = OpenClawSettings()
     ) -> MCPClientSetupStatus {
-        guard let client = MCPClientRegistry.installedClient(id: descriptor.id, fileManager: fileManager) else {
+        guard let client = MCPClientRegistry.installedClient(
+            id: descriptor.id,
+            fileManager: fileManager,
+            openClawSettings: openClawSettings
+        ) else {
             return MCPClientSetupStatus(isInstalled: false, isConfigured: false)
+        }
+        if case let .openClawCLI(executableURL, settings) = client.setup {
+            guard let executableURL else {
+                return MCPClientSetupStatus(
+                    isInstalled: true,
+                    setupAvailability: .setupToolMissing,
+                    isConfigured: false
+                )
+            }
+            guard commandSucceeds(
+                executableURL: executableURL,
+                arguments: ["mcp", "status", "--json"],
+                environmentOverrides: settings.environment()
+            ) else {
+                return MCPClientSetupStatus(
+                    isInstalled: true,
+                    setupAvailability: .mcpUnavailable,
+                    isConfigured: false
+                )
+            }
         }
         let configured = isConfigured(client)
         let keyed = configured && hasCurrentKey(client)
@@ -1825,6 +2123,36 @@ extension MCPClientSetup {
                 isConfigured: configured,
                 hasCurrentKey: keyed
             )
+        }
+        if case let .openClawCLI(executableURL, settings) = client.setup,
+           let executableURL {
+            do {
+                // Unlike the local self-test below, this traverses OpenClaw's
+                // actual stdio launcher and makes it perform the MCP handshake.
+                // A paired handshake also lands in TorroMail's connection log.
+                try runCLI(
+                    executableURL: executableURL,
+                    arguments: [
+                        "mcp", "doctor", MCPClientRegistry.serverName,
+                        "--probe", "--json"
+                    ],
+                    environmentOverrides: settings.environment()
+                )
+            } catch let failure as Failure {
+                return MCPClientSetupStatus(
+                    isInstalled: true,
+                    isConfigured: true,
+                    hasCurrentKey: keyed,
+                    server: .failed(failure.reason)
+                )
+            } catch {
+                return MCPClientSetupStatus(
+                    isInstalled: true,
+                    isConfigured: true,
+                    hasCurrentKey: keyed,
+                    server: .failed(error.localizedDescription)
+                )
+            }
         }
         let server = MCPServerSelfTest.run(executableName: executableName)
         return MCPClientSetupStatus(
@@ -1853,6 +2181,15 @@ extension MCPClientSetup {
             try removeViaCLI(executableURL: executableURL, extraArguments: [])
         case let .claudeCodeCLI(executableURL, _):
             try removeViaCLI(executableURL: executableURL, extraArguments: ["-s", "user"])
+        case let .openClawCLI(executableURL, settings):
+            guard let executableURL else {
+                throw Failure("OpenClaw is installed, but its setup tool was not found.")
+            }
+            try runCLI(
+                executableURL: executableURL,
+                arguments: ["mcp", "unset", MCPClientRegistry.serverName],
+                environmentOverrides: settings.environment()
+            )
         }
     }
 
@@ -2893,16 +3230,36 @@ public struct GeneralSettings: Hashable, Codable {
     /// UI — diagnostics belong in the log.
     public var mcpExecutable: String
 
+    /// Empty by default. Set only when OpenClaw lives outside the locations its
+    /// own macOS app and supported installers use.
+    public var openClaw: OpenClawSettings
+
     public init(
         launchAtLogin: Bool = true,
         showDockIcon: Bool = true,
         showMenuBarIcon: Bool = false,
-        mcpExecutable: String = "torromail-mcp"
+        mcpExecutable: String = "torromail-mcp",
+        openClaw: OpenClawSettings = OpenClawSettings()
     ) {
         self.launchAtLogin = launchAtLogin
         self.showDockIcon = showDockIcon
         self.showMenuBarIcon = showMenuBarIcon
         self.mcpExecutable = mcpExecutable
+        self.openClaw = openClaw
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case launchAtLogin, showDockIcon, showMenuBarIcon, mcpExecutable, openClaw
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        launchAtLogin = try values.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? true
+        showDockIcon = try values.decodeIfPresent(Bool.self, forKey: .showDockIcon) ?? true
+        showMenuBarIcon = try values.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? false
+        mcpExecutable = try values.decodeIfPresent(String.self, forKey: .mcpExecutable) ?? "torromail-mcp"
+        openClaw = try values.decodeIfPresent(OpenClawSettings.self, forKey: .openClaw)
+            ?? OpenClawSettings()
     }
 }
 
@@ -3275,7 +3632,9 @@ extension TorroMailModel {
             // Empty until the first tool call — that is what the activity
             // card's empty state is for.
             audit: AuditLog.load(accountNames: accountNames(state.accounts)),
-            connectedClients: MCPClientSetup.configuredClientNames(),
+            connectedClients: MCPClientSetup.configuredClientNames(
+                openClawSettings: state.settings.openClaw
+            ),
             clientConnections: ClientConnectionLog.latestByClient(),
             news: releaseNotes()
         )
