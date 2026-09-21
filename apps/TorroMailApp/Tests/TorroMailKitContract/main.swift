@@ -666,7 +666,15 @@ require(
 // it, and runtime facts start fresh.
 let storedState = AppStateStore.State(
     accounts: model.accounts,
-    settings: GeneralSettings(launchAtLogin: false, showMenuBarIcon: true)
+    settings: GeneralSettings(
+        launchAtLogin: false,
+        showMenuBarIcon: true,
+        openClaw: OpenClawSettings(
+            executablePath: "/custom/openclaw",
+            stateDirectory: "/custom/state",
+            configPath: "/custom/openclaw.json"
+        )
+    )
 )
 let encodedState = (try? AppStateStore.encode(storedState)) ?? Data()
 let restored = try? AppStateStore.decode(encodedState)
@@ -681,6 +689,10 @@ require(
 require(
     restored?.settings.showMenuBarIcon == true && restored?.settings.launchAtLogin == false,
     "settings survive too"
+)
+require(
+    restored?.settings.openClaw.configPath == "/custom/openclaw.json",
+    "custom OpenClaw locations survive too"
 )
 require(
     restored?.accounts.first?.connectionState == .connected,
@@ -712,6 +724,10 @@ require(
 // than any wrong port. Built by stripping the keys from a real save, so it
 // stays honest as the rest of the schema moves.
 var legacyObject = ((try? JSONSerialization.jsonObject(with: encodedState)) as? [String: Any]) ?? [:]
+if var legacySettings = legacyObject["settings"] as? [String: Any] {
+    legacySettings["openClaw"] = nil
+    legacyObject["settings"] = legacySettings
+}
 legacyObject["accounts"] = (legacyObject["accounts"] as? [[String: Any]])?.map { account in
     var stripped = account
     stripped["imapPort"] = nil
@@ -725,6 +741,10 @@ let legacy = try? AppStateStore.decode(legacyState)
 require(
     legacy?.accounts.map(\.id) == ["work", "personal"],
     "accounts saved before ports existed still load"
+)
+require(
+    legacy?.settings.openClaw == OpenClawSettings(),
+    "settings saved before OpenClaw locations existed use automatic detection"
 )
 require(
     legacy?.accounts.allSatisfy { $0.imapPort == 993 && $0.smtpPort == 587 } == true,
@@ -855,6 +875,137 @@ require(
     ) == nil,
     "executable resolution returns nil when nothing is installed"
 )
+
+// OpenClaw is discovered independently from the GUI process PATH, verified by
+// actually running `--version`, and then configured through its own MCP CLI.
+let openClawDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-openclaw-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+try? FileManager.default.createDirectory(at: openClawDirectory, withIntermediateDirectories: true)
+let openClawExecutable = openClawDirectory.appendingPathComponent("openclaw")
+let openClawConfig = openClawDirectory.appendingPathComponent("custom-openclaw.json")
+let openClawCalls = openClawDirectory.appendingPathComponent("calls.log")
+let openClawScript = #"""
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "2026.9.5"
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "status" ]; then
+  if [ -f "$OPENCLAW_CONFIG_PATH" ]; then
+    echo '{"servers":[{"name":"torromail"}]}'
+  else
+    echo '{"servers":[]}'
+  fi
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "set" ]; then
+  printf '%s' "$4" > "$OPENCLAW_CONFIG_PATH"
+  printf 'set|%s|%s|%s\n' "$3" "$OPENCLAW_STATE_DIR" "$OPENCLAW_CONFIG_PATH" >> "$OPENCLAW_STATE_DIR/calls.log"
+  exit 0
+fi
+if [ "$1" = "mcp" ] && [ "$2" = "unset" ]; then
+  printf 'unset|%s|%s|%s\n' "$3" "$OPENCLAW_STATE_DIR" "$OPENCLAW_CONFIG_PATH" >> "$OPENCLAW_STATE_DIR/calls.log"
+  rm -f "$OPENCLAW_CONFIG_PATH"
+  exit 0
+fi
+exit 2
+"""#
+try? Data(openClawScript.utf8).write(to: openClawExecutable)
+try? FileManager.default.setAttributes(
+    [.posixPermissions: 0o755],
+    ofItemAtPath: openClawExecutable.path
+)
+let openClawSettings = OpenClawSettings(
+    executablePath: openClawExecutable.path,
+    stateDirectory: openClawDirectory.path,
+    configPath: openClawConfig.path
+)
+require(
+    MCPClientRegistry.resolveOpenClawExecutable(settings: openClawSettings)?.path
+        == openClawExecutable.path,
+    "OpenClaw detection verifies an explicit executable with --version"
+)
+let openClawClient = MCPClientRegistry.installedClient(
+    id: "clawbot",
+    openClawSettings: openClawSettings
+)
+require(openClawClient?.displayName == "OpenClaw", "the legacy client id is displayed as OpenClaw")
+if let openClawClient {
+    let before = MCPClientSetup.status(
+        for: MCPClientRegistry.descriptor(id: "clawbot")!,
+        executableName: "torromail-mcp",
+        runServerTest: false,
+        openClawSettings: openClawSettings
+    )
+    require(
+        before.isInstalled && before.setupAvailability == .ready && !before.isConfigured,
+        "a verified OpenClaw CLI with native MCP commands is installed but initially unconfigured"
+    )
+    try? MCPClientSetup.add(
+        to: openClawClient,
+        commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+        token: contractKey
+    )
+    require(MCPClientSetup.isConfigured(openClawClient), "OpenClaw is configured through mcp set")
+    require(
+        ((try? String(contentsOf: openClawConfig, encoding: .utf8)) ?? "").contains(contractKey),
+        "OpenClaw's configuration carries the supplied key"
+    )
+    let calls = (try? String(contentsOf: openClawCalls, encoding: .utf8)) ?? ""
+    require(
+        calls.contains("set|torromail|\(openClawDirectory.path)|\(openClawConfig.path)"),
+        "custom state and config paths are passed to OpenClaw's CLI"
+    )
+    try? MCPClientSetup.remove(from: openClawClient)
+    require(!MCPClientSetup.isConfigured(openClawClient), "OpenClaw is disconnected through mcp unset")
+} else {
+    require(false, "a verified OpenClaw CLI is returned as an installed client")
+}
+
+// An app/config without a usable CLI is still installed; the UI can now say
+// that its setup tool is missing instead of falsely saying OpenClaw is absent.
+let missingOpenClawConfig = openClawDirectory.appendingPathComponent("present-but-no-cli.json")
+try? Data("{}".utf8).write(to: missingOpenClawConfig)
+let missingOpenClawSettings = OpenClawSettings(
+    executablePath: openClawDirectory.appendingPathComponent("missing-openclaw").path,
+    configPath: missingOpenClawConfig.path
+)
+let missingCLIStatus = MCPClientSetup.status(
+    for: MCPClientRegistry.descriptor(id: "clawbot")!,
+    executableName: "torromail-mcp",
+    runServerTest: false,
+    openClawSettings: missingOpenClawSettings
+)
+require(
+    missingCLIStatus.isInstalled && missingCLIStatus.setupAvailability == .setupToolMissing,
+    "an OpenClaw config without a runnable CLI reports the setup tool as missing"
+)
+
+let oldOpenClawExecutable = openClawDirectory.appendingPathComponent("openclaw-without-mcp")
+let oldOpenClawScript = #"""
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "old"
+  exit 0
+fi
+exit 2
+"""#
+try? Data(oldOpenClawScript.utf8).write(to: oldOpenClawExecutable)
+try? FileManager.default.setAttributes(
+    [.posixPermissions: 0o755],
+    ofItemAtPath: oldOpenClawExecutable.path
+)
+let oldOpenClawStatus = MCPClientSetup.status(
+    for: MCPClientRegistry.descriptor(id: "clawbot")!,
+    executableName: "torromail-mcp",
+    runServerTest: false,
+    openClawSettings: OpenClawSettings(executablePath: oldOpenClawExecutable.path)
+)
+require(
+    oldOpenClawStatus.isInstalled && oldOpenClawStatus.setupAvailability == .mcpUnavailable,
+    "an installed OpenClaw CLI without native MCP commands reports MCP as unavailable"
+)
+try? FileManager.default.removeItem(at: openClawDirectory)
 
 // MCP executable resolution prefers the dev workspace before PATH.
 let locator = MCPExecutableLocator(

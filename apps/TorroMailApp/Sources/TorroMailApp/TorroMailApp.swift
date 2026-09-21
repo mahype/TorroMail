@@ -556,13 +556,17 @@ struct TorroMailApp: App {
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                     let executable = model.generalSettings.mcpExecutable
+                    let openClawSettings = model.generalSettings.openClaw
                     // Configs written before access keys existed get theirs
                     // now. Off the main actor — the CLI-owned ones are
                     // rewritten by their own tools, and that is a process
                     // launch. Republishing puts the healed pairings on the
                     // allowlist.
                     let healed = await Task.detached(priority: .utility) {
-                        MCPClientSetup.refreshManagedKeys(executableName: executable)
+                        MCPClientSetup.refreshManagedKeys(
+                            executableName: executable,
+                            openClawSettings: openClawSettings
+                        )
                     }.value
                     if healed {
                         publishPolicyDocument(for: model.accounts)

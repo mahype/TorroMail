@@ -59,18 +59,27 @@ struct MCPServerListView: View {
     }
 
     private func refresh() {
-        var next: [String: MCPClientSetupStatus] = [:]
-        for descriptor in MCPClientRegistry.catalog {
-            next[descriptor.id] = MCPClientSetup.status(
-                for: descriptor,
-                executableName: model.generalSettings.mcpExecutable,
-                runServerTest: false
-            )
+        let executable = model.generalSettings.mcpExecutable
+        let openClawSettings = model.generalSettings.openClaw
+        let catalog = MCPClientRegistry.catalog
+        Task {
+            let next = await Task.detached(priority: .utility) {
+                var result: [String: MCPClientSetupStatus] = [:]
+                for descriptor in catalog {
+                    result[descriptor.id] = MCPClientSetup.status(
+                        for: descriptor,
+                        executableName: executable,
+                        runServerTest: false,
+                        openClawSettings: openClawSettings
+                    )
+                }
+                return result
+            }.value
+            statuses = next
+            model.connectedClients = catalog
+                .filter { next[$0.id]?.hasCurrentKey == true }
+                .map(\.displayName)
         }
-        statuses = next
-        model.connectedClients = MCPClientRegistry.catalog
-            .filter { next[$0.id]?.hasCurrentKey == true }
-            .map(\.displayName)
     }
 }
 
@@ -203,6 +212,8 @@ private struct MCPClientRow: View {
     private var summary: String {
         if isManual { return L("Manual setup") }
         if !status.isInstalled { return L("Not found on this Mac") }
+        if status.setupAvailability == .setupToolMissing { return L("Setup tool not found") }
+        if status.setupAvailability == .mcpUnavailable { return L("MCP setup unavailable") }
         if status.isConfigured && !status.hasCurrentKey { return L("Access key missing") }
         return status.isConfigured ? L("Connected") : L("Not connected")
     }
@@ -211,6 +222,7 @@ private struct MCPClientRow: View {
     private var dotColor: Color? {
         if isManual { return nil }
         if !status.isInstalled { return .gray }
+        if status.setupAvailability != .ready { return .orange }
         return status.hasCurrentKey ? .green : .orange
     }
 }
@@ -257,6 +269,7 @@ struct MCPClientDetailView: View {
     /// what you paste.
     @State private var maskedSnippet: String?
     @State private var revealKey = false
+    @State private var showOpenClawLocation = false
     /// When this client's access key last changed in this sitting. The client
     /// carries the old one until it restarts, so this is what the restart
     /// notice is measured against — see `MCPClientKeyStore.restartPending`.
@@ -269,6 +282,9 @@ struct MCPClientDetailView: View {
             switch descriptor.kind {
             case .automatic:
                 connectionSection
+                if descriptor.id == "clawbot", showOpenClawLocation {
+                    openClawLocationSection
+                }
                 testSection
                 confirmSection
                 manualSection
@@ -282,6 +298,8 @@ struct MCPClientDetailView: View {
         .navigationTitle(L(descriptor.displayName))
         .onAppear {
             refresh(runServerTest: false)
+            showOpenClawLocation = model.generalSettings.openClaw.hasOverrides
+                || status.setupAvailability != .ready
             loadSnippet()
         }
     }
@@ -366,7 +384,7 @@ struct MCPClientDetailView: View {
             }
             .scaledPadding(.vertical, 2)
 
-            if status.isInstalled {
+            if status.isInstalled && status.setupAvailability == .ready {
                 HStack {
                     if status.isConfigured {
                         // The destructive role gives it its colour; the style
@@ -385,10 +403,25 @@ struct MCPClientDetailView: View {
                             .disabled(isBusy)
                     }
                 }
-            } else {
+            } else if !status.isInstalled {
                 Text(String(format: L("%@ is not installed on this Mac. Install it, or set it up by hand with the snippet below."), descriptor.displayName))
                     .scaledFont(.caption)
                     .foregroundStyle(.secondary)
+            } else if status.setupAvailability == .setupToolMissing {
+                Text(L("OpenClaw is installed, but its setup tool was not found."))
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(L("This OpenClaw installation does not provide the native MCP setup commands."))
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if descriptor.id == "clawbot", !showOpenClawLocation {
+                Button(L("Use another OpenClaw installation…")) {
+                    showOpenClawLocation = true
+                }
+                .torroButton()
             }
 
             if let note {
@@ -401,9 +434,49 @@ struct MCPClientDetailView: View {
         }
     }
 
+    private var openClawLocationSection: some View {
+        Section {
+            TextField(
+                L("OpenClaw executable"),
+                text: $model.generalSettings.openClaw.executablePath,
+                prompt: Text("~/.openclaw/bin/openclaw")
+            )
+            TextField(
+                "OPENCLAW_STATE_DIR",
+                text: $model.generalSettings.openClaw.stateDirectory,
+                prompt: Text("~/.openclaw")
+            )
+            TextField(
+                "OPENCLAW_CONFIG_PATH",
+                text: $model.generalSettings.openClaw.configPath,
+                prompt: Text("~/.openclaw/openclaw.json")
+            )
+            HStack {
+                if model.generalSettings.openClaw.hasOverrides {
+                    Button(L("Use automatic locations")) {
+                        model.generalSettings.openClaw = OpenClawSettings()
+                        refresh(runServerTest: false)
+                        loadSnippet()
+                    }
+                    .torroButton()
+                }
+                Spacer()
+                Button(L("Check location")) {
+                    refresh(runServerTest: false)
+                    loadSnippet()
+                }
+                .torroButton()
+            }
+        } header: {
+            Text(L("OpenClaw installation"))
+        } footer: {
+            Text(L("Leave fields empty for automatic detection. Custom state and config paths are passed to OpenClaw’s own setup commands."))
+        }
+    }
+
     @ViewBuilder
     private var testSection: some View {
-        if status.isInstalled {
+        if status.isInstalled && status.setupAvailability == .ready {
             Section {
                 // The headline: did this client actually reach the server? The
                 // one fact a config file cannot give — read live from the log
@@ -608,12 +681,15 @@ struct MCPClientDetailView: View {
 
     private var stateText: String {
         if !status.isInstalled { return L("Not found on this Mac") }
+        if status.setupAvailability == .setupToolMissing { return L("Setup tool not found") }
+        if status.setupAvailability == .mcpUnavailable { return L("MCP setup unavailable") }
         if status.isConfigured && !status.hasCurrentKey { return L("Access key missing") }
         return status.isConfigured ? L("Connected") : L("Not connected")
     }
 
     private var dotColor: Color {
         if !status.isInstalled { return .gray }
+        if status.setupAvailability != .ready { return .orange }
         return status.hasCurrentKey ? .green : .orange
     }
 
@@ -627,7 +703,10 @@ struct MCPClientDetailView: View {
     /// The config file to name in the manual section: an installed client's
     /// real path, or a manual client's documented one.
     private var configFilePath: String? {
-        if let client = MCPClientRegistry.installedClient(id: descriptor.id) {
+        if let client = MCPClientRegistry.installedClient(
+            id: descriptor.id,
+            openClawSettings: model.generalSettings.openClaw
+        ) {
             return prettyPath(client.configURL)
         }
         return descriptor.manualConfigPath
@@ -640,21 +719,43 @@ struct MCPClientDetailView: View {
     private func refresh(runServerTest: Bool) {
         let executable = model.generalSettings.mcpExecutable
         let descriptor = descriptor
+        let openClawSettings = model.generalSettings.openClaw
         // The watcher keeps this current within a couple of seconds; re-reading
         // here makes "Check again" — and returning to the screen — immediate.
         model.reloadClientConnections()
-        if !runServerTest {
-            status = MCPClientSetup.status(for: descriptor, executableName: executable, runServerTest: false)
+        if !runServerTest && descriptor.id != "clawbot" {
+            status = MCPClientSetup.status(
+                for: descriptor,
+                executableName: executable,
+                runServerTest: false,
+                openClawSettings: openClawSettings
+            )
             model.connectedClients = MCPClientRegistry.catalog
-                .filter { MCPClientSetup.status(for: $0, executableName: executable, runServerTest: false).hasCurrentKey }
+                .filter {
+                    MCPClientSetup.status(
+                        for: $0,
+                        executableName: executable,
+                        runServerTest: false,
+                        openClawSettings: openClawSettings
+                    ).hasCurrentKey
+                }
                 .map(\.displayName)
             return
         }
         isBusy = true
         Task.detached(priority: .userInitiated) {
-            let result = MCPClientSetup.status(for: descriptor, executableName: executable, runServerTest: true)
+            let result = MCPClientSetup.status(
+                for: descriptor,
+                executableName: executable,
+                runServerTest: runServerTest,
+                openClawSettings: openClawSettings
+            )
             await MainActor.run {
                 status = result
+                if descriptor.id == "clawbot", result.setupAvailability != .ready {
+                    showOpenClawLocation = true
+                }
+                model.reloadClientConnections()
                 isBusy = false
             }
         }
@@ -662,7 +763,10 @@ struct MCPClientDetailView: View {
 
     private func connect() {
         note = nil
-        guard let client = MCPClientRegistry.installedClient(id: descriptor.id) else { return }
+        guard let client = MCPClientRegistry.installedClient(
+            id: descriptor.id,
+            openClawSettings: model.generalSettings.openClaw
+        ) else { return }
         guard let commandPath = MCPClientSetup.serverCommandPath(
             executableName: model.generalSettings.mcpExecutable
         ) else {
@@ -692,13 +796,16 @@ struct MCPClientDetailView: View {
         } catch {
             note = L("Could not update the configuration.")
         }
-        refresh(runServerTest: false)
+        refresh(runServerTest: descriptor.id == "clawbot")
         loadSnippet()
     }
 
     private func disconnect() {
         note = nil
-        guard let client = MCPClientRegistry.installedClient(id: descriptor.id) else { return }
+        guard let client = MCPClientRegistry.installedClient(
+            id: descriptor.id,
+            openClawSettings: model.generalSettings.openClaw
+        ) else { return }
         do {
             try MCPClientSetup.remove(from: client)
             // Revoking, not just unlisting: any copy of the old config dies

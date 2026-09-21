@@ -76,6 +76,14 @@ over stdio and publish a stable, user-owned configuration file or CLI. TorroMail
 merges only its own entry into those configurations and never treats a file edit
 as proof of a connection.
 
+OpenClaw is configured through its native `openclaw mcp` registry rather than
+by rewriting `openclaw.json`, which is JSON5 and may live under a custom
+`OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH`. TorroMail distinguishes the
+desktop app being installed, its CLI being runnable, native MCP commands being
+available, the `torromail` definition being present, and a paired MCP handshake.
+`mcp doctor torromail --probe --json` supplies the live transport check; the
+server's connection log remains the proof that the configured key was accepted.
+
 The official Grok Bot desktop app is intentionally not listed as a TorroMail
 client. Grok Bot runs its tools on a persistent cloud computer and accepts
 custom MCP connectors by public HTTP URL; it does not load a local stdio server
