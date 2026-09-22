@@ -213,6 +213,7 @@
 "Check location" = "Speicherort prüfen";
 "Leave fields empty for automatic detection. Custom state and config paths are used by OpenClaw’s setup commands and the safe configuration fallback." = "Lass die Felder für die automatische Erkennung leer. Eigene Status- und Konfigurationspfade werden von OpenClaws Einrichtungsbefehlen und der sicheren Konfigurationsalternative verwendet.";
 "Check again" = "Erneut prüfen";
+"Checking installation…" = "Installation wird geprüft …";
 "Written into %@’s configuration" = "In die Konfiguration von %@ eingetragen";
 "Not connected yet" = "Noch nicht verbunden";
 "Connection status" = "Verbindungsstatus";

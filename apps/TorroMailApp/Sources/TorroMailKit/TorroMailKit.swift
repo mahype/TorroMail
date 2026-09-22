@@ -1279,9 +1279,11 @@ public enum MCPClientRegistry {
         return clients
     }
 
-    /// Find and verify the OpenClaw CLI without relying on the GUI app's PATH.
-    /// The desktop app installs a managed launcher below `~/.openclaw`; the
-    /// remaining candidates cover the supported package-manager installs.
+    /// Find the OpenClaw CLI without relying on the GUI app's PATH. Discovery
+    /// deliberately checks only executable-file presence: launching a managed
+    /// Node wrapper just to render status can block behind runtime setup or a
+    /// stale package-manager shim. Capability checks stay bounded and happen
+    /// only when TorroMail is about to use the CLI.
     public static func resolveOpenClawExecutable(
         settings: OpenClawSettings = OpenClawSettings(),
         fileManager: FileManager = .default
@@ -1318,17 +1320,7 @@ public enum MCPClientRegistry {
             })
         }
 
-        for path in candidates where fileManager.isExecutableFile(atPath: path) {
-            let url = URL(fileURLWithPath: path)
-            if MCPClientSetup.commandSucceeds(
-                executableURL: url,
-                arguments: ["--version"],
-                environmentOverrides: settings.environment()
-            ) {
-                return url
-            }
-        }
-        return nil
+        return resolveExecutable(candidates: candidates, fileManager: fileManager)
     }
 
     private static func versionManagedOpenClawCandidates(
@@ -1806,18 +1798,10 @@ public enum MCPClientSetup {
                 return false
             }
             return text.contains("[mcp_servers.\(MCPClientRegistry.serverName)]")
-        case let .openClawCLI(executableURL, settings):
-            if let executableURL,
-               let result = try? runCLI(
-                    executableURL: executableURL,
-                    arguments: ["mcp", "status", "--json"],
-                    environmentOverrides: settings.environment()
-                  ),
-               let data = result.standardOutput.data(using: .utf8),
-               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let servers = root["servers"] as? [[String: Any]] {
-                return servers.contains { $0["name"] as? String == MCPClientRegistry.serverName }
-            }
+        case let .openClawCLI(_, settings):
+            // The config is OpenClaw's source of truth and is much cheaper and
+            // more reliable to inspect than launching its Node-backed CLI on
+            // every list/detail refresh. `mcp set` writes this exact path.
             return openClawConfigHasServer(at: settings.configURL())
         }
     }
@@ -2246,13 +2230,32 @@ public enum MCPClientSetup {
     public static func commandSucceeds(
         executableURL: URL,
         arguments: [String],
-        environmentOverrides: [String: String] = [:]
+        environmentOverrides: [String: String] = [:],
+        timeout: TimeInterval = 3
     ) -> Bool {
-        (try? runCLI(
-            executableURL: executableURL,
-            arguments: arguments,
-            environmentOverrides: environmentOverrides
-        )) != nil
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environmentOverrides.forEach { environment[$0.key] = $0.value }
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(max(timeout, 0.1))
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        guard !process.isRunning else {
+            process.terminate()
+            return false
+        }
+        return process.terminationStatus == 0
     }
 }
 
