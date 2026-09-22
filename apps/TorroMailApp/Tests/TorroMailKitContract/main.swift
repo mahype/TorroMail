@@ -876,8 +876,9 @@ require(
     "executable resolution returns nil when nothing is installed"
 )
 
-// OpenClaw is discovered independently from the GUI process PATH, verified by
-// actually running `--version`, and then configured through its own MCP CLI.
+// OpenClaw is discovered independently from the GUI process PATH. Rendering
+// status must not launch its Node-backed wrapper; capability is checked only
+// when TorroMail actually configures it through the native MCP CLI.
 let openClawDirectory = FileManager.default.temporaryDirectory
     .appendingPathComponent("torromail-openclaw-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
 try? FileManager.default.createDirectory(at: openClawDirectory, withIntermediateDirectories: true)
@@ -887,6 +888,7 @@ let openClawCalls = openClawDirectory.appendingPathComponent("calls.log")
 let openClawScript = #"""
 #!/bin/sh
 if [ "$1" = "--version" ]; then
+  printf 'version\n' >> "$OPENCLAW_STATE_DIR/calls.log"
   echo "2026.9.5"
   exit 0
 fi
@@ -899,7 +901,7 @@ if [ "$1" = "mcp" ] && [ "$2" = "status" ]; then
   exit 0
 fi
 if [ "$1" = "mcp" ] && [ "$2" = "set" ]; then
-  printf '%s' "$4" > "$OPENCLAW_CONFIG_PATH"
+  printf '{"mcp":{"servers":{"torromail":%s}}}' "$4" > "$OPENCLAW_CONFIG_PATH"
   printf 'set|%s|%s|%s\n' "$3" "$OPENCLAW_STATE_DIR" "$OPENCLAW_CONFIG_PATH" >> "$OPENCLAW_STATE_DIR/calls.log"
   exit 0
 fi
@@ -923,7 +925,7 @@ let openClawSettings = OpenClawSettings(
 require(
     MCPClientRegistry.resolveOpenClawExecutable(settings: openClawSettings)?.path
         == openClawExecutable.path,
-    "OpenClaw detection verifies an explicit executable with --version"
+    "OpenClaw detection accepts an executable without launching it"
 )
 let openClawClient = MCPClientRegistry.installedClient(
     id: "clawbot",
@@ -940,6 +942,10 @@ if let openClawClient {
     require(
         before.isInstalled && before.setupAvailability == .ready && !before.isConfigured,
         "a verified OpenClaw CLI with native MCP commands is installed but initially unconfigured"
+    )
+    require(
+        !(((try? String(contentsOf: openClawCalls, encoding: .utf8)) ?? "").contains("version")),
+        "rendering OpenClaw status does not launch its CLI"
     )
     try? MCPClientSetup.add(
         to: openClawClient,
@@ -1105,6 +1111,30 @@ let oldOpenClawStatus = MCPClientSetup.status(
 require(
     oldOpenClawStatus.isInstalled && oldOpenClawStatus.setupAvailability == .ready,
     "an older OpenClaw CLI without native MCP commands uses the config fallback"
+)
+
+let hangingOpenClawExecutable = openClawDirectory.appendingPathComponent("hanging-openclaw")
+let hangingOpenClawScript = #"""
+#!/bin/sh
+exec sleep 30
+"""#
+try? Data(hangingOpenClawScript.utf8).write(to: hangingOpenClawExecutable)
+try? FileManager.default.setAttributes(
+    [.posixPermissions: 0o755],
+    ofItemAtPath: hangingOpenClawExecutable.path
+)
+let hangingProbeStarted = Date()
+require(
+    !MCPClientSetup.commandSucceeds(
+        executableURL: hangingOpenClawExecutable,
+        arguments: ["mcp", "status", "--json"],
+        timeout: 0.2
+    ),
+    "a stuck OpenClaw wrapper is not treated as a working MCP CLI"
+)
+require(
+    Date().timeIntervalSince(hangingProbeStarted) < 2,
+    "OpenClaw capability checks have a hard timeout"
 )
 try? FileManager.default.removeItem(at: openClawDirectory)
 

@@ -257,6 +257,10 @@ struct MCPClientDetailView: View {
     let descriptor: MCPClientDescriptor
 
     @State private var status = MCPClientSetupStatus(isInstalled: false, isConfigured: false)
+    /// The default state is not evidence that a client is absent. OpenClaw's
+    /// CLI discovery runs off the main actor, so show an honest checking state
+    /// until the first result lands instead of briefly claiming it is missing.
+    @State private var hasCheckedStatus = false
     @State private var isBusy = false
     @State private var note: String?
     @State private var snippetCopied = false
@@ -370,7 +374,10 @@ struct MCPClientDetailView: View {
     private var connectionSection: some View {
         Section {
             HStack(spacing: 12 * textScale) {
-                MCPClientBadge(symbol: descriptor.symbol, dimmed: !status.isInstalled)
+                MCPClientBadge(
+                    symbol: descriptor.symbol,
+                    dimmed: hasCheckedStatus && !status.isInstalled
+                )
                 VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L(descriptor.displayName)).scaledFont(.headline)
                     Text(stateText)
@@ -384,7 +391,15 @@ struct MCPClientDetailView: View {
             }
             .scaledPadding(.vertical, 2)
 
-            if status.isInstalled && status.setupAvailability == .ready {
+            if !hasCheckedStatus {
+                HStack(spacing: 8 * textScale) {
+                    ProgressView().controlSize(.small)
+                    Text(L("Checking installation…"))
+                        .scaledFont(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            } else if status.isInstalled && status.setupAvailability == .ready {
                 HStack {
                     if status.isConfigured {
                         // The destructive role gives it its colour; the style
@@ -476,7 +491,7 @@ struct MCPClientDetailView: View {
 
     @ViewBuilder
     private var testSection: some View {
-        if status.isInstalled && status.setupAvailability == .ready {
+        if hasCheckedStatus && status.isInstalled && status.setupAvailability == .ready {
             Section {
                 // The headline: did this client actually reach the server? The
                 // one fact a config file cannot give — read live from the log
@@ -680,6 +695,7 @@ struct MCPClientDetailView: View {
     // MARK: - State
 
     private var stateText: String {
+        if !hasCheckedStatus { return L("Checking installation…") }
         if !status.isInstalled { return L("Not found on this Mac") }
         if status.setupAvailability == .setupToolMissing { return L("Setup tool not found") }
         if status.setupAvailability == .mcpUnavailable { return L("MCP setup unavailable") }
@@ -688,6 +704,7 @@ struct MCPClientDetailView: View {
     }
 
     private var dotColor: Color {
+        if !hasCheckedStatus { return .orange }
         if !status.isInstalled { return .gray }
         if status.setupAvailability != .ready { return .orange }
         return status.hasCurrentKey ? .green : .orange
@@ -723,13 +740,14 @@ struct MCPClientDetailView: View {
         // The watcher keeps this current within a couple of seconds; re-reading
         // here makes "Check again" — and returning to the screen — immediate.
         model.reloadClientConnections()
-        if !runServerTest && descriptor.id != "clawbot" {
+        if !runServerTest {
             status = MCPClientSetup.status(
                 for: descriptor,
                 executableName: executable,
                 runServerTest: false,
                 openClawSettings: openClawSettings
             )
+            hasCheckedStatus = true
             model.connectedClients = MCPClientRegistry.catalog
                 .filter {
                     MCPClientSetup.status(
@@ -752,6 +770,7 @@ struct MCPClientDetailView: View {
             )
             await MainActor.run {
                 status = result
+                hasCheckedStatus = true
                 if descriptor.id == "clawbot", result.setupAvailability != .ready {
                     showOpenClawLocation = true
                 }
