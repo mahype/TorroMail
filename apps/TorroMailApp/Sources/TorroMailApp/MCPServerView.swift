@@ -252,6 +252,8 @@ private struct MCPClientBadge: View {
 /// for the step TorroMail cannot see from here — read how to confirm inside the
 /// client itself.
 struct MCPClientDetailView: View {
+    private static let openClawRestartCommand = "openclaw gateway restart"
+
     @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
     let descriptor: MCPClientDescriptor
@@ -323,15 +325,18 @@ struct MCPClientDetailView: View {
                         .scaledFont(.title2)
                         .foregroundStyle(Color.torroRed)
                     VStack(alignment: .leading, spacing: 3 * textScale) {
-                        Text(String(format: L("Restart %@ now"), L(descriptor.displayName)))
+                        Text(restartTitle)
                             .scaledFont(.headline)
-                        Text(String(
-                            format: L("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail."),
-                            L(descriptor.displayName)
-                        ))
+                        Text(restartExplanation)
                         .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        if descriptor.id == "clawbot" {
+                            Text(verbatim: Self.openClawRestartCommand)
+                                .scaledFont(.callout, design: .monospaced)
+                                .textSelection(.enabled)
+                                .scaledPadding(.top, 4)
+                        }
                     }
                     Spacer(minLength: 0)
                 }
@@ -339,6 +344,23 @@ struct MCPClientDetailView: View {
                 .accessibilityElement(children: .combine)
             }
         }
+    }
+
+    private var restartTitle: String {
+        if descriptor.id == "clawbot" {
+            return L("Restart the OpenClaw Gateway now")
+        }
+        return String(format: L("Restart %@ now"), L(descriptor.displayName))
+    }
+
+    private var restartExplanation: String {
+        if descriptor.id == "clawbot" {
+            return L("Run this command in Terminal so OpenClaw loads the TorroMail MCP server:")
+        }
+        return String(
+            format: L("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail."),
+            L(descriptor.displayName)
+        )
     }
 
     /// True while this client still carries a key TorroMail has replaced.
@@ -809,7 +831,11 @@ struct MCPClientDetailView: View {
             if previousKey != token || model.clientConnections[descriptor.id] == nil {
                 keyChangedAt = Date()
             }
-            note = String(format: L("Connected. Restart %@ to load it."), descriptor.displayName)
+            if descriptor.id == "clawbot" {
+                note = L("Connected. Run “openclaw gateway restart” to load the TorroMail MCP server.")
+            } else {
+                note = String(format: L("Connected. Restart %@ to load it."), descriptor.displayName)
+            }
         } catch let failure as MCPClientSetup.Failure {
             note = L(failure.reason)
         } catch {

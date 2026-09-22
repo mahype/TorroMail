@@ -2026,6 +2026,11 @@ require(
             "vscode", "windsurf", "clawbot", "hermes", "other"],
     "the client catalog carries the ids the Rust catalog carries"
 )
+require(
+    MCPClientRegistry.descriptor(id: "clawbot")?.verificationHintKey
+        .contains("openclaw gateway restart") == true,
+    "OpenClaw setup tells the user which command reloads the MCP server"
+)
 
 // MARK: - Provider discovery, shared with Rust
 
