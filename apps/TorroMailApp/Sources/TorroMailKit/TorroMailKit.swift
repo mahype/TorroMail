@@ -991,10 +991,10 @@ public struct MCPClient: Identifiable, Hashable {
         /// read the file to detect our server.
         case claudeCodeCLI(executableURL: URL, configURL: URL)
         /// OpenClaw owns a JSON5 configuration and may redirect it through
-        /// `OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH`. Its CLI is therefore
-        /// the only safe writer: direct JSON serialization would discard JSON5
-        /// comments and can target the wrong profile. The executable is nil
-        /// when the desktop app is present but its managed CLI is not ready.
+        /// `OPENCLAW_STATE_DIR` or `OPENCLAW_CONFIG_PATH`. Its CLI is the
+        /// preferred writer. When the separately installed app exposes no CLI
+        /// to this GUI process, a surgical JSON5 edit changes only TorroMail's
+        /// own `mcp.servers` property. The executable is nil in that case.
         case openClawCLI(executableURL: URL?, settings: OpenClawSettings)
     }
 
@@ -1293,13 +1293,24 @@ public enum MCPClientRegistry {
         }
         candidates.append(contentsOf: [
             home.appendingPathComponent(".openclaw/bin/openclaw").path,
+            // OpenClaw 2.0's managed installer keeps its Node toolchain here.
+            // Some upgrades leave the package-owned launcher in this bin even
+            // when the canonical ~/.openclaw/bin link is absent.
+            home.appendingPathComponent(".openclaw/tools/node/bin/openclaw").path,
             "/opt/homebrew/bin/openclaw",
             "/usr/local/bin/openclaw",
             home.appendingPathComponent(".local/bin/openclaw").path,
             home.appendingPathComponent(".npm-global/bin/openclaw").path,
             home.appendingPathComponent(".bun/bin/openclaw").path,
-            home.appendingPathComponent("Library/pnpm/openclaw").path
+            home.appendingPathComponent("Library/pnpm/openclaw").path,
+            home.appendingPathComponent(".volta/bin/openclaw").path,
+            home.appendingPathComponent(".asdf/shims/openclaw").path,
+            home.appendingPathComponent(".local/share/mise/shims/openclaw").path
         ])
+        candidates.append(contentsOf: versionManagedOpenClawCandidates(
+            home: home,
+            fileManager: fileManager
+        ))
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             candidates.append(contentsOf: path.split(separator: ":").map {
                 URL(fileURLWithPath: String($0), isDirectory: true)
@@ -1318,6 +1329,30 @@ public enum MCPClientRegistry {
             }
         }
         return nil
+    }
+
+    private static func versionManagedOpenClawCandidates(
+        home: URL,
+        fileManager: FileManager
+    ) -> [String] {
+        let roots: [(URL, String)] = [
+            (home.appendingPathComponent(".nvm/versions/node", isDirectory: true), "bin/openclaw"),
+            (home.appendingPathComponent(".fnm/node-versions", isDirectory: true), "installation/bin/openclaw"),
+            (
+                home.appendingPathComponent("Library/Application Support/fnm/node-versions", isDirectory: true),
+                "installation/bin/openclaw"
+            )
+        ]
+        return roots.flatMap { root, suffix in
+            let versions = (try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            return versions
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+                .map { $0.appendingPathComponent(suffix).path }
+        }
     }
 
     /// First executable candidate that exists, or nil. Used for CLIs whose
@@ -1385,6 +1420,350 @@ public enum MCPClientSetup {
         }
     }
 
+    /// A deliberately small JSON5 object editor for OpenClaw's owned config.
+    /// It understands comments, quoted or bare keys, trailing commas, strings,
+    /// arrays and nested objects. TorroMail only changes one path
+    /// (`mcp.servers.torromail`), leaving every byte outside that property
+    /// alone. This is the fallback when the separately installed OpenClaw app
+    /// has no CLI launcher visible to a sandboxed GUI process.
+    private struct JSON5Document {
+        private struct Property {
+            var name: String
+            var keyStart: Int
+            var valueStart: Int
+            var valueEnd: Int
+            var commaBefore: Int?
+            var commaAfter: Int?
+        }
+
+        private var bytes: [UInt8]
+
+        init(data: Data) {
+            bytes = Array(data)
+        }
+
+        var data: Data { Data(bytes) }
+
+        func contains(path: [String]) throws -> Bool {
+            guard let root = try rootObject() else { return false }
+            var object = root
+            for (index, component) in path.enumerated() {
+                guard let property = try properties(in: object).first(where: { $0.name == component }) else {
+                    return false
+                }
+                if index == path.count - 1 { return true }
+                guard let nested = try self.object(at: property.valueStart) else { return false }
+                object = nested
+            }
+            return false
+        }
+
+        mutating func set(path: [String], jsonValue: String) throws {
+            guard !path.isEmpty, let root = try rootObject() else {
+                throw Failure("The existing configuration could not be read.")
+            }
+            try set(
+                remainingPath: ArraySlice(path),
+                jsonValue: Array(jsonValue.utf8),
+                in: root
+            )
+        }
+
+        mutating func remove(path: [String]) throws {
+            guard !path.isEmpty, let root = try rootObject() else {
+                throw Failure("The existing configuration could not be read.")
+            }
+            try remove(remainingPath: ArraySlice(path), in: root)
+        }
+
+        private mutating func set(
+            remainingPath: ArraySlice<String>,
+            jsonValue: [UInt8],
+            in object: Range<Int>
+        ) throws {
+            guard let component = remainingPath.first else { return }
+            let existing = try properties(in: object).first { $0.name == component }
+            if remainingPath.count == 1 {
+                if let existing {
+                    bytes.replaceSubrange(existing.valueStart..<existing.valueEnd, with: jsonValue)
+                } else {
+                    try insertProperty(named: component, value: jsonValue, in: object)
+                }
+                return
+            }
+
+            if let existing {
+                guard let nested = try self.object(at: existing.valueStart) else {
+                    throw Failure("The existing configuration could not be read.")
+                }
+                try set(
+                    remainingPath: remainingPath.dropFirst(),
+                    jsonValue: jsonValue,
+                    in: nested
+                )
+                return
+            }
+
+            let nested = nestedObject(
+                path: remainingPath.dropFirst(),
+                jsonValue: jsonValue
+            )
+            try insertProperty(named: component, value: nested, in: object)
+        }
+
+        private mutating func remove(
+            remainingPath: ArraySlice<String>,
+            in object: Range<Int>
+        ) throws {
+            guard let component = remainingPath.first,
+                  let property = try properties(in: object).first(where: { $0.name == component }) else {
+                return
+            }
+            if remainingPath.count > 1 {
+                guard let nested = try self.object(at: property.valueStart) else { return }
+                try remove(remainingPath: remainingPath.dropFirst(), in: nested)
+                return
+            }
+
+            if let comma = property.commaAfter {
+                bytes.removeSubrange(property.keyStart...comma)
+            } else if let comma = property.commaBefore {
+                bytes.removeSubrange(comma..<property.valueEnd)
+            } else {
+                bytes.removeSubrange(property.keyStart..<property.valueEnd)
+            }
+        }
+
+        private func rootObject() throws -> Range<Int>? {
+            var start = 0
+            if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { start = 3 }
+            start = skipTrivia(from: start, limit: bytes.count)
+            guard start < bytes.count, bytes[start] == 0x7B else { return nil }
+            guard let root = try object(at: start),
+                  skipTrivia(from: root.upperBound, limit: bytes.count) == bytes.count else {
+                throw Failure("The existing configuration could not be read.")
+            }
+            return root
+        }
+
+        /// Range includes both braces: lowerBound is `{`, upperBound is one
+        /// past `}`. Keeping that convention makes insertions unambiguous.
+        private func object(at rawStart: Int) throws -> Range<Int>? {
+            let start = skipTrivia(from: rawStart, limit: bytes.count)
+            guard start < bytes.count, bytes[start] == 0x7B else { return nil }
+            var depth = 0
+            var index = start
+            while index < bytes.count {
+                if let next = try skippedStringOrComment(from: index, limit: bytes.count) {
+                    index = next
+                    continue
+                }
+                switch bytes[index] {
+                case 0x7B:
+                    depth += 1
+                case 0x7D:
+                    depth -= 1
+                    if depth == 0 { return start..<(index + 1) }
+                default:
+                    break
+                }
+                index += 1
+            }
+            throw Failure("The existing configuration could not be read.")
+        }
+
+        private func properties(in object: Range<Int>) throws -> [Property] {
+            let closingBrace = object.upperBound - 1
+            var index = skipTrivia(from: object.lowerBound + 1, limit: closingBrace)
+            var previousComma: Int?
+            var result: [Property] = []
+
+            while index < closingBrace {
+                let keyStart = index
+                guard let key = try parsedKey(from: index, limit: closingBrace) else {
+                    throw Failure("The existing configuration could not be read.")
+                }
+                index = skipTrivia(from: key.end, limit: closingBrace)
+                guard index < closingBrace, bytes[index] == 0x3A else {
+                    throw Failure("The existing configuration could not be read.")
+                }
+                let valueStart = skipTrivia(from: index + 1, limit: closingBrace)
+                guard valueStart < closingBrace else {
+                    throw Failure("The existing configuration could not be read.")
+                }
+                let separator = try valueSeparator(from: valueStart, objectEnd: closingBrace)
+                let comma = separator < closingBrace && bytes[separator] == 0x2C ? separator : nil
+                result.append(Property(
+                    name: key.name,
+                    keyStart: keyStart,
+                    valueStart: valueStart,
+                    valueEnd: separator,
+                    commaBefore: previousComma,
+                    commaAfter: comma
+                ))
+                guard let comma else { break }
+                previousComma = comma
+                index = skipTrivia(from: comma + 1, limit: closingBrace)
+                // JSON5 permits a final trailing comma.
+                if index == closingBrace { break }
+            }
+            return result
+        }
+
+        private func parsedKey(from start: Int, limit: Int) throws -> (name: String, end: Int)? {
+            guard start < limit else { return nil }
+            if bytes[start] == 0x22 || bytes[start] == 0x27 {
+                let quote = bytes[start]
+                var index = start + 1
+                var value: [UInt8] = []
+                while index < limit {
+                    if bytes[index] == 0x5C {
+                        guard index + 1 < limit else { break }
+                        value.append(bytes[index + 1])
+                        index += 2
+                        continue
+                    }
+                    if bytes[index] == quote {
+                        return (String(decoding: value, as: UTF8.self), index + 1)
+                    }
+                    value.append(bytes[index])
+                    index += 1
+                }
+                throw Failure("The existing configuration could not be read.")
+            }
+
+            var index = start
+            while index < limit {
+                let byte = bytes[index]
+                if byte == 0x3A || isWhitespace(byte) { break }
+                if byte == 0x2F, index + 1 < limit,
+                   bytes[index + 1] == 0x2F || bytes[index + 1] == 0x2A { break }
+                index += 1
+            }
+            guard index > start else { return nil }
+            return (String(decoding: bytes[start..<index], as: UTF8.self), index)
+        }
+
+        private func valueSeparator(from start: Int, objectEnd: Int) throws -> Int {
+            var braces = 0
+            var brackets = 0
+            var index = start
+            while index < objectEnd {
+                if let next = try skippedStringOrComment(from: index, limit: objectEnd) {
+                    index = next
+                    continue
+                }
+                switch bytes[index] {
+                case 0x7B: braces += 1
+                case 0x7D:
+                    if braces > 0 { braces -= 1 }
+                case 0x5B: brackets += 1
+                case 0x5D:
+                    if brackets > 0 { brackets -= 1 }
+                case 0x2C where braces == 0 && brackets == 0:
+                    return index
+                default:
+                    break
+                }
+                index += 1
+            }
+            return objectEnd
+        }
+
+        private func skippedStringOrComment(from start: Int, limit: Int) throws -> Int? {
+            guard start < limit else { return nil }
+            if bytes[start] == 0x22 || bytes[start] == 0x27 {
+                let quote = bytes[start]
+                var index = start + 1
+                while index < limit {
+                    if bytes[index] == 0x5C {
+                        index += 2
+                    } else if bytes[index] == quote {
+                        return index + 1
+                    } else {
+                        index += 1
+                    }
+                }
+                throw Failure("The existing configuration could not be read.")
+            }
+            guard bytes[start] == 0x2F, start + 1 < limit else { return nil }
+            if bytes[start + 1] == 0x2F {
+                var index = start + 2
+                while index < limit, bytes[index] != 0x0A, bytes[index] != 0x0D { index += 1 }
+                return index
+            }
+            if bytes[start + 1] == 0x2A {
+                var index = start + 2
+                while index + 1 < limit {
+                    if bytes[index] == 0x2A, bytes[index + 1] == 0x2F { return index + 2 }
+                    index += 1
+                }
+                throw Failure("The existing configuration could not be read.")
+            }
+            return nil
+        }
+
+        private func skipTrivia(from start: Int, limit: Int) -> Int {
+            var index = start
+            while index < limit {
+                if isWhitespace(bytes[index]) {
+                    index += 1
+                    continue
+                }
+                if bytes[index] == 0x2F, index + 1 < limit, bytes[index + 1] == 0x2F {
+                    index += 2
+                    while index < limit, bytes[index] != 0x0A, bytes[index] != 0x0D { index += 1 }
+                    continue
+                }
+                if bytes[index] == 0x2F, index + 1 < limit, bytes[index + 1] == 0x2A {
+                    index += 2
+                    while index + 1 < limit,
+                          !(bytes[index] == 0x2A && bytes[index + 1] == 0x2F) { index += 1 }
+                    if index + 1 < limit { index += 2 }
+                    continue
+                }
+                break
+            }
+            return index
+        }
+
+        private mutating func insertProperty(named name: String, value: [UInt8], in object: Range<Int>) throws {
+            let properties = try properties(in: object)
+            let closingBrace = object.upperBound - 1
+            let closingIndent = indentation(before: closingBrace)
+            let childIndent = closingIndent + "  "
+            let needsComma = properties.last?.commaAfter == nil && !properties.isEmpty
+            var inserted = needsComma ? "," : ""
+            inserted += "\n\(childIndent)\"\(name)\": "
+            var addition = Array(inserted.utf8)
+            addition.append(contentsOf: value)
+            addition.append(contentsOf: Array("\n\(closingIndent)".utf8))
+            bytes.insert(contentsOf: addition, at: closingBrace)
+        }
+
+        private func nestedObject(path: ArraySlice<String>, jsonValue: [UInt8]) -> [UInt8] {
+            guard let first = path.first else { return jsonValue }
+            var result = Array("{\"\(first)\":".utf8)
+            result.append(contentsOf: nestedObject(path: path.dropFirst(), jsonValue: jsonValue))
+            result.append(0x7D)
+            return result
+        }
+
+        private func indentation(before index: Int) -> String {
+            var lineStart = index
+            while lineStart > 0, bytes[lineStart - 1] != 0x0A, bytes[lineStart - 1] != 0x0D {
+                lineStart -= 1
+            }
+            let candidate = bytes[lineStart..<index]
+            guard candidate.allSatisfy({ $0 == 0x20 || $0 == 0x09 }) else { return "" }
+            return String(decoding: candidate, as: UTF8.self)
+        }
+
+        private func isWhitespace(_ byte: UInt8) -> Bool {
+            byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D || byte == 0x0C
+        }
+    }
+
     /// Absolute path of the server binary for client configs. A bare PATH
     /// fallback is useless there, so only real paths count.
     public static func serverCommandPath(executableName: String) -> String? {
@@ -1428,18 +1807,18 @@ public enum MCPClientSetup {
             }
             return text.contains("[mcp_servers.\(MCPClientRegistry.serverName)]")
         case let .openClawCLI(executableURL, settings):
-            guard let executableURL,
-                  let result = try? runCLI(
+            if let executableURL,
+               let result = try? runCLI(
                     executableURL: executableURL,
                     arguments: ["mcp", "status", "--json"],
                     environmentOverrides: settings.environment()
                   ),
-                  let data = result.standardOutput.data(using: .utf8),
-                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let servers = root["servers"] as? [[String: Any]] else {
-                return false
+               let data = result.standardOutput.data(using: .utf8),
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let servers = root["servers"] as? [[String: Any]] {
+                return servers.contains { $0["name"] as? String == MCPClientRegistry.serverName }
             }
-            return servers.contains { $0["name"] as? String == MCPClientRegistry.serverName }
+            return openClawConfigHasServer(at: settings.configURL())
         }
     }
 
@@ -1453,6 +1832,25 @@ public enum MCPClientSetup {
             return false
         }
         return servers[MCPClientRegistry.serverName] != nil
+    }
+
+    private static let openClawServerPath = ["mcp", "servers", MCPClientRegistry.serverName]
+
+    private static func openClawConfigHasServer(at configURL: URL) -> Bool {
+        guard let data = try? Data(contentsOf: configURL), !data.isEmpty else { return false }
+        return (try? JSON5Document(data: data).contains(path: openClawServerPath)) == true
+    }
+
+    private static func openClawCLIHasMCP(
+        executableURL: URL?,
+        settings: OpenClawSettings
+    ) -> Bool {
+        guard let executableURL else { return false }
+        return commandSucceeds(
+            executableURL: executableURL,
+            arguments: ["mcp", "status", "--json"],
+            environmentOverrides: settings.environment()
+        )
     }
 
     /// Whether the client's config carries the key the keychain holds for it
@@ -1652,9 +2050,6 @@ public enum MCPClientSetup {
                 commandPath: commandPath
             )
         case let .openClawCLI(executableURL, settings):
-            guard let executableURL else {
-                throw Failure("OpenClaw is installed, but its setup tool was not found.")
-            }
             let definition: [String: Any] = [
                 "command": commandPath,
                 "env": ["TORROMAIL_TOKEN": token]
@@ -1663,12 +2058,64 @@ public enum MCPClientSetup {
             guard let json = String(data: data, encoding: .utf8) else {
                 throw Failure("Could not build the OpenClaw configuration.")
             }
-            try runCLI(
-                executableURL: executableURL,
-                arguments: ["mcp", "set", MCPClientRegistry.serverName, json],
-                environmentOverrides: settings.environment()
-            )
+            if openClawCLIHasMCP(executableURL: executableURL, settings: settings),
+               let executableURL {
+                try runCLI(
+                    executableURL: executableURL,
+                    arguments: ["mcp", "set", MCPClientRegistry.serverName, json],
+                    environmentOverrides: settings.environment()
+                )
+            } else {
+                try setOpenClawServer(
+                    at: settings.configURL(fileManager: fileManager),
+                    definitionJSON: json,
+                    fileManager: fileManager
+                )
+            }
         }
+    }
+
+    private static func setOpenClawServer(
+        at target: URL,
+        definitionJSON: String,
+        fileManager: FileManager
+    ) throws {
+        let existing: Data
+        if fileManager.fileExists(atPath: target.path) {
+            do {
+                existing = try Data(contentsOf: target)
+            } catch {
+                throw Failure("The existing configuration could not be read.")
+            }
+        } else {
+            existing = Data()
+        }
+        var document = JSON5Document(data: existing.isEmpty ? Data("{}".utf8) : existing)
+        try document.set(path: openClawServerPath, jsonValue: definitionJSON)
+        try fileManager.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try document.data.write(to: target, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+    }
+
+    private static func removeOpenClawServer(
+        at target: URL,
+        fileManager: FileManager
+    ) throws {
+        guard fileManager.fileExists(atPath: target.path) else { return }
+        let existing: Data
+        do {
+            existing = try Data(contentsOf: target)
+        } catch {
+            throw Failure("The existing configuration could not be read.")
+        }
+        guard !existing.isEmpty else { return }
+        var document = JSON5Document(data: existing)
+        try document.remove(path: openClawServerPath)
+        try document.data.write(to: target, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 
     private static func addToJSONConfig(
@@ -2095,26 +2542,6 @@ extension MCPClientSetup {
         ) else {
             return MCPClientSetupStatus(isInstalled: false, isConfigured: false)
         }
-        if case let .openClawCLI(executableURL, settings) = client.setup {
-            guard let executableURL else {
-                return MCPClientSetupStatus(
-                    isInstalled: true,
-                    setupAvailability: .setupToolMissing,
-                    isConfigured: false
-                )
-            }
-            guard commandSucceeds(
-                executableURL: executableURL,
-                arguments: ["mcp", "status", "--json"],
-                environmentOverrides: settings.environment()
-            ) else {
-                return MCPClientSetupStatus(
-                    isInstalled: true,
-                    setupAvailability: .mcpUnavailable,
-                    isConfigured: false
-                )
-            }
-        }
         let configured = isConfigured(client)
         let keyed = configured && hasCurrentKey(client)
         guard configured, runServerTest else {
@@ -2125,6 +2552,7 @@ extension MCPClientSetup {
             )
         }
         if case let .openClawCLI(executableURL, settings) = client.setup,
+           openClawCLIHasMCP(executableURL: executableURL, settings: settings),
            let executableURL {
             do {
                 // Unlike the local self-test below, this traverses OpenClaw's
@@ -2182,14 +2610,19 @@ extension MCPClientSetup {
         case let .claudeCodeCLI(executableURL, _):
             try removeViaCLI(executableURL: executableURL, extraArguments: ["-s", "user"])
         case let .openClawCLI(executableURL, settings):
-            guard let executableURL else {
-                throw Failure("OpenClaw is installed, but its setup tool was not found.")
+            if openClawCLIHasMCP(executableURL: executableURL, settings: settings),
+               let executableURL {
+                try runCLI(
+                    executableURL: executableURL,
+                    arguments: ["mcp", "unset", MCPClientRegistry.serverName],
+                    environmentOverrides: settings.environment()
+                )
+            } else {
+                try removeOpenClawServer(
+                    at: settings.configURL(fileManager: fileManager),
+                    fileManager: fileManager
+                )
             }
-            try runCLI(
-                executableURL: executableURL,
-                arguments: ["mcp", "unset", MCPClientRegistry.serverName],
-                environmentOverrides: settings.environment()
-            )
         }
     }
 

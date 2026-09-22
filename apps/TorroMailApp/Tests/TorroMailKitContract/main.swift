@@ -962,10 +962,23 @@ if let openClawClient {
     require(false, "a verified OpenClaw CLI is returned as an installed client")
 }
 
-// An app/config without a usable CLI is still installed; the UI can now say
-// that its setup tool is missing instead of falsely saying OpenClaw is absent.
+// OpenClaw 2.0's macOS app can be present without exposing its separately
+// installed CLI to another GUI process. In that case TorroMail edits only the
+// mcp.servers.torromail JSON5 property and preserves comments, trailing commas
+// and every unrelated setting.
 let missingOpenClawConfig = openClawDirectory.appendingPathComponent("present-but-no-cli.json")
-try? Data("{}".utf8).write(to: missingOpenClawConfig)
+let existingOpenClawJSON5 = #"""
+{
+  // This owner setting must survive TorroMail's surgical edit.
+  owner: 'mail-test',
+  mcp: {
+    servers: {
+      existing: { command: '/usr/bin/true', },
+    },
+  },
+}
+"""#
+try? Data(existingOpenClawJSON5.utf8).write(to: missingOpenClawConfig)
 let missingOpenClawSettings = OpenClawSettings(
     executablePath: openClawDirectory.appendingPathComponent("missing-openclaw").path,
     configPath: missingOpenClawConfig.path
@@ -977,9 +990,94 @@ let missingCLIStatus = MCPClientSetup.status(
     openClawSettings: missingOpenClawSettings
 )
 require(
-    missingCLIStatus.isInstalled && missingCLIStatus.setupAvailability == .setupToolMissing,
-    "an OpenClaw config without a runnable CLI reports the setup tool as missing"
+    missingCLIStatus.isInstalled && missingCLIStatus.setupAvailability == .ready
+        && !missingCLIStatus.isConfigured,
+    "an OpenClaw app/config without a runnable CLI remains automatically configurable"
 )
+if let fallbackClient = MCPClientRegistry.installedClient(
+    id: "clawbot",
+    openClawSettings: missingOpenClawSettings
+) {
+    try? MCPClientSetup.add(
+        to: fallbackClient,
+        commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+        token: contractKey
+    )
+    let updated = (try? String(contentsOf: missingOpenClawConfig, encoding: .utf8)) ?? ""
+    require(MCPClientSetup.isConfigured(fallbackClient), "the JSON5 fallback registers TorroMail")
+    require(updated.contains(contractKey), "the JSON5 fallback writes the client access key")
+    require(
+        updated.contains("// This owner setting") && updated.contains("owner: 'mail-test'")
+            && updated.contains("existing: { command: '/usr/bin/true', }")
+            && updated.contains("torromail"),
+        "the JSON5 fallback preserves comments, trailing commas and existing servers"
+    )
+    try? MCPClientSetup.remove(from: fallbackClient)
+    let removed = (try? String(contentsOf: missingOpenClawConfig, encoding: .utf8)) ?? ""
+    require(!MCPClientSetup.isConfigured(fallbackClient), "the JSON5 fallback removes TorroMail")
+    require(
+        removed.contains("// This owner setting") && removed.contains("existing:")
+            && !removed.contains(contractKey),
+        "disconnecting preserves unrelated OpenClaw JSON5 content"
+    )
+} else {
+    require(false, "an OpenClaw config is returned as an installed fallback client")
+}
+
+// A custom OPENCLAW_CONFIG_PATH may legitimately point at a file OpenClaw has
+// not created yet. The fallback creates the parent and a private config, while
+// malformed existing content must fail closed without being overwritten.
+let freshOpenClawConfig = openClawDirectory.appendingPathComponent("new-state/config.json5")
+let freshOpenClawSettings = OpenClawSettings(
+    executablePath: openClawDirectory.appendingPathComponent("missing-openclaw").path,
+    configPath: freshOpenClawConfig.path
+)
+if let freshClient = MCPClientRegistry.installedClient(
+    id: "clawbot",
+    openClawSettings: freshOpenClawSettings
+) {
+    try? MCPClientSetup.add(
+        to: freshClient,
+        commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+        token: contractKey
+    )
+    let attributes = try? FileManager.default.attributesOfItem(atPath: freshOpenClawConfig.path)
+    require(MCPClientSetup.isConfigured(freshClient), "the fallback creates a missing custom config")
+    require(
+        attributes?[.posixPermissions] as? NSNumber == NSNumber(value: 0o600),
+        "a newly created OpenClaw config is private"
+    )
+} else {
+    require(false, "a custom OpenClaw config path is enough to offer setup")
+}
+
+let malformedOpenClawConfig = openClawDirectory.appendingPathComponent("malformed.json5")
+let malformedOpenClawText = "{ mcp: { servers: { existing: true } } } trailing"
+try? Data(malformedOpenClawText.utf8).write(to: malformedOpenClawConfig)
+let malformedSettings = OpenClawSettings(
+    executablePath: openClawDirectory.appendingPathComponent("missing-openclaw").path,
+    configPath: malformedOpenClawConfig.path
+)
+if let malformedClient = MCPClientRegistry.installedClient(
+    id: "clawbot",
+    openClawSettings: malformedSettings
+) {
+    var rejectedMalformedConfig = false
+    do {
+        try MCPClientSetup.add(
+            to: malformedClient,
+            commandPath: "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+            token: contractKey
+        )
+    } catch {
+        rejectedMalformedConfig = true
+    }
+    require(rejectedMalformedConfig, "the fallback rejects malformed existing JSON5")
+    require(
+        (try? String(contentsOf: malformedOpenClawConfig, encoding: .utf8)) == malformedOpenClawText,
+        "a rejected OpenClaw config is never overwritten"
+    )
+}
 
 let oldOpenClawExecutable = openClawDirectory.appendingPathComponent("openclaw-without-mcp")
 let oldOpenClawScript = #"""
@@ -999,11 +1097,14 @@ let oldOpenClawStatus = MCPClientSetup.status(
     for: MCPClientRegistry.descriptor(id: "clawbot")!,
     executableName: "torromail-mcp",
     runServerTest: false,
-    openClawSettings: OpenClawSettings(executablePath: oldOpenClawExecutable.path)
+    openClawSettings: OpenClawSettings(
+        executablePath: oldOpenClawExecutable.path,
+        configPath: openClawDirectory.appendingPathComponent("old-openclaw.json").path
+    )
 )
 require(
-    oldOpenClawStatus.isInstalled && oldOpenClawStatus.setupAvailability == .mcpUnavailable,
-    "an installed OpenClaw CLI without native MCP commands reports MCP as unavailable"
+    oldOpenClawStatus.isInstalled && oldOpenClawStatus.setupAvailability == .ready,
+    "an older OpenClaw CLI without native MCP commands uses the config fallback"
 )
 try? FileManager.default.removeItem(at: openClawDirectory)
 

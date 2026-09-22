@@ -470,7 +470,7 @@ struct MCPClientDetailView: View {
         } header: {
             Text(L("OpenClaw installation"))
         } footer: {
-            Text(L("Leave fields empty for automatic detection. Custom state and config paths are passed to OpenClaw’s own setup commands."))
+            Text(L("Leave fields empty for automatic detection. Custom state and config paths are used by OpenClaw’s setup commands and the safe configuration fallback."))
         }
     }
 
