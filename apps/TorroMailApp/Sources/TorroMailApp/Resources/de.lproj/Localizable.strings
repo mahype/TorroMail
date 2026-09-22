@@ -188,7 +188,7 @@
 "Other client" = "Anderer Client";
 "OpenClaw" = "OpenClaw";
 "Hermes" = "Hermes";
-"Run “openclaw mcp doctor torromail --probe” to verify the connection, then start a new OpenClaw session and ask it to list your mail accounts." = "Führe „openclaw mcp doctor torromail --probe“ aus, um die Verbindung zu prüfen. Starte danach eine neue OpenClaw-Sitzung und bitte sie, deine Mail-Konten aufzulisten.";
+"Run “openclaw gateway restart” in Terminal so OpenClaw loads the TorroMail MCP server. Then start a new OpenClaw session and ask it to list your mail accounts." = "Führe im Terminal „openclaw gateway restart“ aus, damit OpenClaw den TorroMail-MCP-Server lädt. Starte danach eine neue OpenClaw-Sitzung und bitte sie, deine Mail-Konten aufzulisten.";
 "Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts." = "Füge den Ausschnitt unten unter „mcp_servers“ in Hermes’ Konfiguration ein, starte es dann neu und bitte es, deine Mail-Konten aufzulisten.";
 "Paste the snippet below into your client’s MCP configuration — any client that speaks MCP over stdio can run TorroMail. Restart it afterwards." = "Füge den Ausschnitt unten in die MCP-Konfiguration deines Clients ein — jeder Client, der MCP über stdio spricht, kann TorroMail nutzen. Starte ihn danach neu.";
 "TorroMail server" = "TorroMail-Server";
@@ -200,6 +200,8 @@
 "Disconnect" = "Trennen";
 "Reconnect" = "Neu verbinden";
 "Restart %@ now" = "Starte %@ jetzt neu";
+"Restart the OpenClaw Gateway now" = "Starte das OpenClaw-Gateway jetzt neu";
+"Run this command in Terminal so OpenClaw loads the TorroMail MCP server:" = "Führe diesen Befehl im Terminal aus, damit OpenClaw den TorroMail-MCP-Server lädt:";
 "%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail." = "%@ hat seinen Zugriffsschlüssel beim Start gelesen und verwendet weiterhin den alten. Bis du es beendest und neu öffnest, schlägt jede Mail-Anfrage fehl.";
 "%@ is not installed on this Mac. Install it, or set it up by hand with the snippet below." = "%@ ist auf diesem Mac nicht installiert. Installiere es oder richte es von Hand mit dem Ausschnitt unten ein.";
 "OpenClaw is installed, but its setup tool was not found." = "OpenClaw ist installiert, aber das Einrichtungswerkzeug wurde nicht gefunden.";
@@ -230,6 +232,7 @@
 "TorroMail server answers — %d tools" = "TorroMail-Server antwortet — %d Werkzeuge";
 "TorroMail server did not answer" = "TorroMail-Server hat nicht geantwortet";
 "Connected. Restart %@ to load it." = "Verbunden. Starte %@ neu, um es zu laden.";
+"Connected. Run “openclaw gateway restart” to load the TorroMail MCP server." = "Verbunden. Führe „openclaw gateway restart“ aus, um den TorroMail-MCP-Server zu laden.";
 "Removed from %@. Its access key no longer works." = "Aus %@ entfernt. Sein Zugangsschlüssel funktioniert nicht mehr.";
 "Access key missing" = "Zugangsschlüssel fehlt";
 "%@ holds its access key" = "%@ hat seinen Zugangsschlüssel";

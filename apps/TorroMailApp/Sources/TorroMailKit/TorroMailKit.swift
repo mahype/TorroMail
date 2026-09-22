@@ -2401,7 +2401,7 @@ extension MCPClientRegistry {
             symbol: "pawprint",
             snippetFormat: .openClawJSON,
             manualConfigPath: "~/.openclaw/openclaw.json",
-            verificationHintKey: "Run “openclaw mcp doctor torromail --probe” to verify the connection, then start a new OpenClaw session and ask it to list your mail accounts."
+            verificationHintKey: "Run “openclaw gateway restart” in Terminal so OpenClaw loads the TorroMail MCP server. Then start a new OpenClaw session and ask it to list your mail accounts."
         ),
         MCPClientDescriptor(
             id: "hermes",
