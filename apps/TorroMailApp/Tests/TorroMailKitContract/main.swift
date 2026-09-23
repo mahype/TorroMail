@@ -1995,9 +1995,18 @@ for (index, mergeCase) in mergeCases.enumerated() {
         continue
     }
     require(!failed, "shared client case succeeds: \(caseName)")
-    let written = (try? Data(contentsOf: configURL))
-        .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? NSDictionary
-    require(written == mergeCase["expected"] as? NSDictionary, "shared client case: \(caseName)")
+    let writtenText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+    if let expected = mergeCase["expected"] as? NSDictionary {
+        let written = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? NSDictionary
+        require(written == expected, "shared client case: \(caseName)")
+    }
+    for expected in mergeCase["expected_text_contains"] as? [String] ?? [] {
+        require(writtenText.contains(expected), "shared client case preserves/adds \(expected): \(caseName)")
+    }
+    for excluded in mergeCase["expected_text_excludes"] as? [String] ?? [] {
+        require(!writtenText.contains(excluded), "shared client case removes \(excluded): \(caseName)")
+    }
     require(
         MCPClientSetup.isConfigured(sharedClient) == !removing,
         "shared client case reads back as \(removing ? "not configured" : "configured"): \(caseName)"

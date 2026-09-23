@@ -177,9 +177,37 @@
     },
     {
       "action": "add",
+      "existing": "{\n  // my settings must survive\n  \"model\": \"x\",\n  \"mcp\": {\n    \"other\": { \"type\": \"remote\", \"url\": \"https://example.com/mcp\" },\n  },\n}",
+      "expected_text_contains": [
+        "// my settings must survive",
+        "\"model\": \"x\"",
+        "\"other\": { \"type\": \"remote\"",
+        "\"torromail\"",
+        "\"TORROMAIL_TOKEN\":\"torro_cursor_0123abcd\""
+      ],
+      "name": "opencode JSONC keeps comments, trailing commas, existing servers, and gains TorroMail",
+      "root_key": "mcp"
+    },
+    {
+      "action": "remove",
+      "existing": "{\n  // my settings must survive\n  \"model\": \"x\",\n  \"mcp\": {\n    \"other\": { \"type\": \"remote\", \"url\": \"https://example.com/mcp\" },\n    \"torromail\": {\"type\":\"local\",\"command\":[\"/Applications/TorroMail.app/Contents/MacOS/torromail-mcp\"],\"environment\":{\"TORROMAIL_TOKEN\":\"torro_cursor_0123abcd\"},\"enabled\":true},\n  },\n}",
+      "expected_text_contains": [
+        "// my settings must survive",
+        "\"model\": \"x\"",
+        "\"other\": { \"type\": \"remote\""
+      ],
+      "expected_text_excludes": [
+        "\"torromail\"",
+        "torro_cursor_0123abcd"
+      ],
+      "name": "removing from opencode JSONC preserves comments, trailing commas, and other servers",
+      "root_key": "mcp"
+    },
+    {
+      "action": "add",
       "error": true,
-      "existing": "{\n  // my settings\n  \"model\": \"x\"\n}",
-      "name": "an opencode config with comments in it is left alone",
+      "existing": "{\n  // an unfinished object is still malformed\n  \"mcp\": {",
+      "name": "malformed opencode JSONC is rejected and left untouched",
       "root_key": "mcp"
     },
     {
