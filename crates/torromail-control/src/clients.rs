@@ -334,9 +334,9 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
     // file every MCP host reads would hand that key to all of them.
     json_client("pi", home.join(".pi/agent"), "mcp.json", false);
 
-    // OpenCode keeps its config under ~/.config on every platform. A `.jsonc`
-    // is used when that is the only one there; comments in it make it
-    // unreadable to a strict parser, which is an error — never an overwrite.
+    // OpenCode keeps its config under ~/.config on every platform. Use its
+    // `.jsonc` when it is the only one there; the setup editor preserves
+    // comments and trailing commas while changing only TorroMail's entry.
     let opencode = home.join(".config/opencode");
     if opencode.exists() {
         let jsonc_only = !opencode.join("opencode.json").exists() && opencode.join("opencode.jsonc").exists();
@@ -406,8 +406,22 @@ fn is_executable(path: &Path) -> bool {
 // MARK: reading a client's configuration
 
 fn json_server_entry(setup: &ClientSetup) -> Option<Value> {
+    if matches!(setup, ClientSetup::OpenCodeJson { .. }) {
+        return None;
+    }
     let root: Value = serde_json::from_str(&std::fs::read_to_string(setup.config()).ok()?).ok()?;
     root.get(setup.json_root_key())?.get(SERVER_NAME).cloned()
+}
+
+const OPEN_CODE_SERVER_PATH: &[&str] = &["mcp", SERVER_NAME];
+const OPEN_CODE_TOKEN_PATH: &[&str] = &["mcp", SERVER_NAME, "environment", TOKEN_VARIABLE];
+
+fn open_code_document(config: &Path) -> Option<crate::jsonc::Document> {
+    let bytes = std::fs::read(config).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(crate::jsonc::Document::new(bytes))
 }
 
 /// Whether a client already points at TorroMail. Read from its own
@@ -417,6 +431,9 @@ pub fn is_configured(setup: &ClientSetup) -> bool {
     match setup {
         ClientSetup::CodexCli { config, .. } => std::fs::read_to_string(config)
             .map(|text| codex_section(&text).is_some())
+            .unwrap_or(false),
+        ClientSetup::OpenCodeJson { config } => open_code_document(config)
+            .and_then(|document| document.contains(OPEN_CODE_SERVER_PATH).ok())
             .unwrap_or(false),
         _ => json_server_entry(setup).is_some(),
     }
@@ -448,8 +465,11 @@ pub fn configured_token(setup: &ClientSetup) -> Option<String> {
             let close = open + quoted[open..].find('"')?;
             Some(quoted[open..close].to_owned())
         }
+        ClientSetup::OpenCodeJson { config } => open_code_document(config)?
+            .string(OPEN_CODE_TOKEN_PATH)
+            .ok()?,
         _ => json_server_entry(setup)?
-            .get(if matches!(setup, ClientSetup::OpenCodeJson { .. }) { "environment" } else { "env" })?
+            .get("env")?
             .get(TOKEN_VARIABLE)?
             .as_str()
             .map(str::to_owned),
@@ -506,14 +526,10 @@ pub fn run_tool(executable: &Path, arguments: &[String]) -> Result<(), SetupErro
 /// Registers the server with a client, access key included.
 pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner<'_>) -> Result<(), SetupError> {
     match setup {
-        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } | ClientSetup::OpenCodeJson { config } => {
+        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } => {
             let root_key = setup.json_root_key();
             let mut root = read_json_config(config)?;
-            let mut entry = if matches!(setup, ClientSetup::OpenCodeJson { .. }) {
-                json!({ "type": "local", "command": [command_path], "environment": { TOKEN_VARIABLE: token }, "enabled": true })
-            } else {
-                json!({ "command": command_path, "env": { TOKEN_VARIABLE: token } })
-            };
+            let mut entry = json!({ "command": command_path, "env": { TOKEN_VARIABLE: token } });
             // VS Code's schema tags the transport; the `mcpServers` clients
             // infer stdio from `command` and reject an unknown key here.
             if root_key == "servers" {
@@ -526,6 +542,7 @@ pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner
             servers[SERVER_NAME] = entry;
             write_json_config(config, &root)
         }
+        ClientSetup::OpenCodeJson { config } => set_open_code_server(config, command_path, token),
         ClientSetup::CodexCli { executable, .. } => add_via_tool(
             executable,
             &[],
@@ -548,7 +565,7 @@ pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner
 /// Removes TorroMail from a client's configuration — the counterpart to `add`.
 pub fn remove(setup: &ClientSetup, run: ToolRunner<'_>) -> Result<(), SetupError> {
     match setup {
-        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } | ClientSetup::OpenCodeJson { config } => {
+        ClientSetup::McpServersJson { config } | ClientSetup::ServersJson { config } => {
             if std::fs::read(config).map(|bytes| bytes.is_empty()).unwrap_or(true) {
                 return Ok(());
             }
@@ -559,6 +576,7 @@ pub fn remove(setup: &ClientSetup, run: ToolRunner<'_>) -> Result<(), SetupError
             servers.remove(SERVER_NAME);
             write_json_config(config, &root)
         }
+        ClientSetup::OpenCodeJson { config } => remove_open_code_server(config),
         ClientSetup::CodexCli { executable, .. } => {
             run(executable, &["mcp".to_owned(), "remove".to_owned(), SERVER_NAME.to_owned()])
         }
@@ -614,6 +632,48 @@ fn write_json_config(config: &Path, root: &Map<String, Value>) -> Result<(), Set
     let target = std::fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
     crate::state::write_atomically(&target, (text + "\n").as_bytes())
         .map_err(|error| SetupError::WriteFailed(error.to_string()))
+}
+
+fn open_code_document_for_write(config: &Path) -> Result<crate::jsonc::Document, SetupError> {
+    match std::fs::read(config) {
+        Ok(bytes) if bytes.is_empty() => Ok(crate::jsonc::Document::new(b"{}".to_vec())),
+        Ok(bytes) => Ok(crate::jsonc::Document::new(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(crate::jsonc::Document::new(b"{}".to_vec()))
+        }
+        Err(_) => Err(SetupError::UnreadableConfig),
+    }
+}
+
+fn write_open_code_config(config: &Path, document: crate::jsonc::Document) -> Result<(), SetupError> {
+    let target = std::fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
+    crate::state::write_atomically(&target, &document.into_bytes())
+        .map_err(|error| SetupError::WriteFailed(error.to_string()))
+}
+
+fn set_open_code_server(config: &Path, command_path: &str, token: &str) -> Result<(), SetupError> {
+    let definition = json!({
+        "type": "local",
+        "command": [command_path],
+        "environment": { TOKEN_VARIABLE: token },
+        "enabled": true,
+    });
+    let json = serde_json::to_string(&definition).map_err(|error| SetupError::WriteFailed(error.to_string()))?;
+    let mut document = open_code_document_for_write(config)?;
+    document.set(OPEN_CODE_SERVER_PATH, &json).map_err(|_| SetupError::UnreadableConfig)?;
+    write_open_code_config(config, document)
+}
+
+fn remove_open_code_server(config: &Path) -> Result<(), SetupError> {
+    let bytes = match std::fs::read(config) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(SetupError::UnreadableConfig),
+        Ok(bytes) if bytes.is_empty() => return Ok(()),
+        Ok(bytes) => bytes,
+    };
+    let mut document = crate::jsonc::Document::new(bytes);
+    document.remove(OPEN_CODE_SERVER_PATH).map_err(|_| SetupError::UnreadableConfig)?;
+    write_open_code_config(config, document)
 }
 
 // MARK: the snippet to paste

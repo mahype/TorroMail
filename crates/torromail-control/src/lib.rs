@@ -12,6 +12,7 @@ pub mod cache_files;
 pub mod clients;
 pub mod connect;
 pub mod enroll;
+mod jsonc;
 pub mod logs;
 pub mod mailbox_names;
 pub mod paths;

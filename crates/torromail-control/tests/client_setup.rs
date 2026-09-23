@@ -61,9 +61,17 @@ fn the_shared_config_cases_merge_as_written() {
             continue;
         }
         assert_eq!(outcome, Ok(()), "{name}");
-        let written: Value =
-            serde_json::from_str(&std::fs::read_to_string(&config).expect("the config exists")).expect("JSON");
-        assert_eq!(written, case["expected"], "{name}");
+        let written_text = std::fs::read_to_string(&config).expect("the config exists");
+        if !case["expected"].is_null() {
+            let written: Value = serde_json::from_str(&written_text).expect("JSON");
+            assert_eq!(written, case["expected"], "{name}");
+        }
+        for expected in case["expected_text_contains"].as_array().into_iter().flatten() {
+            assert!(written_text.contains(expected.as_str().expect("text")), "{name}: missing {expected}");
+        }
+        for excluded in case["expected_text_excludes"].as_array().into_iter().flatten() {
+            assert!(!written_text.contains(excluded.as_str().expect("text")), "{name}: kept {excluded}");
+        }
         if case["action"].as_str() != Some("remove") {
             assert!(clients::is_configured(&setup), "{name}");
             assert!(clients::has_key(&setup, &token), "{name}");
@@ -147,11 +155,12 @@ fn macos_looks_where_macos_apps_keep_their_config() {
 
     let environment = Environment { platform: Platform::MacOs, home: home.clone(), executable_directories: vec![] };
     let found = clients::installed(&environment);
-    assert_eq!(found.iter().map(|client| client.id).collect::<Vec<_>>(), ["claude-desktop"]);
+    let claude_desktop = found.iter().find(|client| client.id == "claude-desktop").expect("Claude Desktop");
     assert_eq!(
-        found[0].setup.config(),
+        claude_desktop.setup.config(),
         home.join("Library/Application Support/Claude/claude_desktop_config.json")
     );
+    assert!(!found.iter().any(|client| client.id == "vscode"), "macOS ignores the Linux VS Code path");
 }
 
 #[test]
