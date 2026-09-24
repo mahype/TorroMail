@@ -1,4 +1,4 @@
-# TorroMail
+# TorroMail — MCP server for your email
 
 [![CI](https://img.shields.io/github/actions/workflow/status/mahype/TorroMail/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/mahype/TorroMail/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mahype/TorroMail?sort=semver&color=D50C0C)](https://github.com/mahype/TorroMail/releases/latest)
@@ -9,7 +9,10 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust)](Cargo.toml)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](apps/TorroMailApp)
 
-**Your mailboxes for AI assistants — nothing leaves without your say-so.**
+**Set up in an app, not in JSON files.** A native macOS app (and a terminal UI for Linux
+and Windows) connects your IMAP accounts to Claude, ChatGPT, Cursor and other AI
+assistants — with per-account permissions, your approval before anything is sent, moved
+or deleted, and everything running locally.
 
 <p align="center">
   <img src="docs/screenshots/app-overview.png" alt="The TorroMail app on macOS: server status, connected assistants, mail accounts and recent assistant activity" width="820">
