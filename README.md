@@ -1,5 +1,20 @@
 # TorroMail
 
+[![CI](https://img.shields.io/github/actions/workflow/status/mahype/TorroMail/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/mahype/TorroMail/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mahype/TorroMail?sort=semver&color=D50C0C)](https://github.com/mahype/TorroMail/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/mahype/TorroMail/total?color=D50C0C)](https://github.com/mahype/TorroMail/releases)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/mahype/TorroMail/releases/latest)
+[![MCP](https://img.shields.io/badge/MCP-server-8A2BE2)](https://modelcontextprotocol.io)
+[![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust)](Cargo.toml)
+[![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](apps/TorroMailApp)
+
+**Your mailboxes for AI assistants — nothing leaves without your say-so.**
+
+<p align="center">
+  <img src="docs/screenshots/app-overview.png" alt="The TorroMail app on macOS: server status, connected assistants, mail accounts and recent assistant activity" width="820">
+</p>
+
 TorroMail is a local mail access layer for agents. It retrieves mail from configured
 accounts and exposes mail capabilities through an MCP server. The project is
 open-source and open-interface-first: the MCP contract and local safety model are
@@ -14,6 +29,32 @@ The project deliberately keeps account setup, secrets, OAuth, and permission
 changes out of MCP tools. MCP clients can search, read within policy, prepare
 risky actions, and inspect read-only admin state. The native app owns
 configuration and user confirmation.
+
+## Screenshots
+
+Both surfaces do the same job — accounts, permissions, connected assistants, the
+log — and neither shows your mail. The data below is a demo setup.
+
+### macOS app
+
+| Permissions per account | Connected assistants |
+| --- | --- |
+| ![Account permissions: presets from read-only to full access, each right as its own switch](docs/screenshots/app-permissions.png) | ![MCP Clients: which assistants are installed and connected](docs/screenshots/app-clients.png) |
+
+<details>
+<summary>Client detail</summary>
+
+![Claude Desktop detail: shared accounts, connection and the checks behind it](docs/screenshots/app-client-detail.png)
+
+</details>
+
+### Terminal (`torromail`) — macOS, Linux, Windows
+
+![torromail overview: status, accounts and recent assistant activity](docs/screenshots/cli-overview.png)
+
+| Permissions per account | Connected assistants |
+| --- | --- |
+| ![torromail account permissions](docs/screenshots/cli-permissions.png) | ![torromail MCP clients](docs/screenshots/cli-clients.png) |
 
 ## Product Boundaries
 
@@ -83,3 +124,8 @@ first, so nothing half-finished is ever the latest release. Installed Mac
 copies can check that feed automatically or on demand. See
 [docs/RELEASING.md](docs/RELEASING.md) for versioning rules, the required
 signing secrets, and how to build a release locally.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
