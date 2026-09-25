@@ -74,7 +74,8 @@ fn main() -> std::io::Result<()> {
         }
         match event::poll(Duration::from_millis(250)) {
             Ok(true) => match event::read() {
-                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => app.on_key(key),
+                // Windows reports releases too; a held key repeats as presses.
+                Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => app.on_key(key),
                 Ok(_) => {}
                 Err(error) => break Err(error),
             },
