@@ -1,0 +1,26 @@
+[package]
+name = "torromail-keychain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The macOS keychain the way the TorroMail app uses it: items any binary of the signing team reads without a dialog."
+
+# Not `workspace = true`, and on purpose: the workspace forbids `unsafe`, and a
+# forbid cannot be lifted further down. This crate is the one place that has to
+# call Security.framework functions no safe binding covers, so it denies unsafe
+# instead and allows it in exactly one module, `sys`. Everything else matches
+# the workspace.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = "3"
+security-framework-sys = "2"

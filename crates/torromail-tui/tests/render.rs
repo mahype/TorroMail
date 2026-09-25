@@ -1013,6 +1013,40 @@ fn the_background_check_installs_a_timer_and_removes_it_again() {
     assert_shows(&render(&app), &["[ ] Konten alle 15 Minuten prüfen", "Die Prüfung im Hintergrund ist aus."]);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn the_background_check_installs_a_launch_agent_and_removes_it_again() {
+    use std::sync::{Arc, Mutex};
+    let mut scene = scene("settings-autocheck-launchd");
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let recorded = Arc::clone(&calls);
+    scene.backend.systemctl = Box::new(move |arguments| {
+        recorded.lock().expect("not poisoned").push(arguments.join(" "));
+        Ok(())
+    });
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+
+    let agents = scene.root.join("units");
+    let agent = std::fs::read_to_string(agents.join("com.torromail.check.plist")).expect("a launch agent");
+    assert!(agent.contains("<string>com.torromail.check</string>"));
+    assert!(agent.contains("<string>/") && agent.contains("<string>check</string>"), "this program by absolute path: {agent}");
+    assert!(agent.contains("<integer>900</integer>"), "every fifteen minutes: {agent}");
+    let calls = calls.lock().expect("not poisoned").clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0].starts_with("bootout gui/") && calls[0].ends_with("/com.torromail.check"), "{calls:?}");
+    assert!(calls[1].starts_with("bootstrap gui/") && calls[1].ends_with("com.torromail.check.plist"), "{calls:?}");
+    assert_shows(&render(&app), &["[✓] Konten alle 15 Minuten prüfen", "alle 15 Minuten geprüft"]);
+
+    press(&mut app, KeyCode::Char(' '));
+    scene.act(&mut app);
+    assert!(!agents.join("com.torromail.check.plist").exists());
+    assert_shows(&render(&app), &["[ ] Konten alle 15 Minuten prüfen", "Die Prüfung im Hintergrund ist aus."]);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_timer_that_would_not_start_does_not_look_enabled() {
