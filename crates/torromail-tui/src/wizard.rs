@@ -3,9 +3,11 @@
 //! account comes to exist. A failed check returns to the sign-in step with
 //! everything typed still there.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use torromail_control::providers::{self, AuthPath, DiscoveredConfig};
 use torromail_control::{ConnectionSecurity, MailAccount, PermissionPreset, enroll};
+
+use crate::input;
 
 /// Typed text that must never show up in a debug print or a panic message.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -64,6 +66,8 @@ pub struct Wizard {
     pub password: Secret,
     /// Which field has the cursor within the current step.
     pub field: usize,
+    /// Where the caret sits in that field, in characters from its end.
+    pub caret_back: usize,
     /// Whether the server fields are open for typing.
     pub manual: bool,
     pub provider_label: String,
@@ -102,6 +106,7 @@ impl Default for Wizard {
             smtp_port: "587".to_owned(),
             password: Secret::default(),
             field: 0,
+            caret_back: 0,
             manual: false,
             provider_label: String::new(),
             provider: providers::PROVIDER_IMAP_SMTP,
@@ -143,7 +148,17 @@ impl Wizard {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Outcome {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        let place = (self.step, self.manual, self.field);
+        let outcome = self.handle(key);
+        // Another field takes the caret to its end.
+        if (self.step, self.manual, self.field) != place {
+            self.caret_back = 0;
+        }
+        outcome
+    }
+
+    fn handle(&mut self, key: KeyEvent) -> Outcome {
+        if input::is_command(&key) {
             if key.code == KeyCode::Char('d') && self.step == Step::SignIn {
                 self.manual = !self.manual;
                 // The cursor lands on the first server field, or back on the
@@ -161,18 +176,16 @@ impl Wizard {
                 self.field = (self.field + count - 1) % count;
             }
             KeyCode::Char(' ') if self.step == Step::Rights => self.preset = self.field,
-            KeyCode::Char(character) => {
-                self.error = None;
-                if let Some(text) = self.text() {
-                    text.push(character);
+            code => {
+                let mut caret_back = self.caret_back;
+                if let Some(text) = self.text()
+                    && input::edit(text, &mut caret_back, code)
+                    && matches!(code, KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete)
+                {
+                    self.error = None;
                 }
+                self.caret_back = caret_back;
             }
-            KeyCode::Backspace => {
-                if let Some(text) = self.text() {
-                    text.pop();
-                }
-            }
-            _ => {}
         }
         if self.step == Step::Rights {
             self.preset = self.field;
@@ -239,6 +252,7 @@ impl Wizard {
         self.looking_up = false;
         self.step = Step::SignIn;
         self.field = 0;
+        self.caret_back = 0;
         let Some(config) = found else {
             self.hint = Hint::Unknown;
             self.manual = true;

@@ -1,12 +1,13 @@
 //! What the user is looking at, and what a key does to it.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use torromail_control::policy::ClientAccountAccess;
 use torromail_control::{CacheLevel, ConnectionSecurity, FolderRule, MailAccount, PermissionPreset, ReadAccess};
 
 use crate::data::Snapshot;
 use crate::i18n::Lang;
+use crate::input;
 use crate::wizard::{Outcome, Secret, Wizard};
 
 /// The same seven places, in the same order, as the macOS app's sidebar.
@@ -155,6 +156,9 @@ pub struct App {
     /// The account being edited, apart from the stored one until it is saved.
     pub draft: Option<MailAccount>,
     pub cursor: usize,
+    /// Where the caret sits in the text row under the cursor, in characters
+    /// from its end.
+    pub caret_back: usize,
     pub confirm_discard: bool,
     pub message: Option<Message>,
     /// What the event loop should do next; it reports back through
@@ -201,6 +205,7 @@ impl App {
             focus: Focus::List,
             draft: None,
             cursor: 0,
+            caret_back: 0,
             confirm_discard: false,
             message: None,
             request: None,
@@ -257,6 +262,7 @@ impl App {
         self.draft = Some(view.account.clone());
         self.focus = Focus::Detail;
         self.cursor = 0;
+        self.caret_back = 0;
         self.detail_scroll = 0;
     }
 
@@ -320,18 +326,17 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char(character) => {
+            code => {
+                let mut caret_back = self.caret_back;
                 if let Some(text) = self.connection_text() {
-                    text.push(character);
+                    input::edit(text, &mut caret_back, code);
                 }
+                self.caret_back = caret_back;
+                return;
             }
-            KeyCode::Backspace => {
-                if let Some(text) = self.connection_text() {
-                    text.pop();
-                }
-            }
-            _ => {}
         }
+        // Another row takes the caret to its end.
+        self.caret_back = 0;
     }
 
     /// Row 0 is the per-folder switch, then the folders, then the five roles.
@@ -524,7 +529,7 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if let Some(wizard) = &mut self.wizard {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if input::is_command(&key) && key.code == KeyCode::Char('c') {
                 self.should_quit = true;
                 return;
             }
@@ -536,7 +541,7 @@ impl App {
             }
             return;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if input::is_command(&key) {
             match key.code {
                 // Quitting over unsaved changes asks first, like leaving does.
                 KeyCode::Char('c' | 'q') if self.is_dirty() && !self.confirm_discard => self.confirm_discard = true,

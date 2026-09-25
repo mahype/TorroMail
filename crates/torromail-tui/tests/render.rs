@@ -1197,3 +1197,21 @@ fn the_status_document_carries_the_glance_and_none_of_what_was_searched_for() {
     assert!(plain.contains("BROKEN") && plain.contains("Claude Code") && plain.contains("connected"));
     assert!(torromail_tui::status::plain(&Snapshot::default()).contains("nothing set up yet"));
 }
+
+#[test]
+fn altgr_characters_and_arrow_keys_work_in_fields() {
+    let scene = scene("wizard-altgr");
+    let mut app = App::new(Lang::De, scene.backend.load());
+    press(&mut app, KeyCode::Char('n'));
+    // Windows sends AltGr+Q — a German @ — as Ctrl+Alt with the resolved character.
+    type_text(&mut app, "svenmailbox.org");
+    for _ in 0.."mailbox.org".len() {
+        press(&mut app, KeyCode::Left);
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+    press(&mut app, KeyCode::End);
+    press(&mut app, KeyCode::Backspace);
+    type_text(&mut app, "g");
+    assert_eq!(app.wizard.as_ref().expect("open").email, "sven@mailbox.org");
+    assert_shows(&render(&app), &["sven@mailbox.org"]);
+}
