@@ -1743,6 +1743,7 @@ dependencies = [
  "roxmltree",
  "serde_json",
  "sha2",
+ "torromail-keychain",
 ]
 
 [[package]]
@@ -1765,6 +1766,15 @@ dependencies = [
  "rustls",
  "torromail-core",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "torromail-keychain"
+version = "0.10.3"
+dependencies = [
+ "core-foundation",
+ "security-framework",
+ "security-framework-sys",
 ]
 
 [[package]]
@@ -1798,6 +1808,7 @@ dependencies = [
  "serde_json",
  "torromail-control",
  "torromail-discovery",
+ "torromail-keychain",
  "torromail-mcp",
 ]
 

@@ -1,9 +1,10 @@
 name: Release
 
 # One tag, one release, every platform: the signed and notarized Mac app with
-# its Sparkle appcast, the Linux programs with their AUR package, and the
-# Windows programs (unsigned, and marked experimental until someone has used
-# them on a real machine).
+# its Sparkle appcast, the Mac terminal programs (signed and notarized too),
+# the Linux programs with their AUR package, and the Windows programs
+# (unsigned, and marked experimental until someone has used them on a real
+# machine).
 #
 # The release is assembled as a draft and only published once every job has
 # delivered. The Mac app's updater reads releases/latest/download/appcast.xml,
@@ -169,6 +170,13 @@ jobs:
       - name: Sign and notarize .app
         run: ./scripts/codesign-macos.sh
 
+      # Same certificate, same team as the app: that is what lets the terminal
+      # programs and the app share keychain items without a dialog.
+      - name: Build, sign and notarize the terminal programs
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: ./scripts/build-cli-macos.sh
+
       - name: Build DMG
         run: ./scripts/build-dmg.sh
 
@@ -223,6 +231,8 @@ jobs:
             dist/TorroMail-*.dmg
             dist/SHA256SUMS.txt
             dist/appcast.xml
+            dist/torromail-*-universal-macos.tar.gz
+            dist/torromail-*-universal-macos.tar.gz.sha256
           if-no-files-found: error
 
       - name: Cleanup keychain
@@ -250,9 +260,14 @@ jobs:
         run: |
           set -euo pipefail
           ls -l assets
-          # The three an installed Mac app will come looking for.
+          # The appcast an installed Mac app comes looking for, and a download
+          # for every system.
           test -f assets/appcast.xml
-          ls assets/TorroMail-*.dmg assets/torromail-*-x86_64-linux.tar.gz assets/torromail-*-x86_64-windows.zip > /dev/null
+          ls assets/TorroMail-*.dmg \
+             assets/torromail-*-universal-macos.tar.gz \
+             assets/torromail-*-x86_64-linux.tar.gz \
+             assets/torromail-*-aarch64-linux.tar.gz \
+             assets/torromail-*-x86_64-windows.zip > /dev/null
 
           flags=(--draft --title "$TAG" --generate-notes)
           if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi

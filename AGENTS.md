@@ -79,6 +79,11 @@ localization.
   cache defaults, pending actions, and search result sets.
 - `crates/torromail-mcp`: explicit MCP tool catalog and stdio line server
   facade.
+- `crates/torromail-tui`: the terminal control surface (`torromail`) for
+  macOS, Linux and Windows — the same boundary as the app applies.
+- `crates/torromail-keychain`: the macOS keychain with the app's team-scoped
+  access lists. The only crate allowed `unsafe`, and only in its `sys` module;
+  the rest of the workspace forbids it.
 - `apps/TorroMailApp`: SwiftUI macOS configuration/control app.
 - `docs`: architecture notes, product decisions, and implementation plans.
 

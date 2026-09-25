@@ -2,7 +2,8 @@
 
 This document is for maintainers. It describes how TorroMail is versioned,
 built, signed, notarized, and published: the Mac app as a downloadable `.dmg`,
-the Linux programs as tarballs and as the `torromail-bin` AUR package — all in
+the terminal programs for macOS (a signed, notarized universal tarball), Linux
+(tarballs and the `torromail-bin` AUR package) and Windows (a zip) — all in
 one GitHub Release per version.
 
 ## TL;DR
@@ -58,6 +59,14 @@ halves side by side.
 5. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket.
 6. Signs the DMG with TorroMail's Sparkle Ed25519 key and creates
    `appcast.xml` with the generated release notes.
+7. Builds the terminal programs `torromail` and `torromail-mcp` universal,
+   signs them with the same Developer ID under the hardened runtime, has them
+   notarized and packs `torromail-<version>-universal-macos.tar.gz`
+   ([scripts/build-cli-macos.sh](../scripts/build-cli-macos.sh)). The shared
+   Team ID is what lets them and the app read one another's keychain items;
+   the script refuses a signature without one. A bare executable cannot carry
+   a stapled ticket, so Gatekeeper checks the notarization online on first
+   start.
 
 **Linux** ([build-linux.yml](../.github/workflows/build-linux.yml)):
 
