@@ -187,10 +187,8 @@ fn connection(
     lines.push(rule(lang.t("Connection"), width));
     for (index, (label, value, is_text)) in rows.into_iter().enumerate() {
         let on = index == app.cursor;
-        let mut spans = vec![Span::styled(format!("{:<17} ", lang.t(label)), theme::muted()), Span::raw(value)];
-        if on && is_text {
-            spans.push(Span::styled("█", Style::new().fg(theme::SILVER)));
-        }
+        let mut spans = vec![Span::styled(format!("{:<17} ", lang.t(label)), theme::muted())];
+        spans.extend(super::caret_spans(value, (on && is_text).then_some(app.caret_back)));
         let line = Line::from(spans);
         lines.push(if on { line.style(theme::selected()) } else { line });
     }

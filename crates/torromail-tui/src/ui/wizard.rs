@@ -45,14 +45,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, lang: Lang, wizard: &Wizard) {
 
     let input = |label: &'static str, value: &str, focused: bool, masked: bool| {
         let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        let cursor = if focused { "█" } else { "" };
+        let mut spans =
+            vec![Span::styled(if focused { "▌ " } else { "│ " }, Style::new().fg(if focused { theme::ACCENT } else { theme::LINE }))];
+        spans.extend(super::caret_spans(shown, focused.then_some(wizard.caret_back)));
         vec![
             Line::styled(lang.t(label), if focused { theme::bold() } else { theme::muted() }),
-            Line::from(vec![
-                Span::styled(if focused { "▌ " } else { "│ " }, Style::new().fg(if focused { theme::ACCENT } else { theme::LINE })),
-                Span::raw(shown),
-                Span::styled(cursor, Style::new().fg(theme::SILVER)),
-            ]),
+            Line::from(spans),
             Line::default(),
         ]
     };

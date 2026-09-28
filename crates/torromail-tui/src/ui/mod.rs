@@ -179,6 +179,14 @@ pub(crate) fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![Span::styled(format!("{label:<17} "), theme::muted()), Span::raw(value.into())])
 }
 
+/// A field's text, with the caret drawn as a block over the character it sits
+/// on when the field has focus.
+pub(crate) fn caret_spans(shown: String, caret_back: Option<usize>) -> Vec<Span<'static>> {
+    let Some(caret_back) = caret_back else { return vec![Span::raw(shown)] };
+    let (before, under, after) = crate::input::split(&shown, caret_back);
+    vec![Span::raw(before), Span::styled(under, Style::new().fg(theme::SILVER).add_modifier(Modifier::REVERSED)), Span::raw(after)]
+}
+
 /// The dot and the word for an account's state — never the colour alone.
 pub(crate) fn health_mark(lang: Lang, health: &AccountHealth) -> (Span<'static>, &'static str) {
     match health {

@@ -10,6 +10,7 @@ pub mod autocheck;
 pub mod check;
 pub mod data;
 pub mod i18n;
+pub mod input;
 pub mod rebuild;
 pub mod settings;
 pub mod status;
