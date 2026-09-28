@@ -233,7 +233,8 @@ pub struct Backend {
     /// Asked once: launching the server for every two-second reload would be
     /// a process per frame for an answer that does not change.
     pub tool_count: std::cell::OnceCell<Option<usize>>,
-    /// Where systemd user units live, and how `systemctl --user` is run.
+    /// Where the background check's job files live, and how the scheduler
+    /// (`systemctl --user`, `launchctl`) is run.
     pub unit_directory: PathBuf,
     pub systemctl: Box<Systemctl>,
     /// Asks for the newest release tag. The real one asks GitHub.
@@ -367,20 +368,24 @@ impl Backend {
         Ok(target)
     }
 
-    /// Turns the systemd timer behind the background check on or off.
+    /// Turns the scheduler job behind the background check on or off: a
+    /// systemd timer on Linux, a launchd agent on macOS.
     pub fn set_autocheck(&self, on: bool) -> Result<(), String> {
-        // A systemd user timer is what runs it. Elsewhere the accounts are
-        // still checked whenever an assistant starts the server.
-        if !cfg!(target_os = "linux") {
-            return Err(if cfg!(target_os = "macos") {
-                "on a Mac the TorroMail app checks the accounts in the background".to_owned()
-            } else {
-                "not available on this system yet — accounts are still checked whenever an assistant starts".to_owned()
-            });
+        // Elsewhere the accounts are still checked whenever an assistant
+        // starts the server.
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            return Err("not available on this system yet — accounts are still checked whenever an assistant starts".to_owned());
         }
+        let macos = cfg!(target_os = "macos");
         if on {
             let program = std::env::current_exe().map_err(|error| error.to_string())?;
-            crate::autocheck::enable(&self.unit_directory, &program, self.systemctl.as_ref())
+            if macos {
+                crate::autocheck::enable_launch_agent(&self.unit_directory, &program, self.systemctl.as_ref())
+            } else {
+                crate::autocheck::enable(&self.unit_directory, &program, self.systemctl.as_ref())
+            }
+        } else if macos {
+            crate::autocheck::disable_launch_agent(&self.unit_directory, self.systemctl.as_ref())
         } else {
             crate::autocheck::disable(&self.unit_directory, self.systemctl.as_ref())
         }

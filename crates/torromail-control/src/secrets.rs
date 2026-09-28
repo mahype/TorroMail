@@ -1,8 +1,8 @@
 //! Where passwords, token sets and client keys are kept. Never in a file of
-//! ours: on macOS the keychain holds them, on Windows the Credential Manager,
-//! elsewhere the desktop's Secret Service (gnome-keyring, KWallet). There is
-//! no plaintext fallback — a
-//! machine without a secret service cannot hold an account, and saying so is
+//! ours: on macOS the keychain holds them (shared by the app, the server and
+//! the terminal surface), on Windows the Credential Manager, elsewhere the
+//! desktop's Secret Service (gnome-keyring, KWallet). There is no plaintext
+//! fallback — a machine without a secret service cannot hold an account, and saying so is
 //! better than pretending.
 //!
 //! The Secret Service is reached through `secret-tool`, the command libsecret
@@ -176,9 +176,44 @@ impl SecretStore for CredentialManagerStore {
     }
 }
 
-/// The store this platform keeps secrets in: the Credential Manager on
-/// Windows, the Secret Service everywhere else this is called. (On macOS the
-/// app and the server talk to the keychain themselves.)
+/// The macOS keychain, with the access list the app gives its items: any
+/// binary signed by TorroMail's team reads them without a dialog, so what the
+/// terminal surface stores the app and the server read, and the other way
+/// round. See `torromail-keychain` for how.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Default)]
+pub struct KeychainStore;
+
+#[cfg(target_os = "macos")]
+impl KeychainStore {
+    /// A keychain that would have needed a dialog is usually a locked one — a
+    /// state of the machine. Anything else it says is a refusal.
+    fn error(error: torromail_keychain::Error) -> SecretError {
+        if error.needs_interaction() {
+            SecretError::Unavailable(error.to_string())
+        } else {
+            SecretError::Failed(error.to_string())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SecretStore for KeychainStore {
+    fn get(&self, service: &str, account: &str) -> Result<Option<String>, SecretError> {
+        torromail_keychain::read(service, account).map_err(Self::error)
+    }
+
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), SecretError> {
+        torromail_keychain::save(service, account, secret).map_err(Self::error)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), SecretError> {
+        torromail_keychain::delete(service, account).map_err(Self::error)
+    }
+}
+
+/// The store this platform keeps secrets in: the keychain on macOS, the
+/// Credential Manager on Windows, the Secret Service everywhere else.
 ///
 /// `TORROMAIL_SECRET_TOOL` names another `secret-tool` — for tests, and for
 /// installations that keep it off the `PATH` an assistant starts the server
@@ -193,6 +228,9 @@ pub fn platform_store() -> Box<dyn SecretStore> {
     {
         match std::env::var_os("TORROMAIL_SECRET_TOOL") {
             Some(program) => Box::new(SecretToolStore::with_program(program)),
+            #[cfg(target_os = "macos")]
+            None => Box::new(KeychainStore),
+            #[cfg(not(target_os = "macos"))]
             None => Box::new(SecretToolStore::default()),
         }
     }

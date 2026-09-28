@@ -15,6 +15,10 @@ fn main() -> std::io::Result<()> {
         println!("torromail {}", ui::VERSION);
         return Ok(());
     }
+    // A secret that would need a dialog to read fails instead, and the surface
+    // says so. The lock re-enables the dialogs on drop, so it lives for the run.
+    #[cfg(target_os = "macos")]
+    let _keychain_ui = torromail_keychain::silence_prompts();
     // No home means no place the files could be. Inventing one would show an
     // empty, healthy-looking surface over a broken setup.
     let Some(directory) = paths::default_data_directory() else {
@@ -34,7 +38,7 @@ fn main() -> std::io::Result<()> {
         rebuild: std::cell::RefCell::new(None),
         tool_count: std::cell::OnceCell::new(),
         unit_directory: torromail_tui::autocheck::unit_directory(&home, xdg_config.as_deref()),
-        systemctl: Box::new(torromail_tui::autocheck::run_systemctl),
+        systemctl: Box::new(torromail_tui::autocheck::run_scheduler),
         release_lookup: Box::new(|| torromail_discovery::latest_release_tag("mahype/TorroMail")),
         // Downloads when there is one — where people look for a file they
         // just asked for — otherwise the home directory.

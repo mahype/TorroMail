@@ -5,6 +5,7 @@ members = [
     "crates/torromail-core",
     "crates/torromail-discovery",
     "crates/torromail-imap-tls",
+    "crates/torromail-keychain",
     "crates/torromail-mcp",
     "crates/torromail-oauth",
     "crates/torromail-tui",

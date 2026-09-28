@@ -21,3 +21,9 @@ torromail-mcp = { path = "../torromail-mcp" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ratatui = "0.30"
 serde_json = "1"
+
+# The keychain's dialogs are switched off for the whole run, like the server
+# does: nobody may be there to answer one, and a background check certainly
+# is not.
+[target.'cfg(target_os = "macos")'.dependencies]
+torromail-keychain = { path = "../torromail-keychain" }

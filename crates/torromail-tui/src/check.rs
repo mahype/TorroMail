@@ -54,8 +54,21 @@ pub fn run(backend: &Backend, lang: Lang, notify: Option<Notify<'_>>) -> Summary
     summary
 }
 
-/// `notify-send`, which every desktop with a notification daemon has.
+/// A desktop notification: Notification Center on macOS, `notify-send`
+/// (which every desktop with a notification daemon has) elsewhere.
 pub fn notify_send(title: &str, body: &str) {
+    if cfg!(target_os = "macos") {
+        // Title and body travel as arguments, never inside the script, so
+        // nothing an account is called can become AppleScript.
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)"])
+            .args(["-e", "end run", title, body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        return;
+    }
     let _ = std::process::Command::new("notify-send")
         .args(["--app-name", "TorroMail", "--icon", "mail-unread", title, body])
         .stdin(std::process::Stdio::null())
