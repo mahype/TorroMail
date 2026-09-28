@@ -380,7 +380,8 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
     }
 
     /// SwiftUI owns window creation, so the root view hands its `openWindow`
-    /// action over for the reopen path.
+    /// action over for Dock and notification reopens. The menu bar uses its
+    /// own action, which stays live after the root window closes.
     var openMainWindow: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -410,8 +411,13 @@ final class TorroMailPresence: NSObject, NSApplicationDelegate, ObservableObject
         }
     }
 
-    func showMainWindow() {
-        openMainWindow?()
+    func showMainWindow(open: (() -> Void)? = nil) {
+        // A closed window leaves an app without a Dock icon in accessory mode.
+        // Restore foreground activation before asking SwiftUI to create it.
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        (open ?? openMainWindow)?()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -717,17 +723,18 @@ struct TorroMailApp: App {
 /// The menu bar item stays a doorway, not a second control surface: open the
 /// window, or stop the app.
 private struct MenuBarContent: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var presence: TorroMailPresence
 
     var body: some View {
         Button(L("Open TorroMail")) {
-            presence.showMainWindow()
+            showMainWindow()
         }
         if model.pendingActionCount > 0 {
             Button(pendingTitle) {
                 model.selectedSidebarItem = .dashboard
-                presence.showMainWindow()
+                showMainWindow()
             }
         }
         Divider()
@@ -738,6 +745,12 @@ private struct MenuBarContent: View {
 
     private var pendingTitle: String {
         String(format: L("%d waiting for you"), model.pendingActionCount)
+    }
+
+    private func showMainWindow() {
+        // The root view that supplied `presence.openMainWindow` can be gone
+        // after its window closes. The menu bar scene still has a live action.
+        presence.showMainWindow { openWindow(id: TorroMailApp.mainWindowID) }
     }
 }
 
@@ -794,8 +807,8 @@ private struct TorroMailRootView: View {
                 .preferredTextSize()
                 .environmentObject(model)
         }
-        // The Dock tile and the menu bar item both need to reopen the window,
-        // and only a view can reach SwiftUI's window actions.
+        // Dock clicks and notification taps need to reopen the window, and
+        // only a view can reach SwiftUI's window actions.
         .onAppear {
             presence.openMainWindow = { openWindow(id: TorroMailApp.mainWindowID) }
         }
