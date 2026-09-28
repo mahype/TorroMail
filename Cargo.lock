@@ -1728,7 +1728,7 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "torromail-cache"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "rusqlite",
  "torromail-core",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-control"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "getrandom 0.2.17",
  "keyring",
@@ -1748,11 +1748,11 @@ dependencies = [
 
 [[package]]
 name = "torromail-core"
-version = "0.10.4"
+version = "0.10.5"
 
 [[package]]
 name = "torromail-discovery"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "getrandom 0.2.17",
  "torromail-control",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-imap-tls"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "rustls",
  "torromail-core",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-keychain"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "core-foundation",
  "security-framework",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-mcp"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "security-framework",
  "serde_json",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-oauth"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "serde_json",
  "ureq",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-tui"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "chrono",
  "ratatui",
