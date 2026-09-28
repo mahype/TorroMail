@@ -131,9 +131,9 @@
 
 /* Menu bar */
 "TorroMail" = "TorroMail";
-"Open TorroMail" = "TorroMail öffnen";
+"Settings…" = "Einstellungen…";
 "%d waiting for you" = "%d wartet auf dich";
-"Quit TorroMail" = "TorroMail beenden";
+"Quit" = "Beenden";
 
 /* Settings */
 "Start at login" = "Beim Anmelden starten";

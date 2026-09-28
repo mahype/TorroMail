@@ -721,14 +721,15 @@ struct TorroMailApp: App {
 }
 
 /// The menu bar item stays a doorway, not a second control surface: open the
-/// window, or stop the app.
+/// settings pane, or stop the app.
 private struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var presence: TorroMailPresence
 
     var body: some View {
-        Button(L("Open TorroMail")) {
+        Button(L("Settings…")) {
+            model.selectedSidebarItem = .settings
             showMainWindow()
         }
         if model.pendingActionCount > 0 {
@@ -738,7 +739,7 @@ private struct MenuBarContent: View {
             }
         }
         Divider()
-        Button(L("Quit TorroMail")) {
+        Button(L("Quit")) {
             NSApp.terminate(nil)
         }
     }
