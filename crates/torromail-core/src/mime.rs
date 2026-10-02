@@ -596,7 +596,10 @@ fn decode_entities(text: &str) -> String {
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);
         let after = &rest[start..];
-        let Some(end) = after[..after.len().min(12)].find(';') else {
+        // Search bytes, not chars: slicing at a fixed byte offset can land
+        // inside a multi-byte character, and `;` is ASCII anyway.
+        let window = &after.as_bytes()[..after.len().min(12)];
+        let Some(end) = window.iter().position(|&byte| byte == b';') else {
             out.push('&');
             rest = &after[1..];
             continue;
@@ -797,6 +800,13 @@ mod tests {
         assert!(!text.contains("track()"));
         assert!(!text.contains("color:red"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn an_ampersand_before_multibyte_text_does_not_panic() {
+        // The `ä` straddles the 12-byte entity window after the `&`.
+        assert_eq!(decode_entities("Kaffee & Kuchen, Säfte"), "Kaffee & Kuchen, Säfte");
+        assert_eq!(decode_entities("&#252; & Kuchen, Säfte"), "ü & Kuchen, Säfte");
     }
 
     #[test]
