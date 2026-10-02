@@ -68,3 +68,7 @@ jobs:
           ls -t ~/Library/Logs/DiagnosticReports 2>/dev/null | head -5 || true
       - name: Swift app build
         run: swift build --package-path apps/TorroMailApp --scratch-path apps/TorroMailApp/.build
+      - name: Build app bundle with terminal updater
+        run: ./scripts/make-app-bundle.sh
+      - name: Signed terminal update and failure paths
+        run: python3 scripts/test-cli-update.py

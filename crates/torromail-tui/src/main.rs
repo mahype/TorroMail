@@ -11,6 +11,18 @@ use torromail_tui::{data, ui};
 const REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> std::io::Result<()> {
+    // Recovery updates must work even when account state or keychain access
+    // is broken. Do not initialize the TUI/backend before this dispatch.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "update") {
+        std::process::exit(torromail_tui::update::run(args.into_iter().skip(1).collect()));
+    }
+    if args.first().is_some_and(|arg| arg == "--help" || arg == "-h") {
+        println!("Usage: torromail [status [--json] | check | update [OPTIONS]]\n\
+                  With no command, open the terminal control surface.\n\n{}",
+                  torromail_tui::update::USAGE);
+        return Ok(());
+    }
     if std::env::args().any(|argument| argument == "--version" || argument == "-V") {
         println!("torromail {}", ui::VERSION);
         return Ok(());

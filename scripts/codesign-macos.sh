@@ -32,9 +32,11 @@ fi
 echo "==> Signing $app with hardened runtime"
 # Sign the bundled MCP server explicitly first — `--deep` does not reliably
 # treat a second Mach-O in Contents/MacOS as nested code.
-codesign --force --timestamp --options=runtime \
-    --sign "$MACOS_SIGN_IDENTITY" \
-    "$app/Contents/MacOS/torromail-mcp"
+for program in torromail-mcp torromail; do
+    codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/$program"
+done
+codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" \
+    "$app/Contents/Helpers/TorroMailUpdater.app"
 codesign --force --deep --timestamp --options=runtime \
     --entitlements "$entitlements" \
     --sign "$MACOS_SIGN_IDENTITY" \

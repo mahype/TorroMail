@@ -16,6 +16,7 @@ pub mod settings;
 pub mod status;
 pub mod theme;
 pub mod ui;
+pub mod update;
 pub mod wizard;
 
 use app::{App, Request};

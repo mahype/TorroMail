@@ -49,14 +49,24 @@ halves side by side.
 
 **macOS** (`macos-14` runner):
 
-1. Builds `torromail-mcp` for `aarch64` and `x86_64` and lipos them universal.
+1. Builds `torromail` and `torromail-mcp` for `aarch64` and `x86_64` and lipos them universal.
 2. Builds a universal Swift executable and assembles `dist/TorroMail.app`
-   (bundled MCP server, icon, localization, version-stamped `Info.plist`).
+   (bundled CLI and MCP server, icon, localization, version-stamped `Info.plist`).
+   The GUI executable is `TorroMailApp`: `TorroMail` would collide with
+   `torromail` on a case-insensitive volume. `build-cli-updater.sh` compiles
+   Sparkle's command-line drivers from the same pinned SwiftPM checkout as its
+   framework, with TorroMail's restricted entrypoint and unique helper bundle
+   ID (`com.torromail.cli-updater`). The helper lives in
+   `Contents/Helpers/TorroMailUpdater.app`, linked to the enclosing app's
+   framework. Sparkle's license is included with it.
 3. Signs the bundle with the **Developer ID Application** certificate under the
-   hardened runtime, notarizes it with Apple, and staples the ticket.
+   hardened runtime, notarizes it with Apple, and staples the ticket. Both Rust
+   programs and the CLI updater are signed explicitly before the enclosing
+   bundle, with the same team as the GUI.
 4. Packages a drag-to-Applications `.dmg`, signs + notarizes + staples it, and
    writes `SHA256SUMS.txt`.
-5. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket.
+5. Mounts the DMG and smoke-tests codesign / Gatekeeper / stapled ticket,
+   bundled CLI startup/help, helper linkage, architectures and signing teams.
 6. Signs the DMG with TorroMail's Sparkle Ed25519 key and creates
    `appcast.xml` with the generated release notes.
 7. Builds the terminal programs `torromail` and `torromail-mcp` universal,
@@ -176,3 +186,28 @@ that state.
 
 For the fast day-to-day dev bundle (debug, host-arch, ad-hoc), use
 [scripts/make-app-bundle.sh](../scripts/make-app-bundle.sh) instead.
+
+## Verify terminal app recovery
+
+After building the dev bundle (`scripts/make-app-bundle.sh`), run:
+
+```sh
+python3 scripts/test-cli-update.py
+```
+
+The test creates disposable bundles, a unique Sparkle preferences domain and an
+in-memory-generated Ed25519 key, then serves a local appcast. It checks an
+already current app, an available update without installation, rejection of an
+invalid signature and replacement by a correctly signed update while the app
+is closed, plus termination and relaunch of a running app without a window.
+It also rejects disabled development builds and unrelated bundles.
+It does not update `/Applications/TorroMail.app` or read mail/keychain data.
+The macOS CI job runs this test; release DMG smoke checks verify the universal,
+notarized artifact separately.
+
+The recovery command uses Sparkle's official CLI drivers (see
+[upstream documentation](https://sparkle-project.org/documentation/sparkle-cli/)).
+No extra feed override or signature bypass is exposed. `update --interactive`
+permits the installer's authorization prompt when the application directory
+requires it. `update --allow-major-upgrades` opts into Sparkle major upgrades.
+Exit codes are documented by `torromail update --help`.

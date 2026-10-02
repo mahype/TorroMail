@@ -11,11 +11,12 @@ swift build --package-path "$PKG" --scratch-path "$PKG/.build"
 BIN="$(swift build --package-path "$PKG" --scratch-path "$PKG/.build" --show-bin-path)"
 
 # The app ships its own MCP server so launches never depend on cwd or PATH.
-cargo build -p torromail-mcp --manifest-path "$ROOT/Cargo.toml"
+cargo build -p torromail-mcp -p torromail-tui --manifest-path "$ROOT/Cargo.toml"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
-cp "$BIN/TorroMailApp" "$APP/Contents/MacOS/TorroMail"
+cp "$BIN/TorroMailApp" "$APP/Contents/MacOS/TorroMailApp"
+cp "$ROOT/target/debug/torromail" "$APP/Contents/MacOS/torromail"
 cp "$ROOT/target/debug/torromail-mcp" "$APP/Contents/MacOS/torromail-mcp"
 cp -R "$BIN/TorroMailApp_TorroMailApp.bundle" "$APP/Contents/Resources/"
 cp "$PKG/Icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -26,9 +27,11 @@ if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
     exit 1
 fi
 cp -R "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/"
-if ! otool -l "$APP/Contents/MacOS/TorroMail" | grep -Fq '@executable_path/../Frameworks'; then
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/TorroMail"
+if ! otool -l "$APP/Contents/MacOS/TorroMailApp" | grep -Fq '@executable_path/../Frameworks'; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/TorroMailApp"
 fi
+
+"$ROOT/scripts/build-cli-updater.sh" "$APP"
 
 # Share the checked-in Info.plist template with the release build so the two
 # never drift. Stamp a dev version so the bundle is identifiable.
@@ -49,12 +52,18 @@ DEV_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed
 IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Apple Development|Developer ID Application/ { print $2; exit }')}"
 if [ -n "$IDENTITY" ]; then
-    codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/torromail-mcp"
+    for program in torromail-mcp torromail; do
+        codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/$program"
+    done
+    codesign --force --sign "$IDENTITY" "$APP/Contents/Helpers/TorroMailUpdater.app"
     codesign --force --deep --sign "$IDENTITY" "$APP"
     echo "Signed: $IDENTITY"
 else
     echo "warning: no codesigning identity found; keychain will prompt per item" >&2
     echo "         set CODESIGN_IDENTITY or install an Apple Development certificate" >&2
+    for program in torromail-mcp torromail; do codesign --force --sign - "$APP/Contents/MacOS/$program"; done
+    codesign --force --sign - "$APP/Contents/Helpers/TorroMailUpdater.app"
+    codesign --force --deep --sign - "$APP"
 fi
 
 echo "Bundle: $APP"

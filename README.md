@@ -59,6 +59,32 @@ log — and neither shows your mail. The data below is a demo setup.
 | --- | --- |
 | ![torromail account permissions](docs/screenshots/cli-permissions.png) | ![torromail MCP clients](docs/screenshots/cli-clients.png) |
 
+### Update the macOS app from Terminal
+
+The next release after 0.10.5 bundles `torromail` with the app. Dragging
+`TorroMail.app` into Applications also installs the terminal control surface and
+its separate Sparkle updater. If the app window will not open, run:
+
+```sh
+/Applications/TorroMail.app/Contents/MacOS/torromail update
+```
+
+Use `update --check` to check without downloading or installing. An available
+update returns exit code 0; an already current app returns 4. Other nonzero codes
+report errors (see `update --help`). If installation needs macOS authorization,
+repeat with `update --interactive` as your normal user. Sparkle verifies the
+update signature, replaces the app and restarts it if it was running. The command
+uses the app's existing feed and signing key; it does not need the app window,
+account state or mail passwords.
+
+For another installation location, invoke that bundle's `Contents/MacOS/torromail`
+(the containing app is detected automatically), or use a separately installed
+CLI with `torromail update --app "/path/to/TorroMail.app"`. Dragging the app does
+not add `torromail` to your shell's PATH. Development bundles disable updates.
+Linux and Windows continue to update through their package manager or releases.
+
+Apps at 0.10.5 or earlier need one manual DMG update to gain this command.
+
 ## Product Boundaries
 
 - Build the mail retrieval, policy, cache, and MCP interface first.
