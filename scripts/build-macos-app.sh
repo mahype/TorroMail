@@ -58,7 +58,7 @@ echo "==> Building TorroMail $VERSION"
 
 # --- Detect whether we can build universal (requires full Xcode) --------------
 
-xcode_dev_path="$(xcode-select -p 2>/dev/null || true)"
+xcode_dev_path="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 # A full Xcode developer dir ends in `.app/Contents/Developer` (including the
 # versioned /Applications/Xcode_16.app that GitHub-hosted runners use). Command
 # Line Tools live at /Library/Developer/CommandLineTools and cannot build
@@ -80,28 +80,26 @@ case "$native_arch" in
     *)       echo "error: unsupported host architecture $native_arch" >&2; exit 1 ;;
 esac
 
-# --- Rust MCP server binary ---------------------------------------------------
-# torromail-mcp is a standalone executable that the app supervises over stdio;
-# it is copied into the bundle, not linked into the Swift binary.
-
+# --- Rust terminal programs ---------------------------------------------------
+# Both programs travel with the drag-to-Applications bundle.
+programs=(torromail-mcp torromail)
 if $build_universal; then
-    echo "==> Building torromail-mcp for aarch64-apple-darwin"
-    cargo build --release --target aarch64-apple-darwin -p torromail-mcp
-    echo "==> Building torromail-mcp for x86_64-apple-darwin"
-    cargo build --release --target x86_64-apple-darwin -p torromail-mcp
-    echo "==> Lipo'ing universal torromail-mcp"
-    mkdir -p target/universal/release
-    lipo -create \
-        target/aarch64-apple-darwin/release/torromail-mcp \
-        target/x86_64-apple-darwin/release/torromail-mcp \
-        -output target/universal/release/torromail-mcp
-    mcp_bin="target/universal/release/torromail-mcp"
+    for target in aarch64-apple-darwin x86_64-apple-darwin; do
+        cargo build --release --locked --target "$target" -p torromail-mcp -p torromail-tui
+    done
+    rust_bin="target/universal/release"
+    mkdir -p "$rust_bin"
+    for program in "${programs[@]}"; do
+        lipo -create \
+            "target/aarch64-apple-darwin/release/$program" \
+            "target/x86_64-apple-darwin/release/$program" \
+            -output "$rust_bin/$program"
+    done
 else
-    echo "==> Building torromail-mcp for $native_rust_target"
-    cargo build --release --target "$native_rust_target" -p torromail-mcp
-    mcp_bin="target/$native_rust_target/release/torromail-mcp"
+    cargo build --release --locked --target "$native_rust_target" -p torromail-mcp -p torromail-tui
+    rust_bin="target/$native_rust_target/release"
 fi
-lipo -info "$mcp_bin"
+for program in "${programs[@]}"; do lipo -info "$rust_bin/$program"; done
 
 # --- Swift executable ---------------------------------------------------------
 
@@ -144,11 +142,13 @@ echo "==> Assembling $app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-cp "$swift_build_bin" "$app/Contents/MacOS/TorroMail"
+cp "$swift_build_bin" "$app/Contents/MacOS/TorroMailApp"
 
 # The app ships its own MCP server so launches never depend on cwd or PATH.
-cp "$mcp_bin" "$app/Contents/MacOS/torromail-mcp"
-chmod +x "$app/Contents/MacOS/torromail-mcp"
+for program in "${programs[@]}"; do
+    cp "$rust_bin/$program" "$app/Contents/MacOS/$program"
+    chmod +x "$app/Contents/MacOS/$program"
+done
 
 # SwiftPM resource bundle (localization tables, bundled font) — the app resolves
 # these via Bundle.module, which points at this bundle inside Contents/Resources.
@@ -168,9 +168,16 @@ fi
 echo "==> Embedding Sparkle.framework"
 mkdir -p "$app/Contents/Frameworks"
 cp -R "$sparkle_framework_src" "$app/Contents/Frameworks/"
-if ! otool -l "$app/Contents/MacOS/TorroMail" | grep -Fq '@executable_path/../Frameworks'; then
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/TorroMail"
+if ! otool -l "$app/Contents/MacOS/TorroMailApp" | grep -Fq '@executable_path/../Frameworks'; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/TorroMailApp"
 fi
+
+if $build_universal; then
+    ./scripts/build-cli-updater.sh "$app" --universal
+else
+    ./scripts/build-cli-updater.sh "$app"
+fi
+helper="$app/Contents/Helpers/TorroMailUpdater.app"
 
 # --- Info.plist with injected version ----------------------------------------
 
@@ -204,16 +211,18 @@ fi
 
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
     echo "==> Signing with \"$MACOS_SIGN_IDENTITY\" (hardened runtime)"
-    codesign --force --timestamp --options=runtime \
-        --sign "$MACOS_SIGN_IDENTITY" \
-        "$app/Contents/MacOS/torromail-mcp"
+    for program in "${programs[@]}"; do
+        codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/$program"
+    done
+    codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$helper"
     codesign --force --deep --timestamp --options=runtime \
         --entitlements "$entitlements" \
         --sign "$MACOS_SIGN_IDENTITY" \
         "$app"
 else
     echo "==> Ad-hoc signing (MACOS_SIGN_IDENTITY unset)"
-    codesign --force --sign - "$app/Contents/MacOS/torromail-mcp"
+    for program in "${programs[@]}"; do codesign --force --sign - "$app/Contents/MacOS/$program"; done
+    codesign --force --sign - "$helper"
     codesign --force --deep --sign - \
         --entitlements "$entitlements" \
         "$app"

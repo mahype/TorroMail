@@ -12,7 +12,7 @@
     <key>CFBundleDisplayName</key>
     <string>TorroMail</string>
     <key>CFBundleExecutable</key>
-    <string>TorroMail</string>
+    <string>TorroMailApp</string>
     <key>CFBundleIdentifier</key>
     <string>com.torromail.app</string>
     <key>CFBundleInfoDictionaryVersion</key>

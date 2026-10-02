@@ -55,10 +55,31 @@ if [[ -z "$public_key" || "$public_key" == __* ]]; then
     echo "error: release bundle carries no Sparkle public key" >&2
     exit 1
 fi
-if ! otool -L "$app_path/Contents/MacOS/TorroMail" | grep -Fq '@rpath/Sparkle.framework/'; then
+if ! otool -L "$app_path/Contents/MacOS/TorroMailApp" | grep -Fq '@rpath/Sparkle.framework/'; then
     echo "error: TorroMail is not linked to the embedded Sparkle.framework" >&2
     exit 1
 fi
+
+echo "-> bundled CLI and separate updater"
+"$app_path/Contents/MacOS/torromail" --version
+"$app_path/Contents/MacOS/torromail" update --help
+helper="$app_path/Contents/Helpers/TorroMailUpdater.app"
+test -x "$helper/Contents/MacOS/TorroMailUpdater"
+if ! otool -L "$helper/Contents/MacOS/TorroMailUpdater" | grep -Fq '@rpath/Sparkle.framework/'; then
+    echo "error: CLI updater is not linked to Sparkle" >&2; exit 1
+fi
+app_team="$(codesign -dv "$app_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+for code in "$app_path/Contents/MacOS/torromail" "$app_path/Contents/MacOS/torromail-mcp" "$helper"; do
+    codesign --verify --strict "$code"
+    team="$(codesign -dv "$code" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [[ -z "$team" || "$team" != "$app_team" || "$team" == 'not set' ]]; then
+        echo "error: bundled helper has a different signing team: $code" >&2; exit 1
+    fi
+    archs="$(lipo -archs "$code" 2>/dev/null || lipo -archs "$code/Contents/MacOS/TorroMailUpdater")"
+    if [[ "$archs" != *arm64* || "$archs" != *x86_64* ]]; then
+        echo "error: bundled helper is not universal: $code" >&2; exit 1
+    fi
+done
 
 echo "-> codesign --verify --deep --strict"
 codesign --verify --deep --strict --verbose=2 "$app_path"
