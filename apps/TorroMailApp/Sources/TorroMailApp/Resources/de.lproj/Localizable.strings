@@ -248,6 +248,7 @@
 "Restart OpenCode, or run “opencode mcp list” in a terminal; “torromail” must be listed as connected. Then ask: “List my mail accounts.”" = "Starte OpenCode neu oder führe im Terminal „opencode mcp list“ aus; „torromail“ muss als verbunden gelistet sein. Bitte dann: „Liste meine Mail-Konten.“";
 "Pi needs the pi-mcp-adapter extension: run “pi install npm:pi-mcp-adapter” once, restart Pi and open “/mcp” — “torromail” must be listed. Then ask: “List my mail accounts.”" = "Pi braucht die Erweiterung pi-mcp-adapter: führe einmal „pi install npm:pi-mcp-adapter“ aus, starte Pi neu und öffne „/mcp“ — „torromail“ muss gelistet sein. Bitte dann: „Liste meine Mail-Konten.“";
 "Restart the Gemini CLI and run “/mcp”; “torromail” must be listed." = "Starte die Gemini-CLI neu und führe „/mcp“ aus; „torromail“ muss gelistet sein.";
+"Restart Antigravity. In the CLI, open “/mcp”; in the app, open Settings → Customizations → Installed MCP Servers. “torromail” must be listed. Then ask: “List my mail accounts.”" = "Starte Antigravity neu. Öffne in der CLI „/mcp“; in der App Settings → Customizations → Installed MCP Servers. „torromail“ muss gelistet sein. Frage dann: „Liste meine Mailkonten auf.“";
 "Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”" = "Öffne Cursor → Einstellungen → MCP; „torromail“ muss als aktiv erscheinen. Dann im Chat: „Liste meine Mail-Konten.“";
 "Restart LM Studio and open its MCP panel (the tools/plug icon); “torromail” must appear. Then ask a model: “List my mail accounts.”" = "Starte LM Studio neu und öffne das MCP-Panel (das Werkzeug-/Stecker-Symbol); „torromail“ muss erscheinen. Bitte dann ein Modell: „Liste meine Mail-Konten.“";
 "Reload VS Code, open the MCP view (Command Palette → “MCP: List Servers”), and start “torromail” — trust it if asked. Then in Chat: “List my mail accounts.”" = "Lade VS Code neu, öffne die MCP-Ansicht (Befehlspalette → „MCP: List Servers“) und starte „torromail“ — bestätige ggf. das Vertrauen. Dann im Chat: „Liste meine Mail-Konten.“";
@@ -376,3 +377,9 @@
 "Could not load folders. Check the connection and try again." = "Ordner konnten nicht geladen werden. Prüfe die Verbindung und versuche es erneut.";
 "Retry" = "Erneut versuchen";
 "A selected folder is no longer available on this server." = "Ein ausgewählter Ordner ist auf diesem Server nicht mehr verfügbar.";
+
+"In Hermes, run “/reload-mcp” or start a new session to load TorroMail. Then ask it to list your mail accounts." = "Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung, um TorroMail zu laden. Bitte Hermes danach, deine Mail-Konten aufzulisten.";
+"Connected. Run “/reload-mcp” in Hermes or start a new session to load TorroMail." = "Verbunden. Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung, um TorroMail zu laden.";
+"Reload Hermes’ MCP connections now" = "Hermes’ MCP-Verbindungen jetzt neu laden";
+"Run “/reload-mcp” in Hermes or start a new session so it loads the current access key. Existing MCP connections keep using the previous key until reloaded." = "Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung, damit Hermes den aktuellen Zugangsschlüssel lädt. Bestehende MCP-Verbindungen verwenden bis zum Neuladen den bisherigen Schlüssel.";
+"Run “/reload-mcp” in Hermes or start a new session — it turns green here once Hermes connects." = "Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung – sobald Hermes sich verbindet, wird die Anzeige hier grün.";

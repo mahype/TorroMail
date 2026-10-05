@@ -46,6 +46,8 @@ pub struct Environment {
     /// no shell `PATH`, so macOS passes the well-known install locations; a
     /// terminal surface passes its real `PATH`.
     pub executable_directories: Vec<PathBuf>,
+    /// Hermes may run in a custom home or a named profile.
+    pub hermes_home: Option<PathBuf>,
 }
 
 impl Environment {
@@ -56,7 +58,11 @@ impl Environment {
         let executable_directories = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
-        Some(Self { platform: Platform::current(), home, executable_directories })
+        let hermes_home = std::env::var("HERMES_HOME").ok().filter(|value| !value.trim().is_empty()).map(|value| {
+            if let Some(relative) = value.trim().strip_prefix("~/") { home.join(relative) }
+            else { PathBuf::from(value.trim()) }
+        });
+        Some(Self { platform: Platform::current(), home, executable_directories, hermes_home })
     }
 }
 
@@ -139,12 +145,13 @@ impl ClientDescriptor {
             "pi" => "Pi needs the pi-mcp-adapter extension: run “pi install npm:pi-mcp-adapter” once, restart Pi and open “/mcp” — “torromail” must be listed. Then ask: “List my mail accounts.”",
             "chatgpt" => "Restart the Codex CLI; “torromail” appears in its MCP list. Then ask: “List my mail accounts.”",
             "gemini-cli" => "Restart the Gemini CLI and run “/mcp”; “torromail” must be listed.",
+            "antigravity" => "Restart Antigravity. In the CLI, open “/mcp”; in the app, open Settings → Customizations → Installed MCP Servers. “torromail” must be listed. Then ask: “List my mail accounts.”",
             "cursor" => "Open Cursor → Settings → MCP; “torromail” must show as active. Then in chat: “List my mail accounts.”",
             "lm-studio" => "Restart LM Studio and open its MCP panel (the tools/plug icon); “torromail” must appear. Then ask a model: “List my mail accounts.”",
             "vscode" => "Reload VS Code, open the MCP view (Command Palette → “MCP: List Servers”), and start “torromail” — trust it if asked. Then in Chat: “List my mail accounts.”",
             "windsurf" => "Restart Windsurf and open Settings → MCP (or the Cascade MCP panel); “torromail” must show as active. Then ask: “List my mail accounts.”",
             "clawbot" => "Add the snippet below under “mcp.servers” in Clawbot’s config (or run “openclaw mcp add”), then restart it and ask it to list your mail accounts.",
-            "hermes" => "Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts.",
+            "hermes" => "In Hermes, run “/reload-mcp” or start a new session to load TorroMail. Then ask it to list your mail accounts.",
             _ => "Paste the snippet below into your client’s MCP configuration — any client that speaks MCP over stdio can run TorroMail. Restart it afterwards.",
         }
     }
@@ -198,6 +205,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
     ClientDescriptor { requirement: Some(PI_MCP_ADAPTER), ..automatic("pi", "Pi", SnippetFormat::McpServersJson) },
     automatic("chatgpt", "ChatGPT", SnippetFormat::McpServersJson),
     automatic("gemini-cli", "Gemini CLI", SnippetFormat::McpServersJson),
+    automatic("antigravity", "Google Antigravity", SnippetFormat::McpServersJson),
     automatic("cursor", "Cursor", SnippetFormat::McpServersJson),
     automatic("lm-studio", "LM Studio", SnippetFormat::McpServersJson),
     automatic("vscode", "VS Code", SnippetFormat::ServersJson),
@@ -213,7 +221,7 @@ pub const CATALOG: &[ClientDescriptor] = &[
     ClientDescriptor {
         id: "hermes",
         display_name: "Hermes",
-        kind: ClientKind::Manual,
+        kind: ClientKind::Automatic,
         snippet_format: SnippetFormat::HermesYaml,
         manual_config_path: Some("~/.hermes/config.yaml"),
         requirement: None,
@@ -242,6 +250,8 @@ pub enum ClientSetup {
     ServersJson { config: PathBuf },
     /// OpenCode: the same merge under `mcp`, with its own entry shape.
     OpenCodeJson { config: PathBuf },
+    /// Hermes: YAML under `mcp_servers`.
+    HermesYaml { config: PathBuf },
     /// Codex owns its TOML; its CLI does the edit, the file is only read.
     CodexCli { executable: PathBuf, config: PathBuf },
     /// Claude Code rewrites `~/.claude.json` constantly; editing it by hand
@@ -255,6 +265,7 @@ impl ClientSetup {
         match self {
             Self::McpServersJson { config }
             | Self::ServersJson { config }
+            | Self::HermesYaml { config }
             | Self::OpenCodeJson { config }
             | Self::CodexCli { config, .. }
             | Self::ClaudeCodeCli { config, .. } => config,
@@ -265,6 +276,7 @@ impl ClientSetup {
     fn json_root_key(&self) -> &'static str {
         match self {
             Self::ServersJson { .. } => "servers",
+            Self::HermesYaml { .. } => "mcp_servers",
             Self::OpenCodeJson { .. } => "mcp",
             _ => "mcpServers",
         }
@@ -334,6 +346,26 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
     // file every MCP host reads would hand that key to all of them.
     json_client("pi", home.join(".pi/agent"), "mcp.json", false);
 
+    // Antigravity's current surfaces share a dedicated global MCP file.
+    // ~/.gemini alone is also Gemini CLI's marker, so it is not enough.
+    // Do not migrate the legacy settings.json or reuse Gemini's access key.
+    let mut agy_candidates = on_path("agy");
+    agy_candidates.push(home.join(".local/bin/agy"));
+    if mac {
+        agy_candidates.push(PathBuf::from("/opt/homebrew/bin/agy"));
+        agy_candidates.push(PathBuf::from("/usr/local/bin/agy"));
+    }
+    if [".gemini/config", ".gemini/antigravity", ".gemini/antigravity-cli"]
+        .iter()
+        .any(|marker| home.join(marker).is_dir())
+        || first_executable(&agy_candidates).is_some()
+    {
+        clients.push(InstalledClient {
+            id: "antigravity",
+            setup: ClientSetup::McpServersJson { config: home.join(".gemini/config/mcp_config.json") },
+        });
+    }
+
     // OpenCode keeps its config under ~/.config on every platform. Use its
     // `.jsonc` when it is the only one there; the setup editor preserves
     // comments and trailing commas while changing only TorroMail's entry.
@@ -372,6 +404,20 @@ pub fn installed(environment: &Environment) -> Vec<InstalledClient> {
             id: "claude-code",
             setup: ClientSetup::ClaudeCodeCli { executable, config: home.join(".claude.json") },
         });
+    }
+
+    let hermes_config = crate::hermes::config_path(home, environment.hermes_home.as_deref());
+    let mut hermes_candidates = vec![
+        home.join(".local/bin/hermes"),
+        home.join(".hermes/hermes-agent/.hermes/bin/hermes"),
+        home.join(".hermes/hermes-agent/.venv/bin/hermes"),
+    ];
+    hermes_candidates.extend(on_path("hermes"));
+    if mac {
+        hermes_candidates.extend([PathBuf::from("/opt/homebrew/bin/hermes"), PathBuf::from("/usr/local/bin/hermes")]);
+    }
+    if hermes_config.parent().is_some_and(Path::is_dir) || first_executable(&hermes_candidates).is_some() {
+        clients.push(InstalledClient { id: "hermes", setup: ClientSetup::HermesYaml { config: hermes_config } });
     }
 
     // Catalog order, so every surface lists the clients the same way.
@@ -429,6 +475,7 @@ fn open_code_document(config: &Path) -> Option<crate::jsonc::Document> {
 #[must_use]
 pub fn is_configured(setup: &ClientSetup) -> bool {
     match setup {
+        ClientSetup::HermesYaml { config } => crate::hermes::entry(config).is_some(),
         ClientSetup::CodexCli { config, .. } => std::fs::read_to_string(config)
             .map(|text| codex_section(&text).is_some())
             .unwrap_or(false),
@@ -454,6 +501,7 @@ fn codex_section(text: &str) -> Option<&str> {
 #[must_use]
 pub fn configured_token(setup: &ClientSetup) -> Option<String> {
     match setup {
+        ClientSetup::HermesYaml { config } => crate::hermes::token(config),
         ClientSetup::CodexCli { config, .. } => {
             // Codex writes either an `env` table or an inline one; in both the
             // key follows the variable name as the next quoted string.
@@ -542,6 +590,7 @@ pub fn add(setup: &ClientSetup, command_path: &str, token: &str, run: ToolRunner
             servers[SERVER_NAME] = entry;
             write_json_config(config, &root)
         }
+        ClientSetup::HermesYaml { config } => crate::hermes::set(config, command_path, token),
         ClientSetup::OpenCodeJson { config } => set_open_code_server(config, command_path, token),
         ClientSetup::CodexCli { executable, .. } => add_via_tool(
             executable,
@@ -576,6 +625,7 @@ pub fn remove(setup: &ClientSetup, run: ToolRunner<'_>) -> Result<(), SetupError
             servers.remove(SERVER_NAME);
             write_json_config(config, &root)
         }
+        ClientSetup::HermesYaml { config } => crate::hermes::remove(config),
         ClientSetup::OpenCodeJson { config } => remove_open_code_server(config),
         ClientSetup::CodexCli { executable, .. } => {
             run(executable, &["mcp".to_owned(), "remove".to_owned(), SERVER_NAME.to_owned()])

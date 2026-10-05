@@ -1,0 +1,113 @@
+{
+  "about": "Shared Swift/Rust Hermes YAML setup cases. Compare parsed settings and all other server definitions, plus exact text where ordinary block YAML can be retained. Never mutate invalid YAML.",
+  "command_path": "/Applications/TorroMail.app/Contents/MacOS/torromail-mcp",
+  "token": "torro_hermes_fixture",
+  "cases": [
+    {
+      "name": "fresh config",
+      "existing": null
+    },
+    {
+      "name": "empty config",
+      "existing": ""
+    },
+    {
+      "name": "comments-only placeholder",
+      "existing": "# Hermes settings are not filled yet\n",
+      "contains": [
+        "# Hermes settings are not filled yet"
+      ]
+    },
+    {
+      "name": "existing settings without servers",
+      "existing": "# Hermes settings\nmodel:\n  provider: nous\n  name: hermes\n",
+      "contains": [
+        "# Hermes settings",
+        "model:\n  provider: nous\n  name: hermes"
+      ]
+    },
+    {
+      "name": "preserve other server and comments",
+      "existing": "# Hermes\nmodel: \"chosen\" # do not change\nmcp_servers:\n  # Other server\n  files:\n    command: \"other\"\n    args: [\"a\", \"b\"] # preserve\n# Following setting\nterminal:\n  cwd: \"/work\"\n",
+      "contains": [
+        "model: \"chosen\" # do not change",
+        "  # Other server\n  files:\n    command: \"other\"\n    args: [\"a\", \"b\"] # preserve",
+        "# Following setting\nterminal:\n  cwd: \"/work\""
+      ]
+    },
+    {
+      "name": "renew only our key",
+      "existing": "mcp_servers:\n  files:\n    command: other\n    env:\n      TORROMAIL_TOKEN: decoy\n  torromail:\n    command: old\n    env:\n      TORROMAIL_TOKEN: old_key\n  # Keep next server\n  last:\n    command: last\nmodel: hermes\n",
+      "contains": [
+        "      TORROMAIL_TOKEN: decoy",
+        "  # Keep next server\n  last:\n    command: last"
+      ]
+    },
+    {
+      "name": "null servers",
+      "existing": "model: hermes\nmcp_servers: null\n"
+    },
+    {
+      "name": "flow and quoted mapping",
+      "existing": "model: hermes\n\"mcp_servers\": {other: {command: other}}\n"
+    },
+    {
+      "name": "anchors across sections",
+      "existing": "defaults: &defaults {command: other, args: [one]}\nmcp_servers:\n  other: *defaults\nmodel: hermes\n"
+    },
+    {
+      "name": "disconnect only our server",
+      "action": "remove",
+      "existing": "mcp_servers:\n  torromail:\n    command: old\n    env:\n      TORROMAIL_TOKEN: old_key\n  # Other server\n  other:\n    command: keep\nmodel: hermes\n",
+      "contains": [
+        "  # Other server\n  other:\n    command: keep",
+        "model: hermes"
+      ]
+    },
+    {
+      "name": "disconnect last server",
+      "action": "remove",
+      "existing": "mcp_servers:\n  torromail: {command: old}\nmodel: hermes\n"
+    },
+    {
+      "name": "disconnect missing config",
+      "action": "remove",
+      "existing": null
+    },
+    {
+      "name": "disconnect absent entry",
+      "action": "remove",
+      "existing": "# No TorroMail\nmcp_servers: {other: {command: keep}}\n"
+    },
+    {
+      "name": "broken YAML",
+      "existing": "model: [unterminated",
+      "error": true
+    },
+    {
+      "name": "nonmapping root",
+      "existing": "- not\n- a\n- mapping\n",
+      "error": true
+    },
+    {
+      "name": "nonmapping servers",
+      "existing": "mcp_servers: []\n",
+      "error": true
+    },
+    {
+      "name": "duplicate root key",
+      "existing": "model: one\nmodel: two\n",
+      "error": true
+    },
+    {
+      "name": "duplicate server key",
+      "existing": "mcp_servers:\n  other: {command: a}\n  other: {command: b}\n",
+      "error": true
+    },
+    {
+      "name": "multiple documents",
+      "existing": "model: one\n---\nmodel: two\n",
+      "error": true
+    }
+  ]
+}

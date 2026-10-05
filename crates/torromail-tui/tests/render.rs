@@ -431,6 +431,7 @@ fn scene(name: &str) -> Scene {
                 platform: Platform::Linux,
                 home: root.join("home"),
                 executable_directories: vec![root.join("bin")],
+                hermes_home: None,
             }),
             secrets: Box::new(torromail_control::secrets::MemoryStore::default()),
             checker: Box::new(|_, _, _, _| CheckOutcome::Ok),

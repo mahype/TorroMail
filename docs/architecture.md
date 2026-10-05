@@ -76,6 +76,17 @@ over stdio and publish a stable, user-owned configuration file or CLI. TorroMail
 merges only its own entry into those configurations and never treats a file edit
 as proof of a connection.
 
+Google Antigravity is an automatic client with its own pairing and account
+grants. Its current CLI (`agy`), desktop and IDE surfaces use the global
+`~/.gemini/config/mcp_config.json`, with `command`, `args` and `env` under
+`mcpServers`. TorroMail detects the Antigravity profile or CLI and merges only
+`torromail` into this file. It does not change Gemini CLI's legacy
+`~/.gemini/settings.json` or copy that client's key or grants. After connecting,
+restart Antigravity and check `/mcp` in the CLI, or **Settings → Customizations →
+Installed MCP Servers** in the desktop app. This targets the current configuration
+documented in Google's [MCP configuration guide](https://antigravity.google/docs/mcp/)
+and [Gemini CLI migration guide](https://antigravity.google/docs/cli/gcli-migration/).
+
 OpenClaw is preferably configured through its native `openclaw mcp` registry.
 OpenClaw 2.0 can install the desktop app without making the separate CLI
 launcher visible to another GUI process, so TorroMail also has a file fallback:
@@ -86,6 +97,23 @@ unreadable structure fails without being overwritten. When the CLI is present,
 `mcp doctor torromail --probe --json` supplies the live transport check. In both
 paths, the server's connection log remains the proof that OpenClaw accepted the
 configured key.
+
+Hermes is automatically configured in the native app and terminal control
+surface. TorroMail discovers the Hermes profile directory or executable without
+launching the agent, honors `HERMES_HOME`, and otherwise follows the sticky
+`~/.hermes/active_profile` selector. Connecting writes only the
+`mcp_servers.torromail` definition with Hermes' own pairing key; disconnecting
+removes it. Reads parse YAML and compare the key inside that exact entry, rather
+than finding an unrelated key elsewhere in the file. Ordinary block YAML edits
+preserve the surrounding settings, server definitions, and comments; flow
+mappings and aliases use a semantic YAML rewrite, which can change formatting
+and comments. Invalid YAML, duplicate keys, and an invalid server map fail
+without overwriting the file. Writes are atomic, private, and follow config
+symlinks. The interactive discovery and selection prompts in `hermes mcp add`
+are why setup uses the [documented YAML configuration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
+After connecting, run `/reload-mcp` in Hermes or start a fresh session; the
+connection log confirms Hermes loaded the key. Hermes gateways that watch the
+configuration may pick up the change automatically.
 
 The official Grok Bot desktop app is intentionally not listed as a TorroMail
 client. Grok Bot runs its tools on a persistent cloud computer and accepts

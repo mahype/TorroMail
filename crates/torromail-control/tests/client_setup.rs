@@ -134,6 +134,7 @@ fn only_what_is_installed_is_listed_in_catalog_order() {
         platform: Platform::Linux,
         home: home.clone(),
         executable_directories: vec![home.join("bin")],
+        hermes_home: None,
     };
     let found = clients::installed(&environment);
     assert_eq!(found.iter().map(|client| client.id).collect::<Vec<_>>(), ["claude-code", "cursor", "vscode"]);
@@ -153,7 +154,7 @@ fn macos_looks_where_macos_apps_keep_their_config() {
     std::fs::create_dir_all(home.join("Library/Application Support/Claude")).expect("claude");
     std::fs::create_dir_all(home.join(".config/Code/User")).expect("a linux-style vscode dir");
 
-    let environment = Environment { platform: Platform::MacOs, home: home.clone(), executable_directories: vec![] };
+    let environment = Environment { platform: Platform::MacOs, home: home.clone(), executable_directories: vec![], hermes_home: None, };
     let found = clients::installed(&environment);
     let claude_desktop = found.iter().find(|client| client.id == "claude-desktop").expect("Claude Desktop");
     assert_eq!(
@@ -161,6 +162,55 @@ fn macos_looks_where_macos_apps_keep_their_config() {
         home.join("Library/Application Support/Claude/claude_desktop_config.json")
     );
     assert!(!found.iter().any(|client| client.id == "vscode"), "macOS ignores the Linux VS Code path");
+}
+
+#[test]
+fn antigravity_has_a_separate_config_and_pairing_on_every_platform() {
+    for platform in [Platform::MacOs, Platform::Linux, Platform::Windows] {
+        let home = scratch(&format!("antigravity-{platform:?}"));
+        let config = home.join(".gemini/config/mcp_config.json");
+        std::fs::create_dir_all(config.parent().unwrap()).expect("profile");
+        let legacy = home.join(".gemini/settings.json");
+        let legacy_text = r#"{"mcpServers":{"torromail":{"env":{"TORROMAIL_TOKEN":"legacy-key"}}}}"#;
+        std::fs::write(&legacy, legacy_text).expect("legacy config");
+        let other = serde_json::json!({"serverUrl": "https://example.com/mcp", "disabled": true});
+        std::fs::write(&config, serde_json::json!({"mcpServers": {"other": other}, "custom": 42}).to_string())
+            .expect("Antigravity config");
+        let environment = Environment { platform, home: home.clone(), executable_directories: vec![], hermes_home: None, };
+        let client = clients::installed_client(&environment, "antigravity").expect("Antigravity detected");
+        assert_eq!(client.setup.config(), config);
+        assert!(!clients::is_configured(&client.setup), "Gemini's pairing does not configure Antigravity");
+        clients::add(&client.setup, "/opt/torromail-mcp", "torro_antigravity_test", &no_tool).unwrap();
+        assert!(clients::has_key(&client.setup, "torro_antigravity_test"));
+        clients::remove(&client.setup, &no_tool).unwrap();
+        let remaining: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(remaining, serde_json::json!({"mcpServers": {"other": other}, "custom": 42}));
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), legacy_text);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_detection_accepts_its_profiles_or_agy_but_not_gemini_alone() {
+    let home = scratch("antigravity-detection");
+    std::fs::create_dir_all(home.join(".gemini")).unwrap();
+    let environment = Environment {
+        platform: Platform::Linux,
+        home: home.clone(),
+        executable_directories: vec![home.join("bin")],
+        hermes_home: None,
+    };
+    assert!(clients::installed_client(&environment, "antigravity").is_none());
+    for marker in [".gemini/config", ".gemini/antigravity", ".gemini/antigravity-cli"] {
+        std::fs::create_dir_all(home.join(marker)).unwrap();
+        let client = clients::installed_client(&environment, "antigravity").expect("profile detected");
+        assert_eq!(client.setup.config(), home.join(".gemini/config/mcp_config.json"));
+        std::fs::remove_dir(home.join(marker)).unwrap();
+    }
+    executable(&home.join("bin/agy"));
+    let client = clients::installed_client(&environment, "antigravity").expect("CLI detected before first launch");
+    clients::add(&client.setup, "/opt/torromail-mcp", "torro_antigravity_fresh", &no_tool).unwrap();
+    assert!(clients::has_key(&client.setup, "torro_antigravity_fresh"), "creates the missing global config");
 }
 
 #[test]
@@ -249,7 +299,7 @@ fn keys_are_long_random_and_never_shown_whole() {
 fn the_status_document_carries_a_key_hash_never_a_key() {
     let home = scratch("status");
     std::fs::create_dir_all(home.join(".cursor")).expect("cursor");
-    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![] };
+    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![], hermes_home: None, };
     let cursor = clients::installed_client(&environment, "cursor").expect("cursor is installed");
     clients::add(&cursor.setup, "/opt/t", "torro_cursor_secret", &no_tool).expect("adds");
 
@@ -262,7 +312,7 @@ fn the_status_document_carries_a_key_hash_never_a_key() {
     assert_eq!(entry["configured"], true);
     assert_eq!(entry["token_sha256"], clients::sha256_hex("torro_cursor_secret"));
     let hermes = entries.iter().find(|entry| entry["id"] == "hermes").expect("hermes");
-    assert_eq!((&hermes["kind"], &hermes["installed"]), (&serde_json::json!("manual"), &serde_json::json!(false)));
+    assert_eq!((&hermes["kind"], &hermes["installed"]), (&serde_json::json!("automatic"), &serde_json::json!(false)));
 }
 
 #[test]
@@ -272,7 +322,7 @@ fn the_catalog_carries_the_ids_the_macos_app_stores_keys_under() {
     let ids: Vec<&str> = clients::CATALOG.iter().map(|descriptor| descriptor.id).collect();
     assert_eq!(
         ids,
-        ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "cursor", "lm-studio", "vscode", "windsurf",
+        ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "antigravity", "cursor", "lm-studio", "vscode", "windsurf",
          "clawbot", "hermes", "other"]
     );
 }
@@ -282,7 +332,7 @@ fn the_catalog_carries_the_ids_the_macos_app_stores_keys_under() {
 fn pi_gets_its_own_file_and_says_what_it_still_needs() {
     let home = scratch("pi");
     std::fs::create_dir_all(home.join(".pi/agent")).expect("pi is installed");
-    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![] };
+    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![], hermes_home: None, };
     let pi = clients::installed_client(&environment, "pi").expect("pi is found");
     assert_eq!(pi.setup, ClientSetup::McpServersJson { config: home.join(".pi/agent/mcp.json") });
 
@@ -304,4 +354,101 @@ fn pi_gets_its_own_file_and_says_what_it_still_needs() {
     clients::add(&pi.setup, "/opt/torromail-mcp", "torro_pi_1", &no_tool).expect("adds");
     assert!(clients::has_key(&pi.setup, "torro_pi_1"));
     assert!(!home.join(".config/mcp/mcp.json").exists());
+}
+
+#[test]
+fn hermes_yaml_contract_preserves_settings_and_other_servers() {
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(
+        contract_path().with_file_name("hermes-client-config.json")
+    ).expect("a valid Hermes test fixture")).expect("a valid Hermes test fixture");
+    for (index, case) in fixture["cases"].as_array().expect("a valid Hermes test fixture").iter().enumerate() {
+        let name = case["name"].as_str().expect("a valid Hermes test fixture");
+        let config = scratch(&format!("hermes-contract-{index}")).join("config.yaml");
+        if let Some(text) = case["existing"].as_str() { std::fs::write(&config, text).expect("a valid Hermes test fixture"); }
+        let setup = ClientSetup::HermesYaml { config: config.clone() };
+        let removing = case["action"] == "remove";
+        let result = if removing { clients::remove(&setup, &no_tool) }
+            else { clients::add(&setup, fixture["command_path"].as_str().expect("a valid Hermes test fixture"), fixture["token"].as_str().expect("a valid Hermes test fixture"), &no_tool) };
+        if case["error"] == true {
+            assert_eq!(result, Err(SetupError::UnreadableConfig), "{name}");
+            assert_eq!(std::fs::read_to_string(&config).expect("a valid Hermes test fixture"), case["existing"].as_str().expect("a valid Hermes test fixture"), "{name}");
+            assert!(!clients::is_configured(&setup));
+            continue;
+        }
+        result.unwrap_or_else(|error| panic!("{name}: {error}"));
+        if removing && case["existing"].is_null() { assert!(!config.exists()); continue; }
+        let text = std::fs::read_to_string(&config).expect("a valid Hermes test fixture");
+        let mut actual: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).expect("a valid Hermes test fixture");
+        let mut original: serde_yaml_ng::Value = serde_yaml_ng::from_str(case["existing"].as_str().unwrap_or("{}")).expect("a valid Hermes test fixture");
+        if original.is_null() { original = serde_yaml_ng::Value::Mapping(Default::default()); }
+        let own = actual["mcp_servers"].as_mapping_mut().expect("a valid Hermes test fixture").remove(serde_yaml_ng::Value::from("torromail"));
+        if let Some(servers) = original["mcp_servers"].as_mapping_mut() { servers.remove(serde_yaml_ng::Value::from("torromail")); }
+        if original["mcp_servers"].is_null() { original["mcp_servers"] = serde_yaml_ng::Value::Mapping(Default::default()); }
+        assert_eq!(actual, original, "{name}: preserves every unrelated value");
+        assert_eq!(clients::is_configured(&setup), !removing, "{name}");
+        if !removing {
+            assert_eq!(own.as_ref().expect("a valid Hermes test fixture")["command"].as_str(), fixture["command_path"].as_str(), "{name}");
+            assert!(clients::has_key(&setup, fixture["token"].as_str().expect("a valid Hermes test fixture")), "{name}");
+            assert!(!clients::has_key(&setup, "decoy"), "{name}");
+        }
+        for expected in case["contains"].as_array().into_iter().flatten() {
+            assert!(text.contains(expected.as_str().expect("a valid Hermes test fixture")), "{name}: preserves {expected}");
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            if !removing || own.is_some() {
+                assert_eq!(std::fs::metadata(&config).expect("a valid Hermes test fixture").permissions().mode() & 0o777, 0o600, "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn hermes_follows_the_active_profile_and_explicit_home() {
+    let home = scratch("hermes-profiles");
+    let root = home.join(".hermes");
+    std::fs::create_dir_all(root.join("profiles/work")).expect("a valid Hermes test fixture");
+    std::fs::write(root.join("active_profile"), "work\n").expect("a valid Hermes test fixture");
+    let mut environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![], hermes_home: None };
+    let client = clients::installed_client(&environment, "hermes").expect("a valid Hermes test fixture");
+    assert_eq!(client.setup.config(), root.join("profiles/work/config.yaml"));
+    let custom = home.join("custom");
+    std::fs::create_dir_all(&custom).expect("a valid Hermes test fixture");
+    environment.hermes_home = Some(custom.clone());
+    assert_eq!(clients::installed_client(&environment, "hermes").expect("a valid Hermes test fixture").setup.config(), custom.join("config.yaml"));
+    environment.hermes_home = None;
+    std::fs::write(root.join("active_profile"), "../../outside").expect("a valid Hermes test fixture");
+    assert_eq!(clients::installed_client(&environment, "hermes").expect("a valid Hermes test fixture").setup.config(), root.join("config.yaml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn hermes_cli_detection_and_symlinked_yaml_setup() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let home = scratch("hermes-cli");
+    executable(&home.join(".local/bin/hermes"));
+    let environment = Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![], hermes_home: None };
+    let client = clients::installed_client(&environment, "hermes").expect("a valid Hermes test fixture");
+    assert_eq!(client.setup.config(), home.join(".hermes/config.yaml"));
+    std::fs::create_dir_all(home.join(".hermes")).expect("a valid Hermes test fixture");
+    let actual = home.join("dotfiles.yaml");
+    std::fs::write(&actual, "model: hermes\n").expect("a valid Hermes test fixture");
+    symlink(&actual, client.setup.config()).expect("a valid Hermes test fixture");
+    let command = "/path/with \"quotes\"/mail\\server";
+    clients::add(&client.setup, command, "own_key", &no_tool).expect("a valid Hermes test fixture");
+    assert!(std::fs::symlink_metadata(client.setup.config()).expect("a valid Hermes test fixture").file_type().is_symlink());
+    assert_eq!(std::fs::metadata(&actual).expect("a valid Hermes test fixture").permissions().mode() & 0o777, 0o600);
+    assert_eq!(serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&std::fs::read_to_string(&actual).expect("a valid Hermes test fixture")).expect("a valid Hermes test fixture")["mcp_servers"]["torromail"]["command"].as_str(), Some(command));
+    let status = clients::status_json(&environment);
+    assert!(!status.to_string().contains("own_key"));
+    let entry = status["clients"].as_array().expect("a valid Hermes test fixture").iter().find(|entry| entry["id"] == "hermes").expect("a valid Hermes test fixture");
+    assert_eq!(entry["token_sha256"], clients::sha256_hex("own_key"));
+    clients::remove(&client.setup, &no_tool).expect("a valid Hermes test fixture");
+    assert!(std::fs::symlink_metadata(client.setup.config()).expect("a valid Hermes test fixture").file_type().is_symlink());
+    assert!(!clients::is_configured(&client.setup));
+    let dangling = home.join("dangling.yaml");
+    symlink(home.join("missing.yaml"), &dangling).expect("a dangling test symlink");
+    let dangling_setup = ClientSetup::HermesYaml { config: dangling.clone() };
+    assert_eq!(clients::add(&dangling_setup, command, "own_key", &no_tool), Err(SetupError::UnreadableConfig));
+    assert!(std::fs::symlink_metadata(dangling).expect("the dangling link remains").file_type().is_symlink());
 }

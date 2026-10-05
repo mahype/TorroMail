@@ -2027,11 +2027,52 @@ for (formatName, format) in snippetFormats {
         "shared snippet: \(formatName)"
     )
 }
+// Antigravity has its own global file and key, even alongside legacy Gemini.
+final class AntigravityTestFileManager: FileManager, @unchecked Sendable {
+    let testHome: URL
+    init(home: URL) { self.testHome = home; super.init() }
+    override var homeDirectoryForCurrentUser: URL { testHome }
+}
+let antigravityHome = FileManager.default.temporaryDirectory
+    .appendingPathComponent("torromail-antigravity-\(ProcessInfo.processInfo.processIdentifier)")
+try? FileManager.default.removeItem(at: antigravityHome)
+let antigravityFileManager = AntigravityTestFileManager(home: antigravityHome)
+for marker in [".gemini/config", ".gemini/antigravity", ".gemini/antigravity-cli"] {
+    let directory = antigravityHome.appendingPathComponent(marker)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let client = MCPClientRegistry.installedClient(id: "antigravity", fileManager: antigravityFileManager)
+    require(client?.configURL.path == antigravityHome.appendingPathComponent(".gemini/config/mcp_config.json").path,
+            "Antigravity's profile resolves to the current shared global MCP config")
+    try FileManager.default.removeItem(at: directory)
+}
+try FileManager.default.createDirectory(at: antigravityHome.appendingPathComponent(".gemini/antigravity-cli"),
+                                      withIntermediateDirectories: true)
+let legacyGeminiConfig = antigravityHome.appendingPathComponent(".gemini/settings.json")
+let legacyGeminiText = "{\"mcpServers\":{\"torromail\":{\"env\":{\"TORROMAIL_TOKEN\":\"legacy-key\"}}}}"
+try Data(legacyGeminiText.utf8).write(to: legacyGeminiConfig)
+if let client = MCPClientRegistry.installedClient(id: "antigravity", fileManager: antigravityFileManager) {
+    require(!MCPClientSetup.isConfigured(client), "Gemini's pairing does not configure Antigravity")
+    try MCPClientSetup.add(to: client, commandPath: sharedCommandPath, token: "torro_antigravity_test")
+    let written = try JSONSerialization.jsonObject(with: Data(contentsOf: client.configURL)) as? [String: Any]
+    let servers = written?["mcpServers"] as? [String: Any]
+    let server = servers?["torromail"] as? [String: Any]
+    let environment = server?["env"] as? [String: String]
+    require(environment?["TORROMAIL_TOKEN"] == "torro_antigravity_test", "Antigravity carries its own key")
+    try MCPClientSetup.remove(from: client)
+    require(!MCPClientSetup.isConfigured(client), "Antigravity disconnect removes its entry")
+    let unchangedLegacy = try String(contentsOf: legacyGeminiConfig, encoding: .utf8)
+    require(unchangedLegacy == legacyGeminiText,
+            "connecting and disconnecting Antigravity leaves Gemini's config untouched")
+} else {
+    require(false, "Antigravity is detected from its CLI profile")
+}
+try FileManager.default.removeItem(at: antigravityHome)
+
 // Every client Rust knows, this app knows under the same id — access keys are
 // stored by id, so a renamed client would lose its key on the other surface.
 require(
     Set(MCPClientRegistry.catalog.map(\.id))
-        == ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "cursor", "lm-studio",
+        == ["claude-desktop", "claude-code", "opencode", "pi", "chatgpt", "gemini-cli", "antigravity", "cursor", "lm-studio",
             "vscode", "windsurf", "clawbot", "hermes", "other"],
     "the client catalog carries the ids the Rust catalog carries"
 )
@@ -2120,5 +2161,7 @@ do {
     missingWriterFailed = true
 }
 require(missingWriterFailed, "a missing server binary fails the publication instead of inventing a document")
+
+try hermesClientContract()
 
 print("TorroMailKit control-surface contract passed")

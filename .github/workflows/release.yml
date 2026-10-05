@@ -206,9 +206,14 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" --jq .body > release-notes.md
-          echo "Generated $(wc -c < release-notes.md) bytes of release notes"
+          notes="docs/releases/${TAG#v}.md"
+          if [[ -f "$notes" ]]; then
+            cp "$notes" release-notes.md
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body > release-notes.md
+          fi
+          echo "Prepared $(wc -c < release-notes.md) bytes of release notes"
 
       - name: Create signed Sparkle appcast
         env:
@@ -269,7 +274,9 @@ jobs:
              assets/torromail-*-aarch64-linux.tar.gz \
              assets/torromail-*-x86_64-windows.zip > /dev/null
 
-          flags=(--draft --title "$TAG" --generate-notes)
+          flags=(--draft --title "$TAG")
+          notes="docs/releases/${TAG#v}.md"
+          if [[ -f "$notes" ]]; then flags+=(--notes-file "$notes"); else flags+=(--generate-notes); fi
           if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
           gh release create "$TAG" assets/* "${flags[@]}"
 

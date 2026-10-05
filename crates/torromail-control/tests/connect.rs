@@ -26,7 +26,7 @@ fn scene(name: &str) -> Scene {
     let data = root.join("data");
     std::fs::create_dir_all(&data).expect("a data directory");
     Scene {
-        environment: Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![] },
+        environment: Environment { platform: Platform::Linux, home: home.clone(), executable_directories: vec![], hermes_home: None },
         home,
         data,
         secrets: MemoryStore::default(),
@@ -108,9 +108,9 @@ fn a_config_that_cannot_be_written_leaves_everything_as_it_was() {
 #[test]
 fn a_manual_client_gets_a_key_without_any_config_being_touched() {
     let scene = scene("manual");
-    scene.pairing().connect("hermes", "/usr/bin/torromail-mcp").expect("connects");
-    assert!(scene.pairing().token("hermes").expect("readable").is_some());
-    assert_eq!(scene.policy()["clients"][0]["name"], "Hermes");
+    scene.pairing().connect("other", "/usr/bin/torromail-mcp").expect("connects");
+    assert!(scene.pairing().token("other").expect("readable").is_some());
+    assert_eq!(scene.policy()["clients"][0]["name"], "Other client");
     assert!(!scene.home.join(".hermes").exists());
 }
 
@@ -133,4 +133,33 @@ fn disconnecting_revokes_first_and_cleans_up_after() {
     assert_eq!(pairing.token("cursor"), Ok(None));
     assert!(!clients::is_configured(&scene.cursor_config()));
     assert!(pairing.set_account_access("cursor", ClientAccountAccess::All).is_err(), "nothing to grant to");
+}
+
+#[test]
+fn hermes_connect_renew_and_disconnect_keep_config_keys_and_grants_in_sync() {
+    let scene = scene("hermes-pairing");
+    let root = scene.home.join(".hermes");
+    std::fs::create_dir_all(&root).expect("a valid Hermes test fixture");
+    let config = root.join("config.yaml");
+    std::fs::write(&config, "model: chosen\nmcp_servers:\n  other: {command: other}\n").expect("a valid Hermes test fixture");
+    let setup = clients::installed_client(&scene.environment, "hermes").expect("a valid Hermes test fixture").setup;
+    let pairing = scene.pairing();
+    pairing.connect("hermes", "/usr/bin/torromail-mcp").expect("a valid Hermes test fixture");
+    let first = pairing.token("hermes").expect("a valid Hermes test fixture").expect("a valid Hermes test fixture");
+    assert!(clients::has_key(&setup, &first));
+    assert_eq!(scene.policy()["clients"][0]["token_sha256"], clients::sha256_hex(&first));
+    pairing.set_account_access("hermes", ClientAccountAccess::Selected(["work".to_owned()].into())).expect("a valid Hermes test fixture");
+    pairing.connect("hermes", "/usr/bin/torromail-mcp").expect("a valid Hermes test fixture");
+    let second = pairing.token("hermes").expect("a valid Hermes test fixture").expect("a valid Hermes test fixture");
+    assert_ne!(first, second);
+    assert!(clients::has_key(&setup, &second));
+    assert!(!clients::has_key(&setup, &first));
+    assert_eq!(scene.policy()["clients"][0]["account_access"]["account_ids"], serde_json::json!(["work"]));
+    pairing.disconnect("hermes").expect("a valid Hermes test fixture");
+    assert!(pairing.token("hermes").expect("a valid Hermes test fixture").is_none());
+    assert_eq!(scene.policy()["clients"], serde_json::json!([]));
+    assert!(!clients::is_configured(&setup));
+    let preserved: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(config).expect("a valid Hermes test fixture")).expect("a valid Hermes test fixture");
+    assert_eq!(preserved["model"].as_str(), Some("chosen"));
+    assert_eq!(preserved["mcp_servers"]["other"]["command"].as_str(), Some("other"));
 }

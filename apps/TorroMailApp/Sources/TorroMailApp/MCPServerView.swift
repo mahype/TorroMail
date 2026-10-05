@@ -331,8 +331,8 @@ struct MCPClientDetailView: View {
                         .scaledFont(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                        if descriptor.id == "clawbot" {
-                            Text(verbatim: Self.openClawRestartCommand)
+                        if descriptor.id == "clawbot" || descriptor.id == "hermes" {
+                            Text(verbatim: descriptor.id == "hermes" ? "/reload-mcp" : Self.openClawRestartCommand)
                                 .scaledFont(.callout, design: .monospaced)
                                 .textSelection(.enabled)
                                 .scaledPadding(.top, 4)
@@ -350,12 +350,16 @@ struct MCPClientDetailView: View {
         if descriptor.id == "clawbot" {
             return L("Restart the OpenClaw Gateway now")
         }
+        if descriptor.id == "hermes" { return L("Reload Hermes’ MCP connections now") }
         return String(format: L("Restart %@ now"), L(descriptor.displayName))
     }
 
     private var restartExplanation: String {
         if descriptor.id == "clawbot" {
             return L("Run this command in Terminal so OpenClaw loads the TorroMail MCP server:")
+        }
+        if descriptor.id == "hermes" {
+            return L("Run “/reload-mcp” in Hermes or start a new session so it loads the current access key. Existing MCP connections keep using the previous key until reloaded.")
         }
         return String(
             format: L("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail."),
@@ -567,7 +571,9 @@ struct MCPClientDetailView: View {
                 Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 1 * textScale) {
                     Text(L("Has not connected yet"))
-                    Text(String(format: L("Restart %@ to connect — it turns green here once it has."), descriptor.displayName))
+                    Text(descriptor.id == "hermes"
+                        ? L("Run “/reload-mcp” in Hermes or start a new session — it turns green here once Hermes connects.")
+                        : String(format: L("Restart %@ to connect — it turns green here once it has."), descriptor.displayName))
                         .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -833,6 +839,8 @@ struct MCPClientDetailView: View {
             }
             if descriptor.id == "clawbot" {
                 note = L("Connected. Run “openclaw gateway restart” to load the TorroMail MCP server.")
+            } else if descriptor.id == "hermes" {
+                note = L("Connected. Run “/reload-mcp” in Hermes or start a new session to load TorroMail.")
             } else {
                 note = String(format: L("Connected. Restart %@ to load it."), descriptor.displayName)
             }

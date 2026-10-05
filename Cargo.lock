@@ -631,6 +631,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "indexmap"
+version = "2.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1452,6 +1462,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1728,7 +1751,7 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "torromail-cache"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "rusqlite",
  "torromail-core",
@@ -1736,23 +1759,24 @@ dependencies = [
 
 [[package]]
 name = "torromail-control"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "getrandom 0.2.17",
  "keyring",
  "roxmltree",
  "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "torromail-keychain",
 ]
 
 [[package]]
 name = "torromail-core"
-version = "0.10.5"
+version = "0.11.0"
 
 [[package]]
 name = "torromail-discovery"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "getrandom 0.2.17",
  "torromail-control",
@@ -1761,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-imap-tls"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "rustls",
  "torromail-core",
@@ -1770,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-keychain"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "core-foundation",
  "security-framework",
@@ -1779,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-mcp"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "security-framework",
  "serde_json",
@@ -1793,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-oauth"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "serde_json",
  "ureq",
@@ -1801,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "torromail-tui"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "ratatui",
@@ -1852,6 +1876,12 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

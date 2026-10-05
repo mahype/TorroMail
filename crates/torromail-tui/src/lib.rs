@@ -65,7 +65,10 @@ pub fn perform(backend: &Backend, app: &mut App, request: Request) {
             }
             return;
         }
-        Request::Connect(id) => backend.connect(id).map(|()| "Connected. Restart the assistant to load it."),
+        Request::Connect(id) => backend.connect(id).map(|()| {
+            if id == "hermes" { "Connected. Run “/reload-mcp” in Hermes or start a new session to load TorroMail." }
+            else { "Connected. Restart the assistant to load it." }
+        }),
         Request::Disconnect(id) => backend.disconnect(id).map(|()| "Disconnected. Its access key no longer works."),
         Request::SetAccess(id, access) => backend.set_account_access(id, access.clone()).map(|()| "Saved."),
         Request::CopySnippet(id) => snippet(backend, app, id).and_then(|text| data::copy_to_clipboard(&text)).map(|()| "Copied to the clipboard."),

@@ -61,7 +61,7 @@ log — and neither shows your mail. The data below is a demo setup.
 
 ### Update the macOS app from Terminal
 
-The next release after 0.10.5 bundles `torromail` with the app. Dragging
+Since 0.11.0, the macOS app bundles `torromail`. Dragging
 `TorroMail.app` into Applications also installs the terminal control surface and
 its separate Sparkle updater. If the app window will not open, run:
 

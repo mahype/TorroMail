@@ -980,6 +980,8 @@ public struct MCPClient: Identifiable, Hashable {
         /// key, with its own entry shape — `"type": "local"`, the command as
         /// a list, and the variables under `environment`.
         case openCodeJSON(configURL: URL)
+        /// Hermes owns YAML under `mcp_servers`; setup edits only TorroMail.
+        case hermesYAML(configURL: URL)
         /// ChatGPT keeps its servers in TOML and bundles the codex CLI that
         /// owns that file. Handing the edit to that tool beats writing TOML
         /// here — preserving the user's other servers stays its problem. The
@@ -1012,7 +1014,7 @@ public struct MCPClient: Identifiable, Hashable {
     /// manual edit has somewhere to go.
     public var configURL: URL {
         switch setup {
-        case let .mcpServersJSON(url), let .serversJSON(url), let .openCodeJSON(url),
+        case let .mcpServersJSON(url), let .serversJSON(url), let .openCodeJSON(url), let .hermesYAML(url),
              let .codexCLI(_, url), let .claudeCodeCLI(_, url):
             return url
         case let .openClawCLI(_, settings):
@@ -1028,6 +1030,7 @@ extension MCPClient.Setup {
     var jsonRootKey: String {
         switch self {
         case .serversJSON: return "servers"
+        case .hermesYAML: return "mcp_servers"
         case .openCodeJSON: return "mcp"
         case .mcpServersJSON, .codexCLI, .claudeCodeCLI, .openClawCLI: return "mcpServers"
         }
@@ -1179,6 +1182,35 @@ public enum MCPClientRegistry {
             ))
         }
 
+        // CLI, desktop and IDE share this dedicated global MCP file. The
+        // .gemini directory alone could belong to the legacy Gemini CLI.
+        let antigravityMarkers = [".gemini/config", ".gemini/antigravity", ".gemini/antigravity-cli"]
+        var agyCandidates = [
+            home.appendingPathComponent(".local/bin/agy").path,
+            "/opt/homebrew/bin/agy",
+            "/usr/local/bin/agy"
+        ]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            agyCandidates.append(contentsOf: path.split(separator: ":").map {
+                URL(fileURLWithPath: String($0), isDirectory: true).appendingPathComponent("agy").path
+            })
+        }
+        if antigravityMarkers.contains(where: { marker in
+            var isDirectory: ObjCBool = false
+            return fileManager.fileExists(
+                atPath: home.appendingPathComponent(marker).path,
+                isDirectory: &isDirectory
+            ) && isDirectory.boolValue
+        }) || resolveExecutable(candidates: agyCandidates, fileManager: fileManager) != nil {
+            clients.append(MCPClient(
+                id: "antigravity",
+                displayName: "Google Antigravity",
+                setup: .mcpServersJSON(
+                    configURL: home.appendingPathComponent(".gemini/config/mcp_config.json")
+                )
+            ))
+        }
+
         let cursorDirectory = home.appendingPathComponent(".cursor", isDirectory: true)
         if fileManager.fileExists(atPath: cursorDirectory.path) {
             clients.append(MCPClient(
@@ -1274,6 +1306,20 @@ public enum MCPClientRegistry {
                     settings: openClawSettings
                 )
             ))
+        }
+
+        let hermesConfig = HermesClientConfiguration.configURL(
+            home: home, overrideHome: ProcessInfo.processInfo.environment["HERMES_HOME"]
+        )
+        let hermesCandidates = [
+            home.appendingPathComponent(".local/bin/hermes").path,
+            home.appendingPathComponent(".hermes/hermes-agent/.hermes/bin/hermes").path,
+            home.appendingPathComponent(".hermes/hermes-agent/.venv/bin/hermes").path,
+            "/opt/homebrew/bin/hermes", "/usr/local/bin/hermes"
+        ] + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/hermes" }
+        if fileManager.fileExists(atPath: hermesConfig.deletingLastPathComponent().path)
+            || resolveExecutable(candidates: hermesCandidates, fileManager: fileManager) != nil {
+            clients.append(MCPClient(id: "hermes", displayName: "Hermes", setup: .hermesYAML(configURL: hermesConfig)))
         }
 
         return clients
@@ -1817,6 +1863,8 @@ public enum MCPClientSetup {
         switch client.setup {
         case let .mcpServersJSON(configURL), let .serversJSON(configURL), let .claudeCodeCLI(_, configURL):
             return jsonConfigHasServer(at: configURL, rootKey: client.setup.jsonRootKey)
+        case let .hermesYAML(configURL):
+            return HermesClientConfiguration.isConfigured(at: configURL)
         case let .openCodeJSON(configURL):
             return openCodeConfigHasServer(at: configURL)
         case let .codexCLI(_, configURL):
@@ -1887,6 +1935,8 @@ public enum MCPClientSetup {
                 rootKey: client.setup.jsonRootKey,
                 environmentKey: client.setup.jsonEnvironmentKey
             ) == token
+        case let .hermesYAML(configURL):
+            return HermesClientConfiguration.token(at: configURL) == token
         case let .openCodeJSON(configURL):
             guard let data = try? Data(contentsOf: configURL), !data.isEmpty else { return false }
             return (try? JSON5Document(data: data).string(path: openCodeTokenPath)) == token
@@ -2054,6 +2104,8 @@ public enum MCPClientSetup {
                 token: token,
                 fileManager: fileManager
             )
+        case let .hermesYAML(configURL):
+            try HermesClientConfiguration.set(at: configURL, commandPath: commandPath, token: token, fileManager: fileManager)
         case let .openCodeJSON(configURL):
             try setOpenCodeServer(
                 at: configURL,
@@ -2457,6 +2509,12 @@ extension MCPClientRegistry {
             verificationHintKey: "Restart the Gemini CLI and run “/mcp”; “torromail” must be listed."
         ),
         MCPClientDescriptor(
+            id: "antigravity",
+            displayName: "Google Antigravity",
+            symbol: "sparkles",
+            verificationHintKey: "Restart Antigravity. In the CLI, open “/mcp”; in the app, open Settings → Customizations → Installed MCP Servers. “torromail” must be listed. Then ask: “List my mail accounts.”"
+        ),
+        MCPClientDescriptor(
             id: "cursor",
             displayName: "Cursor",
             symbol: "cursorarrow.rays",
@@ -2493,10 +2551,9 @@ extension MCPClientRegistry {
             id: "hermes",
             displayName: "Hermes",
             symbol: "paperplane.circle",
-            kind: .manual,
             snippetFormat: .hermesYAML,
             manualConfigPath: "~/.hermes/config.yaml",
-            verificationHintKey: "Add the snippet below under “mcp_servers” in Hermes’ config, then restart it and ask it to list your mail accounts."
+            verificationHintKey: "In Hermes, run “/reload-mcp” or start a new session to load TorroMail. Then ask it to list your mail accounts."
         ),
         MCPClientDescriptor(
             id: "other",
@@ -2694,6 +2751,8 @@ extension MCPClientSetup {
                 rootKey: client.setup.jsonRootKey,
                 fileManager: fileManager
             )
+        case let .hermesYAML(configURL):
+            try HermesClientConfiguration.remove(at: configURL, fileManager: fileManager)
         case let .openCodeJSON(configURL):
             try removeOpenCodeServer(at: configURL, fileManager: fileManager)
         case let .codexCLI(executableURL, _):

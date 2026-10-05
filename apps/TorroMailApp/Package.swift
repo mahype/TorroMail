@@ -13,10 +13,11 @@ let package = Package(
         .executable(name: "TorroMailKitContract", targets: ["TorroMailKitContract"])
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.2")
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.2"),
+        .package(url: "https://github.com/jpsim/Yams", from: "6.0.0")
     ],
     targets: [
-        .target(name: "TorroMailKit"),
+        .target(name: "TorroMailKit", dependencies: [.product(name: "Yams", package: "Yams")]),
         .executableTarget(
             name: "TorroMailApp",
             dependencies: [
@@ -29,7 +30,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorroMailKitContract",
-            dependencies: ["TorroMailKit"],
+            dependencies: ["TorroMailKit", .product(name: "Yams", package: "Yams")],
             path: "Tests/TorroMailKitContract"
         )
     ]

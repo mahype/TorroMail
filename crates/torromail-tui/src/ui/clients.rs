@@ -101,11 +101,17 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if app.restart_pending(client) {
         lines.push(Line::styled(
-            format!("▲ {}", lang.t("Restart %@ now").replace("%@", name)),
+            format!("▲ {}", if client.descriptor.id == "hermes" {
+                lang.t("Reload Hermes’ MCP connections now").to_owned()
+            } else { lang.t("Restart %@ now").replace("%@", name) }),
             Style::new().fg(theme::AMBER).add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(
-            lang.t("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail.").replace("%@", name),
+            if client.descriptor.id == "hermes" {
+                lang.t("Run “/reload-mcp” in Hermes or start a new session so it loads the current access key. Existing MCP connections keep using the previous key until reloaded.").to_owned()
+            } else {
+                lang.t("%@ read its access key when it started and keeps using the old one. Until you quit and reopen it, every mail request it makes will fail.").replace("%@", name)
+            },
             theme::muted(),
         ));
         lines.push(Line::default());
