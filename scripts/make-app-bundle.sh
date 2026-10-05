@@ -20,6 +20,7 @@ cp "$ROOT/target/debug/torromail" "$APP/Contents/MacOS/torromail"
 cp "$ROOT/target/debug/torromail-mcp" "$APP/Contents/MacOS/torromail-mcp"
 cp -R "$BIN/TorroMailApp_TorroMailApp.bundle" "$APP/Contents/Resources/"
 cp "$PKG/Icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$PKG/.build/checkouts/Yams/LICENSE" "$APP/Contents/Resources/Yams-LICENSE.txt"
 
 SPARKLE_FRAMEWORK="$PKG/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 if [ ! -d "$SPARKLE_FRAMEWORK" ]; then

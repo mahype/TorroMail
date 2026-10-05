@@ -155,6 +155,7 @@ done
 cp -R "$bin_dir/TorroMailApp_TorroMailApp.bundle" "$app/Contents/Resources/"
 
 cp "$pkg/Icon/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+cp "$pkg/.build/checkouts/Yams/LICENSE" "$app/Contents/Resources/Yams-LICENSE.txt"
 
 # SwiftPM links the executable against @rpath/Sparkle.framework but does not
 # copy binary targets into a hand-assembled .app. Embed the universal framework
