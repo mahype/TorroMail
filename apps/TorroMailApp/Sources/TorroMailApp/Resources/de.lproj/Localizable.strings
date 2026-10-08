@@ -383,3 +383,41 @@
 "Reload Hermes’ MCP connections now" = "Hermes’ MCP-Verbindungen jetzt neu laden";
 "Run “/reload-mcp” in Hermes or start a new session so it loads the current access key. Existing MCP connections keep using the previous key until reloaded." = "Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung, damit Hermes den aktuellen Zugangsschlüssel lädt. Bestehende MCP-Verbindungen verwenden bis zum Neuladen den bisherigen Schlüssel.";
 "Run “/reload-mcp” in Hermes or start a new session — it turns green here once Hermes connects." = "Führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung – sobald Hermes sich verbindet, wird die Anzeige hier grün.";
+
+// Hermes bot setup
+"Configured" = "Eingerichtet";
+"Hermes connection" = "Hermes-Verbindung";
+"Choose a connection" = "Verbindung auswählen";
+"This computer" = "Dieser Computer";
+"Hermes uses a remote backend. Choose its saved SSH connection to configure bots on that computer." = "Hermes verwendet ein entferntes Backend. Wähle dessen gespeicherte SSH-Verbindung, um die Bots auf diesem Computer einzurichten.";
+"Refresh bots" = "Bots aktualisieren";
+"Updating Hermes bots…" = "Hermes-Bots werden aktualisiert …";
+"No Hermes bots were found on this computer." = "Auf diesem Computer wurden keine Hermes-Bots gefunden.";
+"Set up selected bots" = "Ausgewählte Bots einrichten";
+"Only selected bots are configured. Each bot gets its own access key. Account permissions still apply." = "Nur ausgewählte Bots werden eingerichtet. Jeder Bot erhält einen eigenen Zugangsschlüssel. Die Kontoberechtigungen gelten weiterhin.";
+"Standard bot" = "Standard-Bot";
+"Setup verified. Hermes can load the change automatically. If this bot still has no mail access, run “/reload-mcp” in Hermes or start a new session." = "Einrichtung geprüft. Hermes kann die Änderung automatisch laden. Falls dieser Bot weiterhin keinen Mailzugriff hat, führe in Hermes „/reload-mcp“ aus oder starte eine neue Sitzung.";
+"Test access" = "Zugriff prüfen";
+"Hermes is not installed on this computer." = "Hermes ist auf diesem Computer nicht installiert.";
+"Invalid Hermes bot selection." = "Ungültige Hermes-Bot-Auswahl.";
+"Select at least one Hermes bot." = "Wähle mindestens einen Hermes-Bot aus.";
+"The TorroMail configuration could not be read. Open TorroMail on this computer first." = "Die TorroMail-Konfiguration konnte nicht gelesen werden. Öffne zunächst TorroMail auf diesem Computer.";
+"This Hermes bot no longer exists. Refresh the bot list." = "Dieser Hermes-Bot existiert nicht mehr. Aktualisiere die Bot-Liste.";
+"This bot is not configured yet." = "Dieser Bot ist noch nicht eingerichtet.";
+"A selected mail account no longer exists. Refresh the bot list." = "Ein ausgewähltes Mailkonto existiert nicht mehr. Aktualisiere die Bot-Liste.";
+"Setup failed and could not be fully restored. Check this bot’s configuration before retrying." = "Die Einrichtung ist fehlgeschlagen und konnte nicht vollständig zurückgesetzt werden. Prüfe die Konfiguration dieses Bots, bevor du es erneut versuchst.";
+"Could not start the Hermes setup helper." = "Der Hermes-Einrichtungshelfer konnte nicht gestartet werden.";
+"The Hermes setup helper did not respond in time." = "Der Hermes-Einrichtungshelfer hat nicht rechtzeitig geantwortet.";
+"Could not reach the Hermes setup helper. Check the SSH connection and update TorroMail on the target computer." = "Der Hermes-Einrichtungshelfer konnte nicht erreicht werden. Prüfe die SSH-Verbindung und aktualisiere TorroMail auf dem Zielcomputer.";
+"TorroMail refused this bot’s access key." = "TorroMail hat den Zugangsschlüssel dieses Bots abgelehnt. Richte den Bot erneut ein.";
+"The authenticated TorroMail connection test failed." = "Der TorroMail-Verbindungstest mit Zugangsschlüssel ist fehlgeschlagen.";
+"Could not lock the TorroMail configuration." = "Die TorroMail-Konfiguration konnte nicht für die Änderung gesperrt werden.";
+"TorroMail is updating its configuration. Please try again." = "TorroMail aktualisiert gerade seine Konfiguration. Versuche es erneut.";
+"The Hermes connections could not be read." = "Die Hermes-Verbindungen konnten nicht gelesen werden.";
+"The Hermes setup helper was not found. Update TorroMail on this computer." = "Der Hermes-Einrichtungshelfer wurde nicht gefunden. Aktualisiere TorroMail auf diesem Computer.";
+"The Hermes setup helper returned an invalid response. Update TorroMail on the target computer." = "Der Hermes-Einrichtungshelfer hat eine ungültige Antwort geliefert. Aktualisiere TorroMail auf dem Zielcomputer.";
+"This bot’s TorroMail server entry needs to be repaired." = "Der TorroMail-Servereintrag dieses Bots muss repariert werden. Richte den Bot erneut ein.";
+
+"%d accounts" = "%d Konten";
+"The macOS login session is not available. Sign in on the target computer and try again." = "Die macOS-Sitzung ist nicht verfügbar. Melde dich auf dem Zielcomputer an und versuche es erneut.";
+"The keychain is not available in this login session. Open TorroMail on the target computer and try again." = "Der Schlüsselbund ist in dieser Sitzung nicht verfügbar. Öffne TorroMail auf dem Zielcomputer und versuche es erneut.";

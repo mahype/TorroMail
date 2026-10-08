@@ -65,11 +65,13 @@ echo "-> bundled CLI and separate updater"
 "$app_path/Contents/MacOS/torromail" update --help
 helper="$app_path/Contents/Helpers/TorroMailUpdater.app"
 test -x "$helper/Contents/MacOS/TorroMailUpdater"
+hermes_helper="$app_path/Contents/MacOS/TorroMailHermesControl"
+test -x "$hermes_helper"
 if ! otool -L "$helper/Contents/MacOS/TorroMailUpdater" | grep -Fq '@rpath/Sparkle.framework/'; then
     echo "error: CLI updater is not linked to Sparkle" >&2; exit 1
 fi
 app_team="$(codesign -dv "$app_path" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-for code in "$app_path/Contents/MacOS/torromail" "$app_path/Contents/MacOS/torromail-mcp" "$helper"; do
+for code in "$app_path/Contents/MacOS/torromail" "$app_path/Contents/MacOS/torromail-mcp" "$hermes_helper" "$helper"; do
     codesign --verify --strict "$code"
     team="$(codesign -dv "$code" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
     if [[ -z "$team" || "$team" != "$app_team" || "$team" == 'not set' ]]; then
@@ -80,6 +82,9 @@ for code in "$app_path/Contents/MacOS/torromail" "$app_path/Contents/MacOS/torro
         echo "error: bundled helper is not universal: $code" >&2; exit 1
     fi
 done
+
+echo "-> Hermes setup helper rejects an invalid request without accessing accounts"
+printf '{}\n' | "$hermes_helper" | python3 -c 'import json, sys; response = json.load(sys.stdin); assert response["version"] == 1 and response.get("problem")'
 
 echo "-> codesign --verify --deep --strict"
 codesign --verify --deep --strict --verbose=2 "$app_path"

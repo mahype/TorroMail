@@ -35,8 +35,23 @@ public enum HermesClientConfiguration {
         return env["TORROMAIL_TOKEN"] as? String
     }
 
+    public static func definition(at url: URL) throws -> [String: Any]? {
+        let root = try read(at: url)
+        return (root["mcp_servers"] as? [String: Any])?[MCPClientRegistry.serverName] as? [String: Any]
+    }
+
     public static func set(at url: URL, commandPath: String, token: String, fileManager: FileManager = .default) throws {
-        try update(at: url, definition: ["command": commandPath, "env": ["TORROMAIL_TOKEN": token]], fileManager: fileManager)
+        // Keep the user's tool filters and environment, but replace transport
+        // facts so a formerly remote/disabled definition becomes runnable.
+        var server = try definition(at: url) ?? [:]
+        for key in ["url", "type", "transport", "headers", "auth", "oauth", "args"] { server[key] = nil }
+        var env = server["env"] as? [String: Any] ?? [:]
+        env["TORROMAIL_POLICY_PATH"] = nil
+        env["TORROMAIL_TOKEN"] = token
+        server["env"] = env
+        server["command"] = commandPath
+        server["enabled"] = true
+        try update(at: url, definition: server, fileManager: fileManager)
     }
 
     public static func remove(at url: URL, fileManager: FileManager = .default) throws {

@@ -16,6 +16,7 @@ cargo build -p torromail-mcp -p torromail-tui --manifest-path "$ROOT/Cargo.toml"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/TorroMailApp" "$APP/Contents/MacOS/TorroMailApp"
+cp "$BIN/TorroMailHermesControl" "$APP/Contents/MacOS/TorroMailHermesControl"
 cp "$ROOT/target/debug/torromail" "$APP/Contents/MacOS/torromail"
 cp "$ROOT/target/debug/torromail-mcp" "$APP/Contents/MacOS/torromail-mcp"
 cp -R "$BIN/TorroMailApp_TorroMailApp.bundle" "$APP/Contents/Resources/"
@@ -53,7 +54,7 @@ DEV_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed
 IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Apple Development|Developer ID Application/ { print $2; exit }')}"
 if [ -n "$IDENTITY" ]; then
-    for program in torromail-mcp torromail; do
+    for program in torromail-mcp torromail TorroMailHermesControl; do
         codesign --force --sign "$IDENTITY" "$APP/Contents/MacOS/$program"
     done
     codesign --force --sign "$IDENTITY" "$APP/Contents/Helpers/TorroMailUpdater.app"
@@ -62,7 +63,7 @@ if [ -n "$IDENTITY" ]; then
 else
     echo "warning: no codesigning identity found; keychain will prompt per item" >&2
     echo "         set CODESIGN_IDENTITY or install an Apple Development certificate" >&2
-    for program in torromail-mcp torromail; do codesign --force --sign - "$APP/Contents/MacOS/$program"; done
+    for program in torromail-mcp torromail TorroMailHermesControl; do codesign --force --sign - "$APP/Contents/MacOS/$program"; done
     codesign --force --sign - "$APP/Contents/Helpers/TorroMailUpdater.app"
     codesign --force --deep --sign - "$APP"
 fi

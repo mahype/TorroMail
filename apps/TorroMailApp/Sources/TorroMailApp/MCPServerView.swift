@@ -66,6 +66,22 @@ struct MCPServerListView: View {
             let next = await Task.detached(priority: .utility) {
                 var result: [String: MCPClientSetupStatus] = [:]
                 for descriptor in catalog {
+                    if descriptor.id == "hermes", let found = try? HermesConnections.discover() {
+                        if let target = found.connections.first(where: { $0.id == found.preferredID }) {
+                            if let response = try? HermesConnections.run(HermesControlRequest(action: .list), on: target) {
+                                let ready = response.bots.contains(where: \.isReady)
+                                result[descriptor.id] = MCPClientSetupStatus(isInstalled: true, isConfigured: ready, hasCurrentKey: ready)
+                                continue
+                            }
+                            if target.isRemote {
+                                result[descriptor.id] = MCPClientSetupStatus(isInstalled: true, isConfigured: false)
+                                continue
+                            }
+                        } else if found.remoteWithoutSSH {
+                            result[descriptor.id] = MCPClientSetupStatus(isInstalled: true, isConfigured: false)
+                            continue
+                        }
+                    }
                     result[descriptor.id] = MCPClientSetup.status(
                         for: descriptor,
                         executableName: executable,
@@ -282,6 +298,9 @@ struct MCPClientDetailView: View {
     @State private var keyChangedAt: Date?
 
     var body: some View {
+        if descriptor.id == "hermes" {
+            HermesClientView()
+        } else {
         Form {
             restartSection
             ClientAccountAccessSection(clientID: descriptor.id)
@@ -307,6 +326,7 @@ struct MCPClientDetailView: View {
             showOpenClawLocation = model.generalSettings.openClaw.hasOverrides
                 || status.setupAvailability != .ready
             loadSnippet()
+        }
         }
     }
 

@@ -518,6 +518,13 @@ public enum MCPClientKeyStore {
 
     private static func displayName(forClient clientID: String) -> String {
         if clientID == appClientID { return "TorroMail" }
+        if clientID.hasPrefix("hermes-bot-"),
+           let url = try? PolicyDocument.defaultURL(), let data = try? Data(contentsOf: url),
+           let doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let clients = doc["clients"] as? [[String: Any]],
+           let name = clients.first(where: { $0["id"] as? String == clientID })?["name"] as? String {
+            return name
+        }
         return MCPClientRegistry.descriptor(id: clientID)?.displayName ?? clientID
     }
 }
@@ -2994,17 +3001,34 @@ public enum PolicyDocument {
         accounts: [MailAccount],
         clients: [MCPClientKeyStore.Pairing],
         to url: URL? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        currentClients: (() throws -> [MCPClientKeyStore.Pairing])? = nil
     ) throws {
         let target = try url ?? defaultURL(fileManager: fileManager)
         try fileManager.createDirectory(
             at: target.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try data(for: accounts, clients: clients).write(to: target, options: .atomic)
-        // Connection facts and the allowlist are nobody else's read: the
-        // document stays owner-only, like the configs that carry the keys.
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+        try HermesControlLock.withLock(directory: target.deletingLastPathComponent()) {
+            // Native writers resolve pairings after acquiring the same lock
+            // as bot setup, so a snapshot taken just before setup cannot drop
+            // the new bot from the next allowlist publication.
+            let document = try data(for: accounts, clients: currentClients?() ?? clients)
+            let pairingURL = target.deletingLastPathComponent().appendingPathComponent("clients.json")
+            var previousPairings: Data?
+            // If the terminal surface owns a pairing file, keep it in step:
+            // its next save must not restore a revoked bot's stale grant.
+            if fileManager.fileExists(atPath: pairingURL.path),
+               let root = try JSONSerialization.jsonObject(with: document) as? [String: Any], let entries = root["clients"] {
+                previousPairings = try Data(contentsOf: pairingURL)
+                try HermesBotControl.write(try JSONSerialization.data(withJSONObject: ["version": 1, "clients": entries], options: [.sortedKeys]), to: pairingURL)
+            }
+            do { try HermesBotControl.write(document, to: target) }
+            catch {
+                if let previousPairings { try HermesBotControl.write(previousPairings, to: pairingURL) }
+                throw error
+            }
+        }
     }
 }
 

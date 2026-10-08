@@ -492,10 +492,12 @@ func publishPolicyDocument(for accounts: [MailAccount]) {
         // The app is a paired client of its own server (connection checks,
         // the supervised instance) — minting here keeps it on every
         // allowlist this document will ever carry.
-        _ = try MCPClientKeyStore.appToken()
-        let pairings = MCPClientKeyStore.pairings()
-        let grants = try ClientAccountAccessStore.load(legacyClientIDs: pairings.map(\.clientID))
-        try PolicyDocument.publish(accounts: accounts, clients: ClientAccountAccessStore.applying(grants, to: pairings))
+        try PolicyDocument.publish(accounts: accounts, clients: [], currentClients: {
+            _ = try MCPClientKeyStore.appToken()
+            let pairings = MCPClientKeyStore.pairings()
+            let grants = try ClientAccountAccessStore.load(legacyClientIDs: pairings.map(\.clientID))
+            return ClientAccountAccessStore.applying(grants, to: pairings)
+        })
     } catch {
         NSLog("TorroMail: policy document write failed: %@", error.localizedDescription)
     }

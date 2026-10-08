@@ -2163,5 +2163,6 @@ do {
 require(missingWriterFailed, "a missing server binary fails the publication instead of inventing a document")
 
 try hermesClientContract()
+try hermesBotsContract()
 
 print("TorroMailKit control-surface contract passed")

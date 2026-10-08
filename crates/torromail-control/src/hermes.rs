@@ -75,11 +75,20 @@ pub(crate) fn token(config: &Path) -> Option<String> {
 }
 
 pub(crate) fn set(config: &Path, command: &str, token: &str) -> Result<(), SetupError> {
-    let definition = serde_yaml_ng::to_value(serde_json::json!({
-        "command": command, "env": { TOKEN_VARIABLE: token }
-    }))
-    .map_err(|error| SetupError::WriteFailed(error.to_string()))?;
-    update(config, Some(definition))
+    let root = parse(&source(config)?)?;
+    let mut definition = root.get(Value::from("mcp_servers"))
+        .and_then(Value::as_mapping).and_then(|servers| servers.get(Value::from(SERVER_NAME)))
+        .and_then(Value::as_mapping).cloned().unwrap_or_default();
+    for key in ["url", "type", "transport", "headers", "auth", "oauth", "args"] {
+        definition.remove(Value::from(key));
+    }
+    let mut environment = definition.get(Value::from("env")).and_then(Value::as_mapping).cloned().unwrap_or_default();
+    environment.remove(Value::from("TORROMAIL_POLICY_PATH"));
+    environment.insert(Value::from(TOKEN_VARIABLE), Value::from(token));
+    definition.insert(Value::from("command"), Value::from(command));
+    definition.insert(Value::from("env"), Value::Mapping(environment));
+    definition.insert(Value::from("enabled"), Value::Bool(true));
+    update(config, Some(Value::Mapping(definition)))
 }
 
 pub(crate) fn remove(config: &Path) -> Result<(), SetupError> {

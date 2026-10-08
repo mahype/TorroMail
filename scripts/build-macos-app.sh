@@ -143,6 +143,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 cp "$swift_build_bin" "$app/Contents/MacOS/TorroMailApp"
+cp "$bin_dir/TorroMailHermesControl" "$app/Contents/MacOS/TorroMailHermesControl"
 
 # The app ships its own MCP server so launches never depend on cwd or PATH.
 for program in "${programs[@]}"; do
@@ -215,6 +216,7 @@ if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
     for program in "${programs[@]}"; do
         codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/$program"
     done
+    codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/TorroMailHermesControl"
     codesign --force --timestamp --options=runtime --sign "$MACOS_SIGN_IDENTITY" "$helper"
     codesign --force --deep --timestamp --options=runtime \
         --entitlements "$entitlements" \
@@ -223,6 +225,7 @@ if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
 else
     echo "==> Ad-hoc signing (MACOS_SIGN_IDENTITY unset)"
     for program in "${programs[@]}"; do codesign --force --sign - "$app/Contents/MacOS/$program"; done
+    codesign --force --sign - "$app/Contents/MacOS/TorroMailHermesControl"
     codesign --force --sign - "$helper"
     codesign --force --deep --sign - \
         --entitlements "$entitlements" \

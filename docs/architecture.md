@@ -99,21 +99,58 @@ paths, the server's connection log remains the proof that OpenClaw accepted the
 configured key.
 
 Hermes is automatically configured in the native app and terminal control
-surface. TorroMail discovers the Hermes profile directory or executable without
-launching the agent, honors `HERMES_HOME`, and otherwise follows the sticky
-`~/.hermes/active_profile` selector. Connecting writes only the
-`mcp_servers.torromail` definition with Hermes' own pairing key; disconnecting
-removes it. Reads parse YAML and compare the key inside that exact entry, rather
-than finding an unrelated key elsewhere in the file. Ordinary block YAML edits
+surface. The terminal's single-client setup honors `HERMES_HOME` and otherwise
+follows `~/.hermes/active_profile`. The native app's Hermes settings enumerate
+the standard bot and every named profile independently of that selector. Users
+select bots and share all or selected mail accounts with each one. New bots
+start with no accounts; existing legacy grants migrate without being widened.
+Each selected bot gets its own pairing identity, derived from the canonical
+Hermes installation root and profile name, and its own key. Repeated setup keeps
+readable keys stable. Disconnect revokes only that bot; legacy shared identities
+are retained while older profiles may still use them.
+
+The app reads Hermes Desktop's saved connection facts. An active SSH connection
+is used directly; a URL backend is matched to a saved SSH host by hostname or
+resolved address only when that match is unique. An unmatched remote backend
+requires an explicit connection choice, never a silent local fallback. The
+signed `TorroMailHermesControl` executable ships beside the MCP server and runs
+on the selected computer, locally or over batch-mode SSH. Both computers need
+an updated TorroMail app; this setup currently supports macOS targets. SSH uses
+the existing user's key. The remote wrapper runs the signed worker through a
+short-lived launch agent in the same user's existing macOS GUI session, because
+an SSH security session cannot necessarily create login-keychain items. It
+does not unlock the keychain or enable dialogs; a missing login session is an
+actionable error. The agent and private request files are removed on completion.
+Requests carry profile IDs and grants as bounded JSON
+over stdin, not shell command text. Desktop login tokens are not imported, and
+bot keys never return to the controlling computer. Account choices, keys and
+the policy all belong to the selected TorroMail instance; local-only mail
+accounts are not copied to a remote instance.
+
+Setup changes `mcp_servers.torromail`, preserving custom tool filters and extra
+environment variables while replacing stale transport facts and enabling the
+server. The policy override environment variable is removed so the entry uses
+this instance's policy. Reads parse YAML and compare the key inside that exact
+entry, rather than finding an unrelated key elsewhere in the file. Ordinary block YAML edits
 preserve the surrounding settings, server definitions, and comments; flow
 mappings and aliases use a semantic YAML rewrite, which can change formatting
 and comments. Invalid YAML, duplicate keys, and an invalid server map fail
 without overwriting the file. Writes are atomic, private, and follow config
 symlinks. The interactive discovery and selection prompts in `hermes mcp add`
 are why setup uses the [documented YAML configuration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
-After connecting, run `/reload-mcp` in Hermes or start a fresh session; the
-connection log confirms Hermes loaded the key. Hermes gateways that watch the
-configuration may pick up the change automatically.
+The helper serializes setup with native policy publication using a control
+lock. It updates the separate account-grant store, policy allowlist and an
+existing terminal pairing file together; failure restores the affected files
+and newly changed key. A connection test performs `initialize` and an
+authenticated `mail_list_accounts` call with the configured key, rather than
+treating open `tools/list` discovery as proof of access. A failed test rolls
+setup back. Batch results remain per bot, so a damaged profile cannot overwrite
+its siblings. Neither listing bots nor testing access runs a Hermes agent.
+Hermes can load watched configuration changes automatically. A running session
+that still uses the previous key needs `/reload-mcp` or a fresh session; the
+setup probe verifies the server configuration, not a live Hermes conversation.
+Key changes persist a per-bot reload notice. Only a subsequent attributed
+client handshake clears it; setup probes and repeated setup keep it visible.
 
 The official Grok Bot desktop app is intentionally not listed as a TorroMail
 client. Grok Bot runs its tools on a persistent cloud computer and accepts

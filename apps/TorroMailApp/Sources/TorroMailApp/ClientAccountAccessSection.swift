@@ -86,7 +86,11 @@ struct ClientAccountAccessSection: View {
             grants[clientID] = updated
             try ClientAccountAccessStore.save(grants)
             do {
-                try PolicyDocument.publish(accounts: model.accounts, clients: ClientAccountAccessStore.applying(grants, to: pairings))
+                try PolicyDocument.publish(accounts: model.accounts, clients: [], currentClients: {
+                    let current = MCPClientKeyStore.pairings()
+                    let currentGrants = try ClientAccountAccessStore.load(legacyClientIDs: current.map(\.clientID))
+                    return ClientAccountAccessStore.applying(currentGrants, to: current)
+                })
             } catch {
                 // A failed policy write must not look like a successful grant
                 // change. Restore persisted settings before reporting failure.

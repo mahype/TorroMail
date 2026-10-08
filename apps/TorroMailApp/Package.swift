@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "TorroMailApp", targets: ["TorroMailApp"]),
+        .executable(name: "TorroMailHermesControl", targets: ["TorroMailHermesControl"]),
         .executable(name: "TorroMailKitContract", targets: ["TorroMailKitContract"])
     ],
     dependencies: [
@@ -18,6 +19,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "TorroMailKit", dependencies: [.product(name: "Yams", package: "Yams")]),
+        .executableTarget(name: "TorroMailHermesControl", dependencies: ["TorroMailKit"]),
         .executableTarget(
             name: "TorroMailApp",
             dependencies: [
