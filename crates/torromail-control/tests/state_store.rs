@@ -54,8 +54,15 @@ fn a_record_without_ports_or_encryption_gets_what_its_era_implied() {
     assert_eq!((account.imap_port, account.imap_security), (993, ConnectionSecurity::Tls));
     assert_eq!((account.smtp_port, account.smtp_security), (465, ConnectionSecurity::Tls));
     assert_eq!(account.cache_level, CacheLevel::Headers);
-    assert!(!account.is_verified, "never verified unless the record says so");
+    assert!(
+        !account.is_verified,
+        "never verified unless the record says so"
+    );
     assert!(!account.special_mailboxes.manual);
+    assert!(
+        !account.allow_create_drafts_mailbox,
+        "legacy accounts never acquire creation consent"
+    );
 }
 
 #[test]

@@ -91,6 +91,7 @@ pub fn password_account(id: String, name: &str, email: &str, config: &Discovered
         known_mailboxes: vec!["INBOX".to_owned()],
         permissions: PermissionSet::default(),
         special_mailboxes: SpecialMailboxes::default(),
+        allow_create_drafts_mailbox: false,
         cache_level: CacheLevel::Headers,
     }
 }

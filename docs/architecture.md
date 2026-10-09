@@ -287,8 +287,12 @@ names, media types, and byte sizes, but never their encoded content.
 appends the complete RFC 5322 message with the `\Draft` flag. The destination
 comes from the server's `\Drafts` mailbox attribute in `LIST`,
 `LIST (SPECIAL-USE)`, or `XLIST`. If no attribute is reported, TorroMail uses
-an existing drafts folder with a common or localized name. It does not guess a
-new folder name or create one; it reports when no destination is found. With
+an existing drafts folder with a common or localized name, using the server's
+hierarchy delimiter. With separate per-account `allow_create_drafts_mailbox`
+consent (default false), it creates a missing Drafts folder under the personal
+IMAP namespace, using CREATE-SPECIAL-USE when offered, then verifies LIST and
+SELECT before use. Without NAMESPACE it uses the empty-name LIST hierarchy root;
+unknown namespaces fail with an actionable setup error. With
 attachments the message is `multipart/mixed`; every binary
 part uses base64 transfer encoding and an RFC 2231 UTF-8 filename.
 
@@ -297,7 +301,28 @@ special-use attributes and existing common folder names. An account can
 override each of these five roles in the setup app by selecting an existing,
 selectable folder from the server's live list. The server checks that exact
 choice again when the action runs. `INBOX` is reserved by IMAP and has no
-manual mapping. Neither discovery nor setup creates server folders.
+manual mapping. Only automatic Drafts creation has separate consent; all other
+roles still require existing folders. A broken explicit mapping is reported,
+never replaced automatically.
+
+Draft operations use an optional `idempotency_key`, scoped to account and paired
+client. Repeating it with different contents is rejected. Without a key,
+identical MIME and Bcc recipients derive the same identity; intentional identical
+new drafts need a fresh key. Before APPEND, private metadata under `draft-state/`
+records a content hash and destination. An account file lock serializes concurrent
+MCP processes; synced atomic checkpoints survive a process crash. The GUI-owned
+policy is never rewritten by the server. Successful automatic folder mappings
+persist there too and are validated on the next connection.
+
+Every real draft result requires a Message-ID search, a single matching UID,
+the Draft flag, and a full MIME fetch identical to the composed message. Retries
+of uncertain attempts reconcile by identity and cannot APPEND again. If the
+message remains invisible, TorroMail reports `draft_storage_uncertain`; the user
+must inspect the server before deliberately starting a fresh operation. A
+positively refused APPEND permits retry after quota or permission repair.
+JSON-RPC errors retain code -32000 and add `error.data.reason` for draft setup
+and storage failures. Draft audit entries contain counts, never recipients,
+subject, filenames, body, or attachment bytes.
 
 Before submitting a prepared send, TorroMail resolves the Sent folder. After
 SMTP accepts the message, it appends a `\Seen` copy there. If that append

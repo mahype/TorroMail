@@ -71,6 +71,7 @@ pub(crate) struct DocumentAccount {
     /// when the stored one has gone stale. Shared by IMAP and SMTP.
     pub(crate) oauth: Option<OAuthFacts>,
     pub(crate) mailbox_overrides: SpecialMailboxOverrides,
+    pub(crate) allow_create_drafts_mailbox: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -300,6 +301,15 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
         smtp,
         oauth,
         mailbox_overrides: parse_mailbox_overrides(account)?,
+        allow_create_drafts_mailbox: match account.get("allow_create_drafts_mailbox") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            _ => {
+                return Err(
+                    "policy document invalid: allow_create_drafts_mailbox must be a boolean".into(),
+                );
+            }
+        },
     })
 }
 

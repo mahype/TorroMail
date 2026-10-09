@@ -3664,6 +3664,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
     /// later automatically follow the account-wide standard.
     public var knownMailboxes: [String]
     public var permissions: PermissionSet
+    public var allowCreateDraftsMailbox: Bool
     public var specialMailboxes: SpecialMailboxSettings
     public var searchCache: SearchCacheSettings
     public var pendingActions: [PendingAction]
@@ -3685,6 +3686,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         connectionState: ConnectionState = .notConfigured,
         knownMailboxes: [String] = ["INBOX"],
         permissions: PermissionSet = PermissionSet(),
+        allowCreateDraftsMailbox: Bool = false,
         specialMailboxes: SpecialMailboxSettings = SpecialMailboxSettings(),
         searchCache: SearchCacheSettings = SearchCacheSettings(),
         pendingActions: [PendingAction] = []
@@ -3705,6 +3707,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         self.connectionState = connectionState
         self.knownMailboxes = knownMailboxes
         self.permissions = permissions
+        self.allowCreateDraftsMailbox = allowCreateDraftsMailbox
         self.specialMailboxes = specialMailboxes
         self.searchCache = searchCache
         self.pendingActions = pendingActions
@@ -3737,7 +3740,7 @@ extension MailAccount: Codable {
         case id, name, email, provider, loginMethod, imapHost, smtpHost
         case username, knownMailboxes, permissions, specialMailboxes, searchCache, isVerified
         case imapPort, smtpPort, oauthIssuer
-        case imapSecurity, smtpSecurity
+        case imapSecurity, smtpSecurity, allowCreateDraftsMailbox
     }
 
     public init(from decoder: Decoder) throws {
@@ -3780,6 +3783,7 @@ extension MailAccount: Codable {
             ),
             knownMailboxes: try container.decode([String].self, forKey: .knownMailboxes),
             permissions: try container.decode(PermissionSet.self, forKey: .permissions),
+            allowCreateDraftsMailbox: try container.decodeIfPresent(Bool.self, forKey: .allowCreateDraftsMailbox) ?? false,
             specialMailboxes: try container.decodeIfPresent(SpecialMailboxSettings.self, forKey: .specialMailboxes) ?? SpecialMailboxSettings(),
             searchCache: try container.decode(SearchCacheSettings.self, forKey: .searchCache)
         )
@@ -3802,6 +3806,7 @@ extension MailAccount: Codable {
         try container.encode(username, forKey: .username)
         try container.encode(knownMailboxes, forKey: .knownMailboxes)
         try container.encode(permissions, forKey: .permissions)
+        try container.encode(allowCreateDraftsMailbox, forKey: .allowCreateDraftsMailbox)
         try container.encode(specialMailboxes, forKey: .specialMailboxes)
         try container.encode(searchCache, forKey: .searchCache)
         try container.encode(connectionState == .connected, forKey: .isVerified)

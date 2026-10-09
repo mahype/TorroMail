@@ -163,8 +163,16 @@ Account setup can map Drafts, Sent, Archive, Junk, and Trash to exact existing
 IMAP folders. Automatic discovery uses special-use attributes, then common
 names; manual choices come from a live list of selectable folders. The app
 publishes choices in `mailbox_overrides`, and the server validates them at use.
-`INBOX` is reserved by IMAP and has no mapping. TorroMail never creates these
-folders on the server.
+`INBOX` is reserved by IMAP and has no mapping. Only a missing Drafts folder
+may be created, with separate per-account consent (`allow_create_drafts_mailbox`,
+default false). Sent, Archive, Junk, and Trash still need existing folders.
+Automatic Drafts creation uses the personal namespace and delimiter advertised
+by IMAP, rechecks LIST/SELECT, subscribes when possible, and persists its mapping
+in private `draft-state/` metadata alongside the policy. Explicit mappings are
+never silently replaced. Draft operations have an optional `idempotency_key`;
+retries search the stable Message-ID and verify exact MIME plus the Draft flag.
+Account locks and attempt checkpoints survive MCP restarts without storing mail
+contents. An ambiguous attempt with no visible message fails closed.
 
 Read-only admin tools. These are dispatched before any account lookup or
 connection — `mail_list_accounts` is where an `account_id` is learned, so

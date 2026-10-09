@@ -2034,7 +2034,7 @@ fn audit_detail_names_what_a_search_and_draft_touched() {
 
     let draft = &lines[1];
     assert_eq!(draft["tool"], "mail_create_draft");
-    assert_eq!(draft["detail"], "kunde@example.com — Angebot");
+    assert_eq!(draft["detail"], "1 recipient(s), 0 attachment(s)");
 }
 
 #[test]
@@ -2053,9 +2053,17 @@ fn attachment_audit_data_contains_metadata_but_never_file_bytes() {
 
     let log = std::fs::read_to_string(dir.join("audit.jsonl")).expect("an audit line was written");
     std::fs::remove_dir_all(&dir).ok();
-    assert!(log.contains("angebot.pdf"), "got: {log}");
+    assert!(
+        !log.contains("angebot.pdf")
+            && !log.contains("Angebot")
+            && !log.contains("kunde@example.com"),
+        "draft contents must not enter the audit log: {log}"
+    );
     assert!(log.contains("1 attachment(s)"), "got: {log}");
-    assert!(!log.contains("AAEC/w=="), "file bytes must not enter the audit log");
+    assert!(
+        !log.contains("AAEC/w=="),
+        "file bytes must not enter the audit log"
+    );
 }
 
 #[test]

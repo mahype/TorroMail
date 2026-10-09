@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 use crate::{
-    find_special_mailbox, AccountId, AttachmentPayload, CoreError, CoreResult, MailProvider,
+    AccountId, AttachmentPayload, CoreError, CoreResult, DraftFailureKind, MailProvider,
     MarkChange, MessageHeader, MessageHeaders, SearchHit, SearchWindow, SpecialMailboxRole,
     StoredMessage,
 };
@@ -561,13 +561,170 @@ impl<T: ImapTransport> ImapClient<T> {
             }
         }
 
-        let names = listed.into_iter()
-            .filter(|entry| entry.selectable())
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>();
-        find_special_mailbox(&names, role).ok_or_else(|| CoreError::ProviderFailure(
-            format!("no {} mailbox found: LIST returned no selectable {} folder or known folder name", role.as_str(), role.imap_attribute()),
-        ))
+        if let Some(entry) = listed
+            .iter()
+            .find(|entry| entry.selectable() && entry.has_known_name(role))
+        {
+            return Ok(entry.name.clone());
+        }
+        if role == SpecialMailboxRole::Drafts {
+            let kind = if listed.iter().any(|entry| {
+                entry.has_known_name(role)
+                    || entry
+                        .flags
+                        .iter()
+                        .any(|flag| flag.eq_ignore_ascii_case(role.imap_attribute()))
+            }) {
+                DraftFailureKind::NotSelectable
+            } else {
+                DraftFailureKind::Missing
+            };
+            return Err(CoreError::DraftFailure(kind));
+        }
+        Err(CoreError::ProviderFailure(format!(
+            "no {} mailbox found: LIST returned no selectable {} folder or known folder name",
+            role.as_str(),
+            role.imap_attribute()
+        )))
+    }
+
+    /// Resolve first, then create only with separate account consent. Explicit
+    /// mappings are authoritative: a broken choice is never silently replaced.
+    pub fn ensure_drafts_mailbox(
+        &mut self,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        if let Some(chosen) = chosen {
+            let entries = self.list_mailbox_entries("LIST \"\" \"*\"")?;
+            if entries
+                .iter()
+                .any(|entry| entry.name == chosen && entry.selectable())
+            {
+                self.select_drafts(chosen)?;
+                return Ok(chosen.to_owned());
+            }
+            return Err(CoreError::DraftFailure(
+                if entries.iter().any(|entry| entry.name == chosen) {
+                    DraftFailureKind::NotSelectable
+                } else {
+                    DraftFailureKind::Missing
+                },
+            ));
+        }
+        match self.drafts_mailbox() {
+            Ok(name) => {
+                self.select_drafts(&name)?;
+                return Ok(name);
+            }
+            Err(CoreError::DraftFailure(DraftFailureKind::Missing)) if allow_create => {}
+            Err(error) => return Err(error),
+        }
+        let caps = self.command("CAPABILITY")?;
+        let supports = |cap: &str| {
+            caps.iter().any(|line| {
+                line.text
+                    .split_whitespace()
+                    .any(|word| word.eq_ignore_ascii_case(cap))
+            })
+        };
+        let namespace = if supports("NAMESPACE") {
+            let lines = self.command("NAMESPACE")?;
+            lines.iter().find_map(parse_personal_namespace)
+        } else {
+            // RFC 3501: LIST with an empty name returns the hierarchy root
+            // and its delimiter, without inferring either from INBOX.
+            self.list_mailbox_entries("LIST \"\" \"\"")?
+                .first()
+                .map(|entry| (entry.name.clone(), entry.delimiter))
+        }
+        .ok_or(CoreError::DraftFailure(DraftFailureKind::NamespaceUnknown))?;
+        let (mut prefix, delimiter) = namespace;
+        if let Some(separator) = delimiter {
+            if !prefix.is_empty() && !prefix.ends_with(separator) {
+                prefix.push(separator);
+            }
+        }
+        let name = format!("{prefix}Drafts");
+        let command = format!("CREATE {}", imap_quoted(&name));
+        let mut result = if supports("CREATE-SPECIAL-USE") {
+            self.command_or_refusal(&format!("{command} (USE (\\Drafts))"))?
+        } else {
+            self.command_or_refusal(&command)?
+        };
+        // USEATTR refuses the designation, not necessarily creation. BAD
+        // can mean an advertised extension is unusable. No ACL/quota bypass.
+        if result.as_ref().is_err_and(|refusal| {
+            refusal.kind == RefusalKind::Bad || refusal.code.as_deref() == Some("USEATTR")
+        }) {
+            result = self.command_or_refusal(&command)?;
+        }
+        let entries = self.list_mailbox_entries("LIST \"\" \"*\"")?;
+        let entry = entries.iter().find(|entry| entry.name == name);
+        match entry {
+            Some(entry) if entry.selectable() => {} // concurrent CREATE also succeeds here
+            Some(_) => return Err(CoreError::DraftFailure(DraftFailureKind::NotSelectable)),
+            None => {
+                return Err(CoreError::DraftFailure(if result.is_err() {
+                    DraftFailureKind::CreationDenied
+                } else {
+                    DraftFailureKind::Missing
+                }));
+            }
+        }
+        self.select_drafts(&name)?;
+        // A refused subscription is harmless; a dropped connection is not.
+        let _ = self.command_or_refusal(&format!("SUBSCRIBE {}", imap_quoted(&name)))?;
+        Ok(name)
+    }
+
+    /// Reconcile an ambiguous APPEND by identity, never by a subject/body
+    /// search. Fetch the entire MIME and draft flag before handing back success.
+    pub fn append_draft_verified(
+        &mut self,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        let mut uids = self.uid_search_header(mailbox, "Message-ID", marker)?;
+        if uids.is_empty() {
+            if !allow_append {
+                return Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain));
+            }
+            // A transport failure here may follow acceptance. Do not wrap it
+            // as an ordinary retryable provider failure.
+            self.append_internal(mailbox, "\\Draft", message, true)
+                .map_err(|error| match error {
+                    CoreError::DraftFailure(kind) => CoreError::DraftFailure(kind),
+                    _ => CoreError::DraftFailure(DraftFailureKind::StorageUncertain),
+                })?;
+            uids = self
+                .uid_search_header(mailbox, "Message-ID", marker)
+                .map_err(|_| CoreError::DraftFailure(DraftFailureKind::StorageUncertain))?;
+        }
+        if uids.len() != 1 {
+            return Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain));
+        }
+        let uid = uids[0];
+        let lines = self
+            .command(&format!("UID FETCH {uid} (UID FLAGS BODY.PEEK[])"))
+            .map_err(|_| CoreError::DraftFailure(DraftFailureKind::StorageUncertain))?;
+        if lines.iter().any(|line| {
+            parse_fetch_uid(&line.text) == Some(uid)
+                && line
+                    .text
+                    .split([' ', '(', ')'])
+                    .any(|word| word.eq_ignore_ascii_case("\\Draft"))
+                && line
+                    .literals
+                    .iter()
+                    .any(|literal| literal == message.as_bytes())
+        }) {
+            Ok(())
+        } else {
+            Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain))
+        }
     }
 
     /// UIDs matching `query` within `window`, ascending — oldest first, as
@@ -784,6 +941,16 @@ impl<T: ImapTransport> ImapClient<T> {
     /// command line ends with `{N}`, the server answers with a `+`
     /// continuation, and only then does the message travel.
     pub fn append(&mut self, mailbox: &str, flags: &str, message: &str) -> CoreResult<()> {
+        self.append_internal(mailbox, flags, message, false)
+    }
+
+    fn append_internal(
+        &mut self,
+        mailbox: &str,
+        flags: &str,
+        message: &str,
+        draft: bool,
+    ) -> CoreResult<()> {
         self.next_tag += 1;
         let tag = format!("t{}", self.next_tag);
         self.transport.send_line(&format!(
@@ -794,6 +961,9 @@ impl<T: ImapTransport> ImapClient<T> {
 
         let continuation = self.transport.read_line()?;
         if !continuation.starts_with('+') {
+            if draft {
+                return Err(CoreError::DraftFailure(DraftFailureKind::StorageFailed));
+            }
             return Err(CoreError::ProviderFailure(format!(
                 "APPEND to {mailbox:?} was refused: {continuation}"
             )));
@@ -810,7 +980,12 @@ impl<T: ImapTransport> ImapClient<T> {
                 if rest.starts_with("OK") {
                     return Ok(());
                 }
-                return Err(CoreError::ProviderFailure(format!("APPEND to {mailbox:?} failed: {rest}")));
+                if draft {
+                    return Err(CoreError::DraftFailure(DraftFailureKind::StorageFailed));
+                }
+                return Err(CoreError::ProviderFailure(format!(
+                    "APPEND to {mailbox:?} failed: {rest}"
+                )));
             }
         }
     }
@@ -847,10 +1022,24 @@ impl<T: ImapTransport> ImapClient<T> {
     }
 
     fn select(&mut self, mailbox: &str) -> CoreResult<()> {
+        self.select_with(mailbox, false)
+    }
+
+    fn select_drafts(&mut self, mailbox: &str) -> CoreResult<()> {
+        self.select_with(mailbox, true)
+    }
+
+    fn select_with(&mut self, mailbox: &str, draft: bool) -> CoreResult<()> {
         if self.selected.as_deref() == Some(mailbox) {
             return Ok(());
         }
-        let lines = self.command(&format!("SELECT {}", imap_quoted(mailbox)))?;
+        let lines = match self.command_or_refusal(&format!("SELECT {}", imap_quoted(mailbox)))? {
+            Ok(lines) => lines,
+            Err(_) if draft => {
+                return Err(CoreError::DraftFailure(DraftFailureKind::NotSelectable));
+            }
+            Err(refusal) => return Err(CoreError::ProviderFailure(refusal.text)),
+        };
         // `* OK [UIDVALIDITY 123] …` — mandatory per RFC 3501, but a server
         // that omits it simply leaves the generation unknown.
         for line in &lines {
@@ -1165,6 +1354,32 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
         self.client.borrow_mut().special_mailbox(role)
     }
 
+    fn ensure_drafts_mailbox(
+        &self,
+        account_id: &AccountId,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        self.guard(account_id)?;
+        self.client
+            .borrow_mut()
+            .ensure_drafts_mailbox(chosen, allow_create)
+    }
+
+    fn append_draft_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        self.client
+            .borrow_mut()
+            .append_draft_verified(mailbox, message, marker, allow_append)
+    }
+
     fn append_draft(
         &mut self,
         account_id: &AccountId,
@@ -1347,11 +1562,25 @@ fn parse_uidvalidity(text: &str) -> Option<u32> {
 struct MailboxListEntry {
     name: String,
     flags: Vec<String>,
+    delimiter: Option<char>,
 }
 
 impl MailboxListEntry {
+    fn has_known_name(&self, role: SpecialMailboxRole) -> bool {
+        let leaf = self
+            .delimiter
+            .and_then(|separator| self.name.rsplit(separator).next())
+            .unwrap_or(&self.name);
+        role.common_names()
+            .iter()
+            .any(|name| self.name.eq_ignore_ascii_case(name) || leaf.eq_ignore_ascii_case(name))
+    }
+
     fn selectable(&self) -> bool {
-        !self.flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
+        !self
+            .flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
     }
 
     fn is_role(&self, role: SpecialMailboxRole) -> bool {
@@ -1367,17 +1596,68 @@ fn parse_list_mailbox(line: &ResponseLine) -> Option<MailboxListEntry> {
         .map(str::to_owned)
         .collect();
     let after_flags = rest[flags_end + 2..].trim_start();
-    let name_part = if let Some(quoted) = after_flags.strip_prefix('"') {
-        quoted.split_once('"')?.1.trim_start()
+    let (separator, name_part) = imap_string_token(after_flags)?;
+    let delimiter = if separator.eq_ignore_ascii_case("NIL") {
+        None
     } else {
-        after_flags.split_once(' ')?.1.trim_start()
+        separator.chars().next()
     };
+    let name_part = name_part.trim_start();
     let name = if name_part.starts_with('{') {
         String::from_utf8_lossy(line.literals.first()?).into_owned()
     } else {
         unquoted(name_part)
     };
-    Some(MailboxListEntry { name, flags })
+    Some(MailboxListEntry {
+        name,
+        flags,
+        delimiter,
+    })
+}
+
+/// Parse a quoted string or atom and leave the remainder; escape-aware.
+fn imap_string_token(input: &str) -> Option<(String, &str)> {
+    let input = input.trim_start();
+    if let Some(rest) = input.strip_prefix('"') {
+        let mut escaped = false;
+        for (offset, character) in rest.char_indices() {
+            if !escaped && character == '"' {
+                return Some((unquoted(&input[..offset + 2]), &input[offset + 2..]));
+            }
+            if !escaped && character == '\\' {
+                escaped = true;
+            } else {
+                escaped = false;
+            }
+        }
+        None
+    } else {
+        let end = input
+            .find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(input.len());
+        (end > 0).then(|| (input[..end].to_owned(), &input[end..]))
+    }
+}
+
+fn parse_personal_namespace(line: &ResponseLine) -> Option<(String, Option<char>)> {
+    let rest = line
+        .text
+        .strip_prefix("* NAMESPACE ")?
+        .trim_start()
+        .strip_prefix("((")?;
+    let (mut prefix, rest) = imap_string_token(rest)?;
+    if prefix.starts_with('{') {
+        prefix = String::from_utf8(line.literals.first()?.clone()).ok()?;
+    }
+    let (delimiter, _) = imap_string_token(rest)?;
+    Some((
+        prefix,
+        if delimiter.eq_ignore_ascii_case("NIL") {
+            None
+        } else {
+            delimiter.chars().next()
+        },
+    ))
 }
 
 fn unquoted(value: &str) -> String {

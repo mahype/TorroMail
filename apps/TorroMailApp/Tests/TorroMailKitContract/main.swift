@@ -710,7 +710,7 @@ require(
     Set(storedAccounts?.first?.keys ?? [:].keys) == [
         "id", "name", "email", "provider", "loginMethod", "imapHost",
         "imapPort", "imapSecurity", "smtpHost", "smtpPort", "smtpSecurity",
-        "username", "knownMailboxes", "permissions", "specialMailboxes", "searchCache", "isVerified"
+        "username", "knownMailboxes", "permissions", "specialMailboxes", "searchCache", "isVerified", "allowCreateDraftsMailbox"
     ],
     "the state file stores the configured facts and nothing else"
 )
@@ -730,6 +730,7 @@ if var legacySettings = legacyObject["settings"] as? [String: Any] {
 }
 legacyObject["accounts"] = (legacyObject["accounts"] as? [[String: Any]])?.map { account in
     var stripped = account
+    stripped["allowCreateDraftsMailbox"] = nil
     stripped["imapPort"] = nil
     stripped["smtpPort"] = nil
     stripped["imapSecurity"] = nil
@@ -738,6 +739,12 @@ legacyObject["accounts"] = (legacyObject["accounts"] as? [[String: Any]])?.map {
 }
 let legacyState = (try? JSONSerialization.data(withJSONObject: legacyObject)) ?? Data()
 let legacy = try? AppStateStore.decode(legacyState)
+require(legacy?.accounts.allSatisfy { !$0.allowCreateDraftsMailbox } == true, "legacy accounts default to no folder creation consent")
+var consentAccount = model.accounts[0]
+consentAccount.allowCreateDraftsMailbox = true
+let consentEncoded = try? JSONEncoder().encode(consentAccount)
+let consentRestored = consentEncoded.flatMap { try? JSONDecoder().decode(MailAccount.self, from: $0) }
+require(consentRestored?.allowCreateDraftsMailbox == true, "explicit drafts folder consent survives a restart")
 require(
     legacy?.accounts.map(\.id) == ["work", "personal"],
     "accounts saved before ports existed still load"

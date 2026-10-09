@@ -21,6 +21,16 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build -p torromail-mcp
 
+  imap-integration:
+    name: Draft storage (real Dovecot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/test-drafts-dovecot.sh
+
   rust-windows:
     name: Rust (Windows)
     runs-on: windows-latest

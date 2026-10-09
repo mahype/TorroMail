@@ -286,6 +286,7 @@ pub struct MailAccount {
     pub known_mailboxes: Vec<String>,
     pub permissions: PermissionSet,
     pub special_mailboxes: SpecialMailboxes,
+    pub allow_create_drafts_mailbox: bool,
     pub cache_level: CacheLevel,
 }
 
@@ -366,6 +367,10 @@ impl MailAccount {
                     .ok_or_else(|| FormatError(format!("{context}: permissions is missing")))?,
                 &context,
             )?,
+            allow_create_drafts_mailbox: object
+                .get("allowCreateDraftsMailbox")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             special_mailboxes: object
                 .get("specialMailboxes")
                 .map(special_mailboxes_from_json)
@@ -399,6 +404,10 @@ impl MailAccount {
         object.insert("smtpSecurity".into(), json!(self.smtp_security.as_str()));
         object.insert("username".into(), json!(self.username));
         object.insert("knownMailboxes".into(), json!(self.known_mailboxes));
+        object.insert(
+            "allowCreateDraftsMailbox".into(),
+            json!(self.allow_create_drafts_mailbox),
+        );
         object.insert("permissions".into(), permissions_to_json(&self.permissions));
         object.insert(
             "specialMailboxes".into(),

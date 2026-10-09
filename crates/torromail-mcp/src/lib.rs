@@ -3,6 +3,7 @@
 //! This crate keeps the public MCP surface explicit. Account setup, secret
 //! changes, OAuth setup, and permission edits stay on the GUI/IPC side.
 
+mod draft_state;
 pub mod health;
 pub mod keychain;
 mod policy_document;
@@ -139,7 +140,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
             }
             ToolName::MailPrepareSend => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
@@ -262,18 +263,10 @@ struct DraftRecord {
 /// Drafts composed this session, by id.
 #[derive(Default)]
 struct DraftCache {
-    next_id: u64,
     records: HashMap<String, DraftRecord>,
 }
 
 impl DraftCache {
-    fn insert(&mut self, record: DraftRecord) -> String {
-        self.next_id += 1;
-        let id = format!("draft-{}", self.next_id);
-        self.records.insert(id.clone(), record);
-        id
-    }
-
     fn get(&self, id: &str) -> Option<DraftRecord> {
         self.records.get(id).cloned()
     }
@@ -409,7 +402,10 @@ pub struct LineMcpServer {
     /// Open cache stores by account, one per process — SQLite connections
     /// are not free, and WAL handles the cross-process side.
     caches: RefCell<BTreeMap<AccountId, Rc<CacheStore>>>,
+    smtp_override: Option<Box<SmtpOverride>>,
 }
+
+type SmtpOverride = dyn Fn(&str, &[String], &str) -> CoreResult<()>;
 
 impl LineMcpServer {
     /// A server wired to fixture data — the same policy-checked path real
@@ -432,6 +428,7 @@ impl LineMcpServer {
             attachments_dir: None,
             cache_dir: None,
             caches: RefCell::default(),
+            smtp_override: None,
         }
     }
 
@@ -464,6 +461,17 @@ impl LineMcpServer {
             cache_dir,
             ..Self::fixture()
         }
+    }
+
+    /// Test transport seam: exercise confirmed sends against a local sink
+    /// without accessing the user's credentials or weakening production TLS.
+    #[doc(hidden)]
+    pub fn with_smtp_override<F>(mut self, send: F) -> Self
+    where
+        F: Fn(&str, &[String], &str) -> CoreResult<()> + 'static,
+    {
+        self.smtp_override = Some(Box::new(send));
+        self
     }
 
     /// Test-only: a policy document *and* fixture mailboxes, so the permission
@@ -515,7 +523,7 @@ impl LineMcpServer {
                     &json!({
                         "protocolVersion": "2025-06-18",
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "TorroMail", "version": "0.1.0"}
+                        "serverInfo": {"name": "TorroMail", "version": env!("CARGO_PKG_VERSION")}
                     }),
                 )
             }
@@ -640,14 +648,30 @@ impl LineMcpServer {
                 Ok(overrides) => overrides,
                 Err(message) => return json_rpc_error(id, -32000, &message),
             };
+            let client_id = self.client_identity().0;
             return self.run_with_connection(&account_id, id, &|provider, engine| {
-                let (mailbox, record) =
-                    compose_and_append(arguments, &account_id, provider, engine, &from, overrides.get(SpecialMailboxRole::Drafts))?;
+                let (mailbox, record) = compose_and_append(
+                    arguments,
+                    &account_id,
+                    provider,
+                    engine,
+                    DraftSetup {
+                        from: &from,
+                        chosen_mailbox: overrides.get(SpecialMailboxRole::Drafts),
+                        allow_create: self.draft_creation_allowed(&account_id)?,
+                        policy_path: self.policy_path.as_deref(),
+                        client: Some(&client_id),
+                    },
+                )?;
                 let attachments = attachment_summaries_json(&record.attachments);
                 let attachment_count = record.attachments.len();
                 let total_attachment_bytes = total_attachment_bytes(&record.attachments);
                 let message_bytes = record.raw.len();
-                let draft_id = self.drafts.borrow_mut().insert(record);
+                let draft_id = format!("draft-{}", sha256_hex(&record.raw));
+                self.drafts
+                    .borrow_mut()
+                    .records
+                    .insert(draft_id.clone(), record);
                 Ok(json!({
                     "status": "draft_created",
                     "draft_id": draft_id,
@@ -913,6 +937,14 @@ impl LineMcpServer {
                     if let Some(outcome) = failure.health_outcome() {
                         self.record_health(account_id, outcome, &failure.message());
                     }
+                    if matches!(
+                        &failure,
+                        ToolFailure::Core(CoreError::DraftFailure(
+                            torromail_core::DraftFailureKind::StorageUncertain
+                        ))
+                    ) {
+                        pool.remove(account_id);
+                    }
                     if failure.is_connection() {
                         drop(pool);
                         if let Some(payload) = degraded.and_then(|fallback| fallback()) {
@@ -1166,7 +1198,11 @@ impl LineMcpServer {
             Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
         };
 
-        match send_over_smtp(&config, oauth.as_ref(), record) {
+        let submission = match &self.smtp_override {
+            Some(send) => send(&record.from, &record.recipients, &record.raw),
+            None => send_over_smtp(&config, oauth.as_ref(), record),
+        };
+        match submission {
             Ok(()) => {
                 // SMTP success is final. If IMAP fails now, report that the
                 // message was sent and only its Sent copy is missing.
@@ -1265,6 +1301,16 @@ impl LineMcpServer {
             .find(|account| account.policy.account_id() == account_id)
             .map(|account| account.mailbox_overrides)
             .ok_or_else(|| CoreError::AccountNotFound(account_id.clone()).to_string())
+    }
+
+    fn draft_creation_allowed(&self, account_id: &AccountId) -> Result<bool, ToolFailure> {
+        Ok(self
+            .document_accounts()
+            .map_err(ToolFailure::Io)?
+            .unwrap_or_default()
+            .into_iter()
+            .find(|account| account.policy.account_id() == account_id)
+            .is_some_and(|account| account.allow_create_drafts_mailbox))
     }
 
     /// Whether the client that spawned this process may call tools. Three
@@ -1378,6 +1424,7 @@ impl LineMcpServer {
             &json!({
                 "account_id": account_id.as_str(),
                 "permissions": permissions_json(account.policy.permissions()),
+                "allow_create_drafts_mailbox": account.allow_create_drafts_mailbox,
                 "capabilities": capabilities_json(&account.policy)
             }),
         )
@@ -2277,6 +2324,10 @@ impl ToolFailure {
     fn into_response(self, id: &Value) -> String {
         match self {
             Self::InvalidParams(message) => json_rpc_error(id, -32602, &message),
+            Self::Core(CoreError::DraftFailure(kind)) => json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32000, "message": kind.to_string(), "data": {"reason": kind.code(), "retry_with_same_key": matches!(kind, torromail_core::DraftFailureKind::StorageUncertain | torromail_core::DraftFailureKind::StorageFailed)}}
+            }).to_string(),
             Self::Core(error) => json_rpc_error(id, -32000, &error.to_string()),
             Self::Io(message) => json_rpc_error(id, -32000, &message),
         }
@@ -2830,6 +2881,14 @@ fn handle_mail_get_thread(
     Ok(json!({ "thread_id": thread_id, "messages": messages }))
 }
 
+struct DraftSetup<'a> {
+    from: &'a str,
+    chosen_mailbox: Option<&'a str>,
+    allow_create: bool,
+    policy_path: Option<&'a std::path::Path>,
+    client: Option<&'a str>,
+}
+
 /// Compose a draft, append it to the drafts folder, and hand back the folder
 /// it landed in and a record of it for a later send.
 fn compose_and_append(
@@ -2837,9 +2896,15 @@ fn compose_and_append(
     account_id: &AccountId,
     provider: &mut dyn MailProvider,
     engine: PolicyEngine,
-    from: &str,
-    chosen_mailbox: Option<&str>,
+    setup: DraftSetup<'_>,
 ) -> Result<(String, DraftRecord), ToolFailure> {
+    let DraftSetup {
+        from,
+        chosen_mailbox,
+        allow_create,
+        policy_path,
+        client,
+    } = setup;
     let to = string_array(&arguments["to"]);
     let cc = string_array(&arguments["cc"]);
     let bcc = string_array(&arguments["bcc"]);
@@ -2861,7 +2926,7 @@ fn compose_and_append(
             size_bytes: attachment.content().len(),
         })
         .collect::<Vec<_>>();
-    let message = torromail_core::compose_message_with_attachments(
+    let mut message = torromail_core::compose_message_with_attachments(
         from,
         &to,
         &cc,
@@ -2876,14 +2941,66 @@ fn compose_and_append(
         )));
     }
 
-    let mut sessions = SearchSessionStore::default();
-    let mut service = MailAccessService::new(provider, engine, &mut sessions);
-
-    let mailbox = service.special_mailbox(account_id, SpecialMailboxRole::Drafts, chosen_mailbox)
+    engine
+        .authorize(account_id, Capability::Draft)
         .map_err(ToolFailure::Core)?;
-    service
-        .create_draft(account_id, &mailbox, &message)
-        .map_err(ToolFailure::Core)?;
+    let fingerprint = sha256_hex(&json!({"mime": message, "bcc": bcc}).to_string());
+    let key = match arguments.get("idempotency_key") {
+        None => fingerprint.as_str(),
+        Some(Value::String(key)) if !key.is_empty() && key.len() <= 128 => key.as_str(),
+        _ => {
+            return Err(ToolFailure::InvalidParams(
+                "idempotency_key must be a nonempty string of at most 128 bytes".into(),
+            ));
+        }
+    };
+    let operation =
+        sha256_hex(&json!([account_id.as_str(), client.unwrap_or(""), key]).to_string());
+    let marker = format!("<torromail-{operation}@draft.local>");
+    message.insert_str(0, &format!("Message-ID: {marker}\r\n"));
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(ToolFailure::InvalidParams(
+            "the finished message exceeds the 20 MiB limit".into(),
+        ));
+    }
+    let state = policy_path
+        .map(|path| draft_state::DraftState::open(path, account_id.as_str()))
+        .transpose()?;
+    let remembered = state
+        .as_ref()
+        .map(|state| state.mailbox())
+        .transpose()?
+        .flatten();
+    let chosen = chosen_mailbox.or(remembered.as_deref());
+    let mailbox = match provider.ensure_drafts_mailbox(account_id, chosen, allow_create) {
+        Err(CoreError::DraftFailure(torromail_core::DraftFailureKind::Missing))
+            if chosen_mailbox.is_none() && remembered.is_some() =>
+        {
+            provider.ensure_drafts_mailbox(account_id, None, allow_create)
+        }
+        result => result,
+    }
+    .map_err(ToolFailure::Core)?;
+    if let Some(state) = &state {
+        state.save_mailbox(&mailbox)?;
+    }
+    let allow_append = match &state {
+        Some(state) => state.begin(&operation, &fingerprint, &mailbox)?,
+        None => true,
+    };
+    if let Err(error) =
+        provider.append_draft_verified(account_id, &mailbox, &message, &marker, allow_append)
+    {
+        if matches!(
+            error,
+            CoreError::DraftFailure(torromail_core::DraftFailureKind::StorageFailed)
+        ) {
+            if let Some(state) = &state {
+                state.clear_refused_attempt(&operation)?;
+            }
+        }
+        return Err(ToolFailure::Core(error));
+    }
 
     // The envelope is every recipient; the raw message shows only to and cc.
     let mut recipients = to;
@@ -3331,32 +3448,11 @@ fn audit_detail(name: &str, arguments: &Value, payload: Option<&Value>) -> Strin
             }
         }
         "mail_create_draft" => {
-            let to = string_array(&arguments["to"]).join(", ");
-            let subject = arguments["subject"].as_str().unwrap_or_default();
-            let base = match (to.is_empty(), subject.is_empty()) {
-                (false, false) => format!("{to} — {subject}"),
-                (false, true) => to,
-                (true, false) => subject.to_owned(),
-                (true, true) => String::new(),
-            };
-            let attachments = payload
-                .and_then(|value| value["attachments"].as_array())
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value["filename"].as_str())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if attachments.is_empty() {
-                base
-            } else {
-                format!(
-                    "{base} · {} attachment(s): {}",
-                    attachments.len(),
-                    attachments.join(", ")
-                )
-            }
+            let recipients = string_array(&arguments["to"]).len()
+                + string_array(&arguments["cc"]).len()
+                + string_array(&arguments["bcc"]).len();
+            let attachments = arguments["attachments"].as_array().map_or(0, Vec::len);
+            format!("{recipients} recipient(s), {attachments} attachment(s)")
         }
         "mail_prepare_send" => arguments["draft_id"]
             .as_str()

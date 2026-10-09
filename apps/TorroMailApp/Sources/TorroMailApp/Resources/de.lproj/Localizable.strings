@@ -421,3 +421,6 @@
 "%d accounts" = "%d Konten";
 "The macOS login session is not available. Sign in on the target computer and try again." = "Die macOS-Sitzung ist nicht verfügbar. Melde dich auf dem Zielcomputer an und versuche es erneut.";
 "The keychain is not available in this login session. Open TorroMail on the target computer and try again." = "Der Schlüsselbund ist in dieser Sitzung nicht verfügbar. Öffne TorroMail auf dem Zielcomputer und versuche es erneut.";
+
+"Create a missing drafts folder" = "Fehlenden Entwurfsordner anlegen";
+"Allows TorroMail to create only the drafts folder for this account. Sending still requires approval." = "Erlaubt TorroMail, ausschließlich den Entwurfsordner dieses Kontos anzulegen. Der Versand benötigt weiterhin eine Freigabe.";

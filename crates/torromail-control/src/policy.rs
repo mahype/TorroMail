@@ -177,6 +177,10 @@ fn account_object(account: &MailAccount, context: &PolicyContext) -> Value {
             "permanent_delete": permissions.write.permanent_delete,
         }),
     );
+    object.insert(
+        "allow_create_drafts_mailbox".into(),
+        json!(account.allow_create_drafts_mailbox),
+    );
     object.insert("send".into(), json!(permissions.send));
     object.insert("per_folder".into(), json!(permissions.per_folder));
     object.insert("folder_rules".into(), Value::Object(folder_rules));

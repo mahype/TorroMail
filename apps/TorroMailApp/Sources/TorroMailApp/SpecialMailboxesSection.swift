@@ -15,6 +15,9 @@ struct SpecialMailboxesSection: View {
 
     var body: some View {
         Section {
+            Toggle(L("Create a missing drafts folder"), isOn: $account.allowCreateDraftsMailbox)
+            Text(L("Allows TorroMail to create only the drafts folder for this account. Sending still requires approval."))
+                .font(.footnote).foregroundStyle(.secondary)
             Toggle(L("Choose special folders manually"), isOn: $account.specialMailboxes.manual)
             if account.specialMailboxes.manual {
                 if loading {

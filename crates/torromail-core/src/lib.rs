@@ -34,6 +34,8 @@ pub enum CoreError {
     /// asked. Everything transient lives here — see `CredentialRejected` for
     /// the one failure that will not fix itself on its own.
     ProviderFailure(String),
+    /// Actionable draft setup/storage failures; details never contain message data.
+    DraftFailure(DraftFailureKind),
     /// The server spoke a refusal to the login command itself: a wrong
     /// password, an expired app password, a rejected OAuth token. Kept apart
     /// from `ProviderFailure` because the two need opposite handling — this
@@ -66,6 +68,7 @@ impl Display for CoreError {
                 f,
                 "attachment {attachment_id} not found on message {message_id}"
             ),
+            Self::DraftFailure(kind) => write!(f, "{kind}"),
             Self::ProviderFailure(message) => write!(f, "mail provider failure: {message}"),
             Self::CredentialRejected(message) => {
                 write!(f, "credentials rejected: {message}")
@@ -78,6 +81,42 @@ impl Display for CoreError {
             Self::SearchResultSetNotFound(id) => write!(f, "search result set not found: {id}"),
             Self::SearchResultSetExpired(id) => write!(f, "search result set expired: {id}"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftFailureKind {
+    Missing,
+    CreationDenied,
+    NotSelectable,
+    NamespaceUnknown,
+    StorageFailed,
+    StorageUncertain,
+}
+
+impl DraftFailureKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Missing => "drafts_folder_missing",
+            Self::CreationDenied => "drafts_folder_creation_denied",
+            Self::NotSelectable => "drafts_folder_not_selectable",
+            Self::NamespaceUnknown => "drafts_namespace_unknown",
+            Self::StorageFailed => "draft_storage_failed",
+            Self::StorageUncertain => "draft_storage_uncertain",
+        }
+    }
+}
+
+impl Display for DraftFailureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "no drafts mailbox found; in TorroMail, open the account's Special folders, set Drafts to Automatic and enable Create a missing drafts folder, or choose an existing folder",
+            Self::CreationDenied => "the server refused drafts folder creation; check the account's server permissions or choose an existing folder in TorroMail",
+            Self::NotSelectable => "the drafts folder exists but cannot be selected; choose a selectable folder in TorroMail or repair the folder on the server",
+            Self::NamespaceUnknown => "the server did not provide a usable personal namespace; choose an existing drafts folder in TorroMail",
+            Self::StorageFailed => "the drafts folder is available, but saving or verifying the draft failed; check the server's storage quota and retry with the same idempotency_key",
+            Self::StorageUncertain => "the draft's storage outcome is uncertain; retry with the same idempotency_key to verify it without appending again; inspect the server before starting a new operation",
+        })
     }
 }
 
@@ -1520,6 +1559,36 @@ pub trait MailProvider {
         self.special_mailbox(account_id, SpecialMailboxRole::Drafts)
     }
 
+    /// Only this narrow operation may create a folder; the caller supplies the
+    /// separately published account consent, never an MCP argument.
+    fn ensure_drafts_mailbox(
+        &self,
+        account_id: &AccountId,
+        chosen: Option<&str>,
+        _allow_create: bool,
+    ) -> CoreResult<String> {
+        if let Some(chosen) = chosen {
+            return self
+                .selectable_mailboxes(account_id)?
+                .into_iter()
+                .find(|name| name == chosen)
+                .ok_or(CoreError::DraftFailure(DraftFailureKind::NotSelectable));
+        }
+        self.drafts_mailbox(account_id)
+    }
+
+    /// Real IMAP providers search and fetch the exact stored MIME before success.
+    fn append_draft_verified(
+        &mut self,
+        _account_id: &AccountId,
+        _mailbox: &str,
+        _message: &str,
+        _marker: &str,
+        _allow_append: bool,
+    ) -> CoreResult<()> {
+        Err(CoreError::DraftFailure(DraftFailureKind::StorageFailed))
+    }
+
     /// Store a ready-made message in `mailbox` as a draft — an IMAP APPEND
     /// with the `\Draft` flag, no sending involved.
     fn append_draft(
@@ -1625,6 +1694,26 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
 
     fn drafts_mailbox(&self, account_id: &AccountId) -> CoreResult<String> {
         (**self).drafts_mailbox(account_id)
+    }
+
+    fn ensure_drafts_mailbox(
+        &self,
+        account_id: &AccountId,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        (**self).ensure_drafts_mailbox(account_id, chosen, allow_create)
+    }
+
+    fn append_draft_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        (**self).append_draft_verified(account_id, mailbox, message, marker, allow_append)
     }
 
     fn append_draft(
@@ -1830,9 +1919,37 @@ impl MailProvider for FixtureMailProvider {
         };
         find_special_mailbox(&mailboxes, role)
             .or_else(|| fixture_default.map(str::to_owned))
-            .ok_or_else(|| CoreError::ProviderFailure(
-                format!("no {} mailbox found in the account's folder list", role.as_str()),
-            ))
+            .ok_or_else(|| {
+                CoreError::ProviderFailure(format!(
+                    "no {} mailbox found in the account's folder list",
+                    role.as_str()
+                ))
+            })
+    }
+
+    fn append_draft_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        if let Some(existing) = self.messages.iter().find(|existing| {
+            &existing.account_id == account_id
+                && existing.mailbox == mailbox
+                && existing.body.contains(marker)
+        }) {
+            return if existing.body == message {
+                Ok(())
+            } else {
+                Err(CoreError::DraftFailure(DraftFailureKind::StorageFailed))
+            };
+        }
+        if !allow_append {
+            return Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain));
+        }
+        self.append_draft(account_id, mailbox, message)
     }
 
     /// The fixture keeps the appended draft so a later search or list can see

@@ -1522,3 +1522,427 @@ fn a_batched_summary_fetch_is_one_command() {
     assert_eq!(fetches.len(), 1, "one command for the whole batch: {fetches:?}");
     assert!(fetches[0].contains("UID FETCH 8,9 "), "got: {fetches:?}");
 }
+
+fn draft_setup_script(
+    namespace: &str,
+    delimiter: &str,
+    create_reply: &str,
+    flags: &str,
+) -> Vec<Incoming> {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST () \"/\" INBOX"),
+        line("t2 OK listed"),
+        line("* CAPABILITY IMAP4rev1 NAMESPACE CREATE-SPECIAL-USE"),
+        line("t3 OK capabilities"),
+        line("* CAPABILITY IMAP4rev1 NAMESPACE CREATE-SPECIAL-USE"),
+        line("t4 OK capabilities"),
+        line(&format!(
+            "* NAMESPACE ((\"{namespace}\" {delimiter})) NIL NIL"
+        )),
+        line("t5 OK namespace"),
+        line(&format!("t6 {create_reply}")),
+    ]);
+    if !flags.is_empty() {
+        script.push(line(&format!(
+            "* LIST ({flags}) {delimiter} \"{namespace}Drafts\""
+        )));
+    }
+    script.push(line("t7 OK listed"));
+    if !flags.is_empty() && !flags.contains("Noselect") {
+        script.extend([
+            line("* OK [UIDVALIDITY 1] stable"),
+            line("t8 OK selected"),
+            line("t9 NO subscription unsupported"),
+        ]);
+    }
+    script
+}
+
+#[test]
+fn draft_creation_uses_the_servers_namespace_and_delimiter() {
+    for (prefix, delimiter, name) in [
+        ("", "\"/\"", "Drafts"),
+        ("INBOX.", "\".\"", "INBOX.Drafts"),
+        ("mail/", "\"/\"", "mail/Drafts"),
+        ("Personal:", "\":\"", "Personal:Drafts"),
+        ("", "NIL", "Drafts"),
+    ] {
+        let log = SentLog::default();
+        let mut client = ImapClient::connect(
+            ScriptedTransport::new(
+                draft_setup_script(prefix, delimiter, "OK created", "\\Drafts"),
+                log.clone(),
+            ),
+            "test",
+            "secret",
+        )
+        .unwrap();
+        assert_eq!(client.ensure_drafts_mailbox(None, true).unwrap(), name);
+        assert!(
+            log.lines()
+                .contains(&format!("t6 CREATE \"{name}\" (USE (\\Drafts))"))
+        );
+        assert!(log.lines().contains(&format!("t9 SUBSCRIBE \"{name}\"")));
+    }
+}
+
+#[test]
+fn missing_draft_consent_never_creates_a_folder() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST () \".\" INBOX"),
+        line("t2 OK list"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK capability"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.ensure_drafts_mailbox(None, false),
+        Err(CoreError::DraftFailure(
+            torromail_core::DraftFailureKind::Missing
+        ))
+    );
+    assert!(!log.lines().iter().any(|line| line.contains("CREATE")));
+}
+
+#[test]
+fn a_refused_create_is_distinct_from_a_nonselectable_created_folder() {
+    for (reply, flags, expected) in [
+        (
+            "NO [NOPERM] refused",
+            "",
+            torromail_core::DraftFailureKind::CreationDenied,
+        ),
+        (
+            "OK created",
+            "\\Noselect",
+            torromail_core::DraftFailureKind::NotSelectable,
+        ),
+    ] {
+        let mut client = ImapClient::connect(
+            ScriptedTransport::new(
+                draft_setup_script("INBOX.", "\".\"", reply, flags),
+                SentLog::default(),
+            ),
+            "test",
+            "secret",
+        )
+        .unwrap();
+        assert_eq!(
+            client.ensure_drafts_mailbox(None, true),
+            Err(CoreError::DraftFailure(expected))
+        );
+    }
+}
+
+#[test]
+fn concurrent_creation_is_reconciled_after_a_tagged_refusal() {
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(
+            draft_setup_script("", "\"/\"", "NO [ALREADYEXISTS] exists", "\\Drafts"),
+            SentLog::default(),
+        ),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(client.ensure_drafts_mailbox(None, true).unwrap(), "Drafts");
+}
+
+#[test]
+fn explicit_mapping_wins_and_is_selected_before_use() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Drafts) \"/\" Drafts"),
+        line("* LIST () \"/\" Custom"),
+        line("t2 OK listed"),
+        line("t3 OK selected"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.ensure_drafts_mailbox(Some("Custom"), true).unwrap(),
+        "Custom"
+    );
+    assert_eq!(log.lines()[2], "t3 SELECT \"Custom\"");
+}
+
+#[test]
+fn a_nonselectable_drafts_candidate_is_never_used_or_recreated() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Noselect \\Drafts) \"/\" Drafts"),
+        line("t2 OK listed"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK capability"),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.ensure_drafts_mailbox(None, true),
+        Err(CoreError::DraftFailure(
+            torromail_core::DraftFailureKind::NotSelectable
+        ))
+    );
+}
+
+#[test]
+fn known_names_follow_the_advertised_separator_even_when_it_is_not_dot_or_slash() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST () \":\" Personal:Entw&APw-rfe"),
+        line("t2 OK listed"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK capability"),
+        line("t4 OK selected"),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.ensure_drafts_mailbox(None, false).unwrap(),
+        "Personal:Entw&APw-rfe"
+    );
+}
+
+#[test]
+fn creation_without_extensions_uses_the_list_root_and_verifies_selectability() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST () \".\" INBOX"),
+        line("t2 OK listed"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t3 OK capabilities"),
+        line("* CAPABILITY IMAP4rev1"),
+        line("t4 OK capabilities"),
+        line("* LIST (\\Noselect) \".\" \"INBOX.\""),
+        line("t5 OK root"),
+        line("t6 OK created"),
+        line("* LIST () \".\" INBOX.Drafts"),
+        line("t7 OK listed"),
+        line("t8 OK selected"),
+        line("t9 OK subscribed"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.ensure_drafts_mailbox(None, true).unwrap(),
+        "INBOX.Drafts"
+    );
+    assert_eq!(log.lines()[5], "t6 CREATE \"INBOX.Drafts\"");
+}
+
+#[test]
+fn unsupported_special_use_creation_falls_back_to_plain_create() {
+    let mut script = draft_setup_script("", "\"/\"", "NO [USEATTR] no attributes", "\\Drafts");
+    script.insert(11, line("t7 OK created"));
+    // insert just after the tagged CREATE refusal, then shift remaining tags
+    for item in script.iter_mut().skip(12) {
+        if let Incoming::Line(text) = item {
+            for (old, new) in [("t9 ", "t10 "), ("t8 ", "t9 "), ("t7 ", "t8 ")] {
+                if text.starts_with(old) {
+                    *text = text.replacen(old, new, 1);
+                    break;
+                }
+            }
+        }
+    }
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(client.ensure_drafts_mailbox(None, true).unwrap(), "Drafts");
+    assert!(log.lines().contains(&"t7 CREATE \"Drafts\"".into()));
+}
+
+#[test]
+fn uncertain_append_recovery_fetches_exact_mime_without_another_append() {
+    let message =
+        "Message-ID: <operation@draft.local>\r\nTo: recipient@example.invalid\r\n\r\nbody\r\n";
+    let mut script = login_script();
+    script.extend([
+        line("t2 OK selected"),
+        line("* SEARCH 7"),
+        line("t3 OK searched"),
+        line(&format!(
+            "* 1 FETCH (UID 7 FLAGS (\\Draft) BODY[] {{{}}}",
+            message.len()
+        )),
+        Incoming::Bytes(message.as_bytes().to_vec()),
+        line(")"),
+        line("t4 OK fetched"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    client
+        .append_draft_verified("Drafts", message, "<operation@draft.local>", false)
+        .unwrap();
+    assert!(!log.lines().iter().any(|line| line.contains("APPEND")));
+}
+
+#[test]
+fn ambiguous_append_without_a_visible_message_fails_closed() {
+    let mut script = login_script();
+    script.extend([
+        line("t2 OK selected"),
+        line("* SEARCH"),
+        line("t3 OK searched"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.append_draft_verified("Drafts", "unused", "<operation@draft.local>", false),
+        Err(CoreError::DraftFailure(
+            torromail_core::DraftFailureKind::StorageUncertain
+        ))
+    );
+    assert!(!log.lines().iter().any(|line| line.contains("APPEND")));
+}
+
+#[test]
+fn a_definite_append_refusal_is_safe_and_does_not_expose_server_echoes() {
+    let mut script = login_script();
+    script.extend([
+        line("t2 OK selected"),
+        line("* SEARCH"),
+        line("t3 OK searched"),
+        line("t4 NO [OVERQUOTA] echoed secret body"),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    let error = client
+        .append_draft_verified("Drafts", "private message", "<operation@draft.local>", true)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        CoreError::DraftFailure(torromail_core::DraftFailureKind::StorageFailed)
+    );
+    assert!(!error.to_string().contains("secret body"));
+}
+
+#[test]
+fn an_append_acknowledgement_alone_is_never_a_verified_draft() {
+    let mut script = login_script();
+    script.extend([
+        line("t2 OK selected"),
+        line("* SEARCH"),
+        line("t3 OK searched"),
+        line("+ continue"),
+        line("t4 OK appended"),
+        line("* SEARCH"),
+        line("t5 OK searched"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert_eq!(
+        client.append_draft_verified("Drafts", "private message", "<operation@draft.local>", true),
+        Err(CoreError::DraftFailure(
+            torromail_core::DraftFailureKind::StorageUncertain
+        ))
+    );
+    assert_eq!(
+        log.lines()
+            .iter()
+            .filter(|line| line.contains("APPEND"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_changed_mime_or_missing_draft_flag_is_not_a_success() {
+    let original = "Message-ID: <operation@draft.local>\r\n\r\nOriginal\r\n";
+    for (flags, stored) in [("\\Draft", "Changed"), ("\\Seen", original)] {
+        let mut script = login_script();
+        script.extend([
+            line("t2 OK selected"),
+            line("* SEARCH 7"),
+            line("t3 OK searched"),
+            line(&format!(
+                "* 1 FETCH (UID 7 FLAGS ({flags}) BODY[] {{{}}}",
+                stored.len()
+            )),
+            Incoming::Bytes(stored.as_bytes().to_vec()),
+            line(")"),
+            line("t4 OK fetched"),
+        ]);
+        let mut client = ImapClient::connect(
+            ScriptedTransport::new(script, SentLog::default()),
+            "test",
+            "secret",
+        )
+        .unwrap();
+        assert_eq!(
+            client.append_draft_verified("Drafts", original, "<operation@draft.local>", false),
+            Err(CoreError::DraftFailure(
+                torromail_core::DraftFailureKind::StorageUncertain
+            ))
+        );
+    }
+}
+
+#[test]
+fn a_broken_connection_is_not_reported_as_a_nonselectable_folder() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Drafts) \"/\" Drafts"),
+        line("t2 OK listed"),
+        dropped_connection(),
+    ]);
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert!(matches!(
+        client.ensure_drafts_mailbox(None, false),
+        Err(CoreError::ProviderFailure(_))
+    ));
+}
