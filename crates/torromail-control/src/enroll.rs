@@ -9,12 +9,12 @@ use std::path::Path;
 
 use crate::account::{CacheLevel, LoginMethod, MailAccount, PermissionSet, SpecialMailboxes};
 use crate::clients;
+use crate::paths;
 use crate::policy::{self, ClientAccountAccess, ClientPairing, PolicyContext};
 use crate::providers::DiscoveredConfig;
 use crate::save::{self, SaveError};
 use crate::secrets::{self, SecretStore};
 use crate::state::{JsonStateStore, StateStore};
-use crate::paths;
 
 /// The surface itself is a paired client of the server: connection checks log
 /// into the real mailbox, so they sit behind the same gate as the tools.
@@ -92,6 +92,8 @@ pub fn password_account(id: String, name: &str, email: &str, config: &Discovered
         permissions: PermissionSet::default(),
         special_mailboxes: SpecialMailboxes::default(),
         allow_create_drafts_mailbox: false,
+        allow_create_sent_mailbox: false,
+        sent_copy_strategy: "imap".into(),
         cache_level: CacheLevel::Headers,
     }
 }

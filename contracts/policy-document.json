@@ -44,7 +44,9 @@
             "trash": ""
           },
           "username": "sven@torro.dev",
-          "allowCreateDraftsMailbox": false
+          "allowCreateDraftsMailbox": false,
+          "allowCreateSentMailbox": false,
+          "sentCopyStrategy": "imap"
         }
       ],
       "clients": [
@@ -91,7 +93,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [
@@ -234,7 +238,9 @@
               "permanent_delete": true,
               "trash": true
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [
@@ -343,7 +349,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [],
@@ -418,7 +426,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [],
@@ -507,7 +517,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [],
@@ -584,7 +596,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [],
@@ -663,7 +677,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": false
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [],
@@ -761,7 +777,9 @@
               "permanent_delete": false,
               "trash": false
             },
-            "allow_create_drafts_mailbox": true
+            "allow_create_drafts_mailbox": true,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "imap"
           }
         ],
         "clients": [
@@ -777,6 +795,228 @@
         "version": 1
       },
       "name": "explicit drafts folder creation consent survives publication separately from send"
+    },
+    {
+      "accounts": [
+        {
+          "email": "sven@torro.dev",
+          "id": "work",
+          "imapHost": "imap.torro.dev",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Torro",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "smtpHost": "smtp.torro.dev",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "username": "sven@torro.dev",
+          "allowCreateDraftsMailbox": false,
+          "allowCreateSentMailbox": true,
+          "sentCopyStrategy": "provider"
+        }
+      ],
+      "clients": [
+        {
+          "account_access": {
+            "mode": "all"
+          },
+          "id": "claude-code",
+          "name": "Claude Code",
+          "token_sha256": "aa11"
+        }
+      ],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "headers"
+            },
+            "email": "sven@torro.dev",
+            "folder_rules": {},
+            "id": "work",
+            "imap": {
+              "host": "imap.torro.dev",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "tls",
+              "username": "sven@torro.dev"
+            },
+            "name": "Torro",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "smtp.torro.dev",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "starttls",
+              "username": "sven@torro.dev"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            },
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": true,
+            "sent_copy_strategy": "provider"
+          }
+        ],
+        "clients": [
+          {
+            "account_access": {
+              "mode": "all"
+            },
+            "id": "claude-code",
+            "name": "Claude Code",
+            "token_sha256": "aa11"
+          }
+        ],
+        "version": 1
+      },
+      "name": "sent copy strategy provider and folder consent survive publication"
+    },
+    {
+      "accounts": [
+        {
+          "email": "sven@torro.dev",
+          "id": "work",
+          "imapHost": "imap.torro.dev",
+          "imapPort": 993,
+          "imapSecurity": "tls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Torro",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "smtpHost": "smtp.torro.dev",
+          "smtpPort": 587,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "username": "sven@torro.dev",
+          "allowCreateDraftsMailbox": false,
+          "allowCreateSentMailbox": false,
+          "sentCopyStrategy": "none"
+        }
+      ],
+      "clients": [
+        {
+          "account_access": {
+            "mode": "all"
+          },
+          "id": "claude-code",
+          "name": "Claude Code",
+          "token_sha256": "aa11"
+        }
+      ],
+      "expected": {
+        "accounts": [
+          {
+            "cache": {
+              "level": "headers"
+            },
+            "email": "sven@torro.dev",
+            "folder_rules": {},
+            "id": "work",
+            "imap": {
+              "host": "imap.torro.dev",
+              "port": 993,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "tls",
+              "username": "sven@torro.dev"
+            },
+            "name": "Torro",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "smtp": {
+              "host": "smtp.torro.dev",
+              "port": 587,
+              "secret_ref": "keychain://TorroMail/work",
+              "security": "starttls",
+              "username": "sven@torro.dev"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            },
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "sent_copy_strategy": "none"
+          }
+        ],
+        "clients": [
+          {
+            "account_access": {
+              "mode": "all"
+            },
+            "id": "claude-code",
+            "name": "Claude Code",
+            "token_sha256": "aa11"
+          }
+        ],
+        "version": 1
+      },
+      "name": "sent copy strategy none and folder consent survive publication"
     }
   ],
   "secret_ref_prefix": "keychain://TorroMail/"

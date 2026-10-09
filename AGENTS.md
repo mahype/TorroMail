@@ -134,8 +134,9 @@ Direct write tools (no approval, gated by the mark permission):
 
 Prepared action tools:
 
-- `mail_create_draft` — composes the message and appends it to the drafts
-  folder with `\Draft`; gated by the drafts right. Optional attachments travel
+- `mail_create_draft` — composes the message; default `storage: "imap"` appends
+  it with `\Draft`, while `storage: "local"` stores a durable sendable snapshot
+  without IMAP. Both modes are gated by the drafts right. Optional attachments travel
   as standard padded base64 with a filename and optional media type; paths and
   URLs are never accepted. At most 20 attachments and 20 MiB of finished MIME
   data are allowed.
@@ -144,16 +145,20 @@ Prepared action tools:
   explicit `target_mailbox`.
 - `mail_prepare_delete` — holds a soft delete (move to Trash) or, with
   `permanent`, an expunge; gated by the matching right.
-- `mail_prepare_send` — holds a send of a draft composed this session; gated
-  by the send right. Submission goes over SMTP (implicit TLS on 465, STARTTLS
-  otherwise); the account's SMTP facts travel in the policy document. The
-  existing Sent folder is resolved before submission. After SMTP accepts the
-  message, TorroMail stores a Sent copy; a copy failure is reported separately
-  and must never trigger a second SMTP submission.
+- `mail_prepare_send` — prepares approval of an immutable durable draft; gated
+  by the send right. SMTP needs no IMAP connection or Sent folder before DATA.
+  A persistent per-operation journal and OS lock prevent repeat submissions;
+  interrupted attempts recover as unknown and cannot automatically resend.
+  Submission (`accepted`, `not_accepted`, `unknown`) and Sent-copy results are
+  separate. Account `sent_copy_strategy` chooses `imap` (default), `provider`,
+  or `none`. Accepted messages keep their exact MIME in private `send-state/`
+  for copy-only recovery after failure/restart. The GUI approval bridge and MCP
+  confirmation use this same send service.
 - `mail_confirm_action` — runs a prepared action once, matched by its code
   and inside its TTL, re-checking the policy at execution.
 
-Prepared actions live in the server between prepare and confirm. The
+Send preparations and their five-minute approval TTL persist in the journal.
+Move/delete preparations live in the server between prepare and confirm. The
 confirmation code is the handshake tying a confirm to one preparation; the GUI
 is the intended place for a human to read the preview and approve.
 
@@ -163,16 +168,19 @@ Account setup can map Drafts, Sent, Archive, Junk, and Trash to exact existing
 IMAP folders. Automatic discovery uses special-use attributes, then common
 names; manual choices come from a live list of selectable folders. The app
 publishes choices in `mailbox_overrides`, and the server validates them at use.
-`INBOX` is reserved by IMAP and has no mapping. Only a missing Drafts folder
-may be created, with separate per-account consent (`allow_create_drafts_mailbox`,
-default false). Sent, Archive, Junk, and Trash still need existing folders.
-Automatic Drafts creation uses the personal namespace and delimiter advertised
-by IMAP, rechecks LIST/SELECT, subscribes when possible, and persists its mapping
-in private `draft-state/` metadata alongside the policy. Explicit mappings are
-never silently replaced. Draft operations have an optional `idempotency_key`;
+`INBOX` is reserved by IMAP and has no mapping. Missing Drafts and Sent folders
+may be created with separate per-account consent (`allow_create_drafts_mailbox`
+and `allow_create_sent_mailbox`, both default false). Archive, Junk and Trash
+still need existing folders. Automatic special-folder creation uses the personal
+namespace and delimiter advertised by IMAP, rechecks LIST/SELECT and subscribes
+when possible. Drafts mappings persist in private `draft-state/` metadata
+alongside the policy; Sent copy operations checkpoint their destination in
+`send-state/`. Explicit mappings are never silently replaced. Draft operations
+have an optional `idempotency_key`;
 retries search the stable Message-ID and verify exact MIME plus the Draft flag.
-Account locks and attempt checkpoints survive MCP restarts without storing mail
-contents. An ambiguous attempt with no visible message fails closed.
+Draft-APPEND account locks and attempt checkpoints survive MCP restarts without
+storing mail contents in `draft-state/`; durable sendable snapshots live in
+`send-state/`. An ambiguous APPEND attempt with no visible message fails closed.
 
 Read-only admin tools. These are dispatched before any account lookup or
 connection — `mail_list_accounts` is where an `account_id` is learned, so

@@ -2,7 +2,7 @@
 //! scripts/test-drafts-dovecot.sh supplies a loopback-only test instance.
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{
     Arc, Barrier,
@@ -20,15 +20,31 @@ struct DropAppendReply {
     inner: StreamImapTransport<TcpStream>,
     drop_once: Arc<AtomicBool>,
     append_tag: Option<String>,
+    refusal: Option<String>,
+    deny_create: bool,
+    deny_append: bool,
 }
 impl ImapTransport for DropAppendReply {
     fn send_line(&mut self, line: &str) -> CoreResult<()> {
-        if line.split_whitespace().nth(1) == Some("APPEND") {
+        let command = line.split_whitespace().nth(1);
+        if (self.deny_create && command == Some("CREATE"))
+            || (self.deny_append && command == Some("APPEND"))
+        {
+            self.refusal = Some(format!(
+                "{} NO [NOPERM] controlled test refusal",
+                line.split_whitespace().next().unwrap()
+            ));
+            return Ok(());
+        }
+        if command == Some("APPEND") {
             self.append_tag = line.split_whitespace().next().map(str::to_owned);
         }
         self.inner.send_line(line)
     }
     fn read_line(&mut self) -> CoreResult<String> {
+        if let Some(refusal) = self.refusal.take() {
+            return Ok(refusal);
+        }
         let line = self.inner.read_line()?;
         if self
             .append_tag
@@ -50,6 +66,14 @@ impl ImapTransport for DropAppendReply {
 }
 
 fn client(user: &str, drop_once: Arc<AtomicBool>) -> ImapClient<DropAppendReply> {
+    client_faulty(user, drop_once, false, false)
+}
+fn client_faulty(
+    user: &str,
+    drop_once: Arc<AtomicBool>,
+    deny_create: bool,
+    deny_append: bool,
+) -> ImapClient<DropAppendReply> {
     let port: u16 = std::env::var("TORROMAIL_TEST_IMAP_PORT")
         .unwrap_or_else(|_| "31143".into())
         .parse()
@@ -66,6 +90,9 @@ fn client(user: &str, drop_once: Arc<AtomicBool>) -> ImapClient<DropAppendReply>
             inner: StreamImapTransport::new(stream),
             drop_once,
             append_tag: None,
+            refusal: None,
+            deny_create,
+            deny_append,
         },
         user,
         "supersecret",
@@ -103,61 +130,9 @@ fn policy(path: &Path, create: bool, send: bool) {
     .unwrap();
 }
 
-// Local SMTP sink: real SMTP protocol, no delivery or upstream route. Retain
-// only in test memory to compare the envelope and MIME after confirmation.
-fn smtp_sink() -> (u16, std::thread::JoinHandle<(Vec<String>, String)>) {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(15)))
-            .unwrap();
-        socket.write_all(b"220 local test sink\r\n").unwrap();
-        let mut reader = BufReader::new(socket.try_clone().unwrap());
-        let mut recipients = Vec::new();
-        let mut mime = String::new();
-        let mut auth_step = 0;
-        let mut data = false;
-        loop {
-            let mut line = String::new();
-            assert!(reader.read_line(&mut line).unwrap() > 0);
-            if data && line != ".\r\n" {
-                mime.push_str(line.strip_prefix('.').unwrap_or(&line));
-                continue;
-            }
-            let reply = if data {
-                data = false;
-                "250 stored\r\n"
-            } else if line.starts_with("EHLO") {
-                "250-local\r\n250 AUTH LOGIN\r\n"
-            } else if line.starts_with("AUTH LOGIN") {
-                auth_step = 1;
-                "334 VXNlcm5hbWU6\r\n"
-            } else if auth_step == 1 {
-                auth_step = 2;
-                "334 UGFzc3dvcmQ6\r\n"
-            } else if auth_step == 2 {
-                auth_step = 0;
-                "235 authenticated\r\n"
-            } else if line.starts_with("RCPT TO:") {
-                recipients.push(line.trim().to_owned());
-                "250 recipient\r\n"
-            } else if line.starts_with("DATA") {
-                data = true;
-                "354 continue\r\n"
-            } else if line.starts_with("QUIT") {
-                socket.write_all(b"221 bye\r\n").unwrap();
-                break;
-            } else {
-                "250 ok\r\n"
-            };
-            socket.write_all(reply.as_bytes()).unwrap();
-        }
-        (recipients, mime)
-    });
-    (port, handle)
-}
+#[path = "support/smtp.rs"]
+mod smtp;
+use smtp::smtp_sink;
 
 #[test]
 #[ignore = "requires disposable Dovecot; run scripts/test-drafts-dovecot.sh"]
@@ -346,15 +321,14 @@ fn real_dovecot_creation_ambiguous_retry_concurrency_attachment_and_confirmed_se
     assert!(mime.contains("To: to@example.invalid\r\nCc: cc@example.invalid\r\n"));
     assert!(!mime.contains("Bcc:"));
     assert!(mime.contains("AAECA/8="));
-    assert!(
-        call(
-            &second,
-            "mail_confirm_action",
-            json!({"pending_action_id":action,"confirmation_code":prepared["confirmation_code"]})
-        )
-        .get("error")
-        .is_some(),
-        "confirmation executes once"
+    let repeated = payload(&call(
+        &second,
+        "mail_confirm_action",
+        json!({"pending_action_id":action,"confirmation_code":prepared["confirmation_code"]}),
+    ));
+    assert_eq!(
+        repeated["submission_status"], "accepted",
+        "confirmation reads the durable outcome without sending again"
     );
 
     let mut without_key = arguments.clone();
@@ -438,4 +412,152 @@ fn real_dovecot_creation_ambiguous_retry_concurrency_attachment_and_confirmed_se
         assert_eq!(thread.join().unwrap(), expected_mailbox);
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// All copies use real Dovecot. Refusals and lost acknowledgement are injected
+/// at the protocol boundary; SMTP is a real loopback socket with no delivery.
+#[test]
+#[ignore = "requires disposable Dovecot; run scripts/test-drafts-dovecot.sh"]
+fn real_sent_copy_creation_refusal_append_failure_restart_and_reconciliation() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let expected = std::env::var("TORROMAIL_TEST_DRAFTS_MAILBOX")
+        .unwrap_or_else(|_| "Drafts".into())
+        .replace("Drafts", "Sent");
+    for scenario in [
+        "missing",
+        "creation-denied",
+        "append-refused",
+        "append-ack-lost",
+        "auto-create",
+        "bad-mapping",
+    ] {
+        let user = format!("sent-{suffix}-{scenario}@example.invalid");
+        let directory = std::env::temp_dir().join(format!("torromail-sent-{suffix}-{scenario}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("policy.json");
+        policy(&path, false, true);
+        let mut document: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        document["accounts"][0]["allow_create_sent_mailbox"] = json!(matches!(
+            scenario,
+            "creation-denied" | "auto-create" | "bad-mapping"
+        ));
+        if scenario == "bad-mapping" {
+            document["accounts"][0]["mailbox_overrides"] = json!({"sent":"broken-manual-choice"});
+        }
+        std::fs::write(&path, document.to_string()).unwrap();
+        if matches!(
+            scenario,
+            "append-refused" | "append-ack-lost" | "bad-mapping"
+        ) {
+            client(&user, Arc::new(AtomicBool::new(false)))
+                .ensure_special_mailbox(torromail_core::SpecialMailboxRole::Sent, None, true)
+                .unwrap();
+        }
+        let fault = Arc::new(AtomicBool::new(scenario == "append-ack-lost"));
+        let user_in = user.clone();
+        let fault_in = fault.clone();
+        let first = LineMcpServer::with_connect_override(&path, false, move |id| {
+            Ok(Box::new(ImapMailProvider::new(
+                id.clone(),
+                client_faulty(
+                    &user_in,
+                    fault_in.clone(),
+                    scenario == "creation-denied",
+                    scenario == "append-refused",
+                ),
+            )))
+        });
+        let (port, sink) = smtp_sink();
+        let first = first.with_submission_override(move |from, to, mime| {
+            use torromail_core::smtp::SubmissionError;
+            let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let mut smtp = SmtpClient::connect(
+                StreamImapTransport::new(socket),
+                "example.invalid",
+                SmtpAuth::Login {
+                    username: "test".into(),
+                    secret: "test".into(),
+                },
+            )
+            .map_err(SubmissionError::NotAccepted)?;
+            let result = smtp.submit_message(from, to, mime);
+            smtp.quit();
+            result
+        });
+        let draft = payload(&call(
+            &first,
+            "mail_create_draft",
+            json!({"account_id":"test","storage":"local","idempotency_key":"once","to":["to@example.invalid"],"subject":"Sent copy matrix","body":"MIME body ä\n.line","attachments":[{"filename":"test.bin","content_base64":"AAEC/w=="}]}),
+        ));
+        let action = payload(&call(
+            &first,
+            "mail_prepare_send",
+            json!({"account_id":"test","draft_id":draft["draft_id"]}),
+        ));
+        let confirm = json!({"pending_action_id":action["pending_action_id"],"confirmation_code":action["confirmation_code"]});
+        let submitted = payload(&call(&first, "mail_confirm_action", confirm.clone()));
+        assert_eq!(
+            submitted["submission_status"], "accepted",
+            "{scenario}: {submitted}"
+        );
+        assert_eq!(
+            submitted["sent_copy_status"],
+            if scenario == "auto-create" {
+                "saved"
+            } else {
+                "pending"
+            },
+            "{scenario}: {submitted}"
+        );
+        let (_, mime) = sink.join().unwrap();
+        drop(first);
+        // Supply folder creation consent now, or repair a broken manual mapping.
+        if scenario == "bad-mapping" {
+            document["accounts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("mailbox_overrides");
+        }
+        document["accounts"][0]["allow_create_sent_mailbox"] = json!(true);
+        std::fs::write(&path, document.to_string()).unwrap();
+        let second = server(&path, &user, Arc::new(AtomicBool::new(false)))
+            .with_submission_override(|_, _, _| panic!("copy recovery must not call SMTP"));
+        second.retry_sent_copies().unwrap();
+        let recovered = payload(&call(&second, "mail_confirm_action", confirm));
+        assert_eq!(recovered["submission_status"], "accepted");
+        assert_eq!(
+            recovered["sent_copy_status"], "saved",
+            "{scenario}: {recovered}"
+        );
+        assert_eq!(recovered["sent_copy_mailbox"], expected);
+        let mut check = client(&user, Arc::new(AtomicBool::new(false)));
+        let hits = check
+            .uid_search(&expected, "", &Default::default())
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{scenario}: exactly one Sent copy after retries"
+        );
+        let marker = mime
+            .lines()
+            .find_map(|line| line.strip_prefix("Message-ID: "))
+            .unwrap();
+        check
+            .append_sent_verified(&expected, &mime, marker, false)
+            .unwrap();
+        // The exact-MIME verification also verifies attachment bytes and Seen.
+        assert_eq!(
+            check
+                .uid_search(&expected, "", &Default::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

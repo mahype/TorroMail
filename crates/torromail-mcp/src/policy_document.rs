@@ -72,6 +72,8 @@ pub(crate) struct DocumentAccount {
     pub(crate) oauth: Option<OAuthFacts>,
     pub(crate) mailbox_overrides: SpecialMailboxOverrides,
     pub(crate) allow_create_drafts_mailbox: bool,
+    pub(crate) allow_create_sent_mailbox: bool,
+    pub(crate) sent_copy_strategy: crate::send_service::CopyStrategy,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -258,7 +260,7 @@ fn parse_clients(document: &Value) -> Result<Option<Vec<DocumentClient>>, String
 
 fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
     let policy = parse_account_policy(account)?;
-    let (imap, oauth) = match account.get("imap") {
+    let (imap, mut oauth) = match account.get("imap") {
         None | Some(Value::Null) => (None, None),
         Some(imap) => (
             Some(parse_connection_config(
@@ -283,6 +285,10 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
         )?),
     };
 
+    if oauth.is_none() && let Some(smtp) = account.get("smtp") {
+        oauth = parse_oauth_facts(smtp)?;
+    }
+
     // Name and email are labels, not rights: a document from an older app
     // build simply has none, and the account still works.
     let name = account["name"].as_str().unwrap_or_default().to_owned();
@@ -301,6 +307,18 @@ fn parse_account(account: &Value) -> Result<DocumentAccount, String> {
         smtp,
         oauth,
         mailbox_overrides: parse_mailbox_overrides(account)?,
+        sent_copy_strategy: crate::send_service::CopyStrategy::parse(
+            account.get("sent_copy_strategy"),
+        )?,
+        allow_create_sent_mailbox: match account.get("allow_create_sent_mailbox") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            _ => {
+                return Err(
+                    "policy document invalid: allow_create_sent_mailbox must be a boolean".into(),
+                );
+            }
+        },
         allow_create_drafts_mailbox: match account.get("allow_create_drafts_mailbox") {
             None => false,
             Some(Value::Bool(value)) => *value,

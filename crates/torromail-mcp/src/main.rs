@@ -108,7 +108,62 @@ fn main() -> io::Result<()> {
     // nothing inherits it.
     let presented_token = std::env::var("TORROMAIL_TOKEN").ok();
 
-    if let Some(position) = arguments.iter().position(|argument| argument == "--list-account-mailboxes") {
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--send-action")
+    {
+        let server = match policy_path() {
+            Some(path) => LineMcpServer::with_policy_path(path),
+            None => {
+                eprintln!("policy path missing");
+                std::process::exit(2);
+            }
+        }
+        .with_presented_token(presented_token.as_deref());
+        let outcome = arguments
+            .get(position + 1)
+            .ok_or("--send-action needs a request file".to_owned())
+            .and_then(|path| {
+                std::fs::read_to_string(path).map_err(|_| "send request cannot be read".to_owned())
+            })
+            .and_then(|text| {
+                serde_json::from_str(&text).map_err(|_| "invalid send request".to_owned())
+            })
+            .and_then(|request| server.send_action_request(&request));
+        match outcome {
+            Ok(payload) => println!("{payload}"),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--retry-sent-copies")
+    {
+        let server = match policy_path() {
+            Some(path) => LineMcpServer::with_policy_path(path),
+            None => {
+                eprintln!("policy path missing");
+                std::process::exit(2);
+            }
+        }
+        .with_presented_token(presented_token.as_deref());
+        match server.retry_sent_copies() {
+            Ok(saved) => println!("{{\"saved\":{saved}}}"),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(position) = arguments
+        .iter()
+        .position(|argument| argument == "--list-account-mailboxes") {
         let Some(account_id) = arguments.get(position + 1) else {
             eprintln!("--list-account-mailboxes needs an account id");
             std::process::exit(2);
@@ -218,6 +273,19 @@ fn main() -> io::Result<()> {
         // so it never waits behind a slow TLS handshake.
         torromail_mcp::sweep_attachment_files(sweep_policy_path.clone());
         torromail_mcp::sweep_account_health(sweep_policy_path, sweep_token.as_deref());
+    });
+
+    let recovery_policy = policy_path();
+    let recovery_token = presented_token.clone();
+    std::thread::spawn(move || {
+        if let Some(path) = recovery_policy {
+            let service = LineMcpServer::with_policy_path(path)
+                .with_presented_token(recovery_token.as_deref());
+            loop {
+                let _ = service.retry_sent_copies();
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
     });
 
     let server = match policy_path() {

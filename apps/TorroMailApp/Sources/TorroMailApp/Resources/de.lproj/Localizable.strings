@@ -424,3 +424,27 @@
 
 "Create a missing drafts folder" = "Fehlenden Entwurfsordner anlegen";
 "Allows TorroMail to create only the drafts folder for this account. Sending still requires approval." = "Erlaubt TorroMail, ausschließlich den Entwurfsordner dieses Kontos anzulegen. Der Versand benötigt weiterhin eine Freigabe.";
+
+"Sent copies for MCP messages" = "Gesendet-Kopien für MCP-Nachrichten";
+"Save in the IMAP Sent folder" = "Im IMAP-Ordner Gesendet speichern";
+"The provider saves a copy" = "Der Anbieter speichert die Kopie";
+"Do not save an additional copy" = "Keine zusätzliche Kopie speichern";
+"Create a missing Sent folder" = "Fehlenden Gesendet-Ordner anlegen";
+"SMTP submission proceeds even if the Sent folder is unavailable. TorroMail retries only the copy." = "SMTP versendet auch bei nicht verfügbarem Gesendet-Ordner. TorroMail holt nur die Ablage nach.";
+
+"Dismiss" = "Schließen";
+"Review and approve" = "Prüfen und freigeben";
+"Review send" = "Versand prüfen";
+"From" = "Absender";
+"Recipients" = "Empfänger";
+"Subject" = "Betreff";
+"SMTP acceptance does not confirm delivery to the recipient." = "Die SMTP-Annahme bestätigt keine Zustellung beim Empfänger.";
+"Accepted by SMTP; Sent copy saved." = "Vom SMTP-Server angenommen; Gesendet-Kopie gespeichert.";
+"Accepted by SMTP; check the Sent copy status." = "Vom SMTP-Server angenommen; bitte den Ablagestatus prüfen.";
+"Accepted by SMTP; Sent copy pending." = "Vom SMTP-Server angenommen; Gesendet-Ablage ausstehend.";
+"Submission is in progress." = "Versand läuft.";
+"SMTP did not accept the message." = "Der SMTP-Server hat die Nachricht nicht angenommen.";
+"SMTP acceptance is unknown. TorroMail will not send again automatically." = "SMTP-Annahme unklar. TorroMail versendet nicht automatisch erneut.";
+
+"Accepted by SMTP." = "Vom SMTP-Server angenommen.";
+"The send status could not be checked. Review the operation before sending another message." = "Der Versandstatus konnte nicht geprüft werden. Prüfe den Vorgang, bevor du eine weitere Nachricht versendest.";

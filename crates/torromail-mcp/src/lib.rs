@@ -7,6 +7,7 @@ mod draft_state;
 pub mod health;
 pub mod keychain;
 mod policy_document;
+mod send_service;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -15,7 +16,7 @@ use std::rc::Rc;
 
 use serde_json::{Value, json};
 use torromail_cache::{AttachmentRow as CacheAttachmentRow, CacheStore, SummaryRow};
-use torromail_core::smtp::SmtpAuth;
+use torromail_core::smtp::{SmtpAuth, SubmissionError};
 use torromail_core::{
     AccountId, AttachmentInfo, CacheLevel, Capability, CoreError, CoreResult, FixtureMailProvider,
     ImapAuth, ImapProviderConfig, MailAccessService, MailProvider, MarkChange, OutgoingAttachment,
@@ -140,7 +141,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"storage":{"type":"string","enum":["imap","local"],"default":"imap","description":"Use local for a durable sendable draft without connecting to IMAP."},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
             }
             ToolName::MailPrepareSend => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
@@ -240,22 +241,24 @@ const MAX_INLINE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Metadata safe to show in an approval or audit line. File bytes remain only
 /// in the raw MIME message and never enter either surface.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct AttachmentSummary {
     filename: String,
     media_type: String,
     size_bytes: usize,
 }
 
-/// A composed draft the server remembers so a later `prepare_send` can find
-/// it by id. The recipients are the full envelope — to, cc and bcc — while
+/// An immutable composed draft persisted for a later `prepare_send` by id. The recipients are the full envelope — to, cc and bcc — while
 /// the raw message carries only the visible headers.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct DraftRecord {
+    #[serde(with = "send_service::account_id_serde")]
     account_id: AccountId,
     from: String,
     recipients: Vec<String>,
     subject: String,
+    #[serde(default)]
+    body: String,
     attachments: Vec<AttachmentSummary>,
     raw: String,
 }
@@ -284,9 +287,6 @@ enum Operation {
     },
     Expunge {
         message_ids: Vec<String>,
-    },
-    Send {
-        record: DraftRecord,
     },
 }
 
@@ -364,7 +364,7 @@ pub struct LineMcpServer {
     sessions: RefCell<SearchSessionStore>,
     /// Risky actions awaiting confirmation, between their prepare and confirm.
     pending: RefCell<PendingActions>,
-    /// Drafts composed this session, so `prepare_send` can name one by id.
+    /// Fixture-only draft fallback; configured servers use the durable spool.
     drafts: RefCell<DraftCache>,
     /// The last health outcome recorded per account, so the throttle on the
     /// tool-call path costs a map lookup rather than a read of the whole log.
@@ -405,7 +405,7 @@ pub struct LineMcpServer {
     smtp_override: Option<Box<SmtpOverride>>,
 }
 
-type SmtpOverride = dyn Fn(&str, &[String], &str) -> CoreResult<()>;
+type SmtpOverride = dyn Fn(&str, &[String], &str) -> Result<(), SubmissionError>;
 
 impl LineMcpServer {
     /// A server wired to fixture data — the same policy-checked path real
@@ -469,6 +469,17 @@ impl LineMcpServer {
     pub fn with_smtp_override<F>(mut self, send: F) -> Self
     where
         F: Fn(&str, &[String], &str) -> CoreResult<()> + 'static,
+    {
+        self.smtp_override = Some(Box::new(move |from, to, mime| {
+            send(from, to, mime).map_err(SubmissionError::NotAccepted)
+        }));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_submission_override<F>(mut self, send: F) -> Self
+    where
+        F: Fn(&str, &[String], &str) -> Result<(), SubmissionError> + 'static,
     {
         self.smtp_override = Some(Box::new(send));
         self
@@ -649,7 +660,9 @@ impl LineMcpServer {
                 Err(message) => return json_rpc_error(id, -32000, &message),
             };
             let client_id = self.client_identity().0;
-            return self.run_with_connection(&account_id, id, &|provider, engine| {
+            let create = |provider: Option<&mut dyn MailProvider>,
+                          engine: PolicyEngine|
+             -> ToolResult {
                 let (mailbox, record) = compose_and_append(
                     arguments,
                     &account_id,
@@ -663,24 +676,35 @@ impl LineMcpServer {
                         client: Some(&client_id),
                     },
                 )?;
-                let attachments = attachment_summaries_json(&record.attachments);
-                let attachment_count = record.attachments.len();
-                let total_attachment_bytes = total_attachment_bytes(&record.attachments);
-                let message_bytes = record.raw.len();
-                let draft_id = format!("draft-{}", sha256_hex(&record.raw));
-                self.drafts
-                    .borrow_mut()
-                    .records
-                    .insert(draft_id.clone(), record);
-                Ok(json!({
-                    "status": "draft_created",
-                    "draft_id": draft_id,
-                    "mailbox": mailbox,
-                    "attachments": attachments,
-                    "attachment_count": attachment_count,
-                    "total_attachment_bytes": total_attachment_bytes,
-                    "message_bytes": message_bytes
-                }))
+                let draft_id = if self.policy_path.is_some() {
+                    self.persist_draft(&record)?
+                } else {
+                    format!("draft-{}", sha256_hex(&record.raw))
+                };
+                let payload = json!({"status":"draft_created","draft_id":draft_id,"mailbox":mailbox,
+                    "storage":if mailbox == "local" { "local" } else { "imap" },
+                    "attachments":attachment_summaries_json(&record.attachments),"attachment_count":record.attachments.len(),
+                    "total_attachment_bytes":total_attachment_bytes(&record.attachments),"message_bytes":record.raw.len()});
+                if self.policy_path.is_none() { self.drafts.borrow_mut().records.insert(draft_id, record); }
+                Ok(payload)
+            };
+            match arguments.get("storage").and_then(Value::as_str) {
+                Some("local") => {
+                    let engine = match self.runtime_for(&account_id) {
+                        Ok((engine, _)) => engine,
+                        Err(message) => return json_rpc_error(id, -32000, &message),
+                    };
+                    return match create(None, engine) {
+                        Ok(payload) => json_rpc_text_result(id, &payload),
+                        Err(error) => error.into_response(id),
+                    };
+                }
+                None if arguments.get("storage").is_none() => {}
+                Some("imap") => {}
+                _ => return json_rpc_error(id, -32602, "storage must be imap or local"),
+            }
+            return self.run_with_connection(&account_id, id, &|provider, engine| {
+                create(Some(provider), engine)
             });
         }
         if name == ToolName::MailPrepareSend.as_str() {
@@ -723,6 +747,7 @@ impl LineMcpServer {
         // The tool's own payload rides as a JSON string inside the MCP text
         // content — where a confirmed action's executed counts live.
         let payload = parsed.as_ref().and_then(audit_payload);
+        let failed = failed || payload.as_ref().is_some_and(|payload| matches!(payload["submission_status"].as_str(), Some("not_accepted" | "unknown")));
         let detail = audit_detail(name, arguments, payload.as_ref());
         let (client_id, client_name) = self.client_identity();
         let ts = std::time::SystemTime::now()
@@ -1051,8 +1076,7 @@ impl LineMcpServer {
         self.store_prepared(account_id, preview, operation, id)
     }
 
-    /// Prepare a send for confirmation. The draft must have been composed this
-    /// session, and the account must hold the send right — the one capability
+    /// Prepare a durable draft for confirmation; the account must hold the send right — the one capability
     /// that acts on the outside world.
     fn handle_mail_prepare_send(
         &self,
@@ -1061,8 +1085,24 @@ impl LineMcpServer {
         id: &Value,
     ) -> String {
         let draft_id = arguments["draft_id"].as_str().unwrap_or_default();
-        let Some(record) = self.drafts.borrow().get(draft_id) else {
-            return json_rpc_error(id, -32000, &format!("draft not found: {draft_id}"));
+        let record = match self.durable_draft(draft_id).or_else(|error| {
+            if self.policy_path.is_none() {
+                self.drafts.borrow().get(draft_id).ok_or(error)
+            } else {
+                Err(error)
+            }
+        }) {
+            Ok(record) => record,
+            Err(error) => {
+                return json_rpc_error(
+                    id,
+                    -32000,
+                    &format!(
+                        "draft not found or unavailable: {draft_id}: {}",
+                        error.message()
+                    ),
+                );
+            }
         };
         if &record.account_id != account_id {
             return json_rpc_error(id, -32000, "draft belongs to a different account");
@@ -1076,16 +1116,10 @@ impl LineMcpServer {
             return json_rpc_error(id, -32000, &error.to_string());
         }
 
-        let preview = if record.attachments.is_empty() {
-            format!("Send to {}", record.recipients.join(", "))
-        } else {
-            format!(
-                "Send to {} with {} attachment(s)",
-                record.recipients.join(", "),
-                record.attachments.len()
-            )
-        };
-        self.store_prepared(account_id, preview, Operation::Send { record }, id)
+        match self.prepare_submission(draft_id, &record) {
+            Ok(payload) => json_rpc_text_result(id, &payload),
+            Err(error) => error.into_response(id),
+        }
     }
 
     /// Store a prepared action and answer with its id, code and preview.
@@ -1096,15 +1130,6 @@ impl LineMcpServer {
         operation: Operation,
         id: &Value,
     ) -> String {
-        let send_details = match &operation {
-            Operation::Send { record } => Some(json!({
-                "subject": record.subject,
-                "attachments": attachment_summaries_json(&record.attachments),
-                "attachment_count": record.attachments.len(),
-                "total_attachment_bytes": total_attachment_bytes(&record.attachments)
-            })),
-            _ => None,
-        };
         let action = PreparedAction {
             account_id: account_id.clone(),
             code: String::new(),
@@ -1112,18 +1137,12 @@ impl LineMcpServer {
             expires_at: now_secs() + PENDING_TTL_SECONDS,
         };
         let (pending_id, code) = self.pending.borrow_mut().prepare(action);
-        let mut payload = json!({
+        let payload = json!({
             "pending_action_id": pending_id,
             "confirmation_code": code,
             "preview": preview,
             "expires_in_seconds": PENDING_TTL_SECONDS
         });
-        if let Some(details) = send_details {
-            payload["subject"] = details["subject"].clone();
-            payload["attachments"] = details["attachments"].clone();
-            payload["attachment_count"] = details["attachment_count"].clone();
-            payload["total_attachment_bytes"] = details["total_attachment_bytes"].clone();
-        }
         json_rpc_text_result(id, &payload)
     }
 
@@ -1134,7 +1153,14 @@ impl LineMcpServer {
         let pending_id = arguments["pending_action_id"].as_str().unwrap_or_default();
         let code = arguments["confirmation_code"].as_str().unwrap_or_default();
 
-        let action = match self.pending.borrow_mut().confirm(pending_id, code, now_secs()) {
+        if pending_id.starts_with("send-") {
+            return self.execute_send(pending_id, code, id);
+        }
+
+        let action = match self
+            .pending
+            .borrow_mut()
+            .confirm(pending_id, code, now_secs()) {
             Ok(action) => action,
             Err(failure) => return failure.into_response(id),
         };
@@ -1144,86 +1170,16 @@ impl LineMcpServer {
             Err(message) => return json_rpc_error(id, -32000, &message),
         };
 
-        // Sending leaves the house over SMTP, not the pooled IMAP connection;
-        // every other action mutates the mailbox and runs on that connection.
-        match &action.operation {
-            Operation::Send { record } => self.execute_send(&account_id, record, id),
-            operation => self.run_with_connection(&account_id, id, &|provider, engine| {
-                execute_operation(operation, &account_id, provider, engine, &overrides)
-            }),
-        }
+        self.run_with_connection(&account_id, id, &|provider, engine| {
+            execute_operation(&action.operation, &account_id, provider, engine, &overrides)
+        })
     }
 
-    /// Submit a confirmed draft over SMTP. A fresh session each time — sends
-    /// are rare enough that pooling a second connection is not worth it.
-    fn execute_send(
-        &self,
-        account_id: &AccountId,
-        record: &DraftRecord,
-        id: &Value,
-    ) -> String {
-        if &record.account_id != account_id {
-            return json_rpc_error(id, -32000, "draft belongs to a different account");
-        }
-        let (engine, facts) = match self.runtime_for(account_id) {
-            Ok(runtime) => runtime,
-            Err(message) => return json_rpc_error(id, -32000, &message),
-        };
-        if let Err(error) = engine.authorize(account_id, Capability::Send) {
-            return json_rpc_error(id, -32000, &error.to_string());
-        }
-        let Some((config, oauth)) = self.smtp_facts(account_id) else {
-            return json_rpc_error(
-                id,
-                -32000,
-                "no SMTP is configured for this account — finish setting it up in TorroMail",
-            );
-        };
-
-        let overrides = match self.mailbox_overrides(account_id) {
-            Ok(overrides) => overrides,
-            Err(message) => return json_rpc_error(id, -32000, &message),
-        };
-        // Resolve and verify Sent before SMTP accepts the message. A missing
-        // folder is then a setup error with no risk of a duplicate send.
-        let mut provider = match self.open_connection(account_id, facts) {
-            Ok(provider) => provider,
-            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
-        };
-        let mut sessions = SearchSessionStore::default();
-        let sent_mailbox = match MailAccessService::new(provider.as_mut(), engine, &mut sessions)
-            .special_mailbox(account_id, SpecialMailboxRole::Sent, overrides.get(SpecialMailboxRole::Sent))
-        {
-            Ok(mailbox) => mailbox,
-            Err(error) => return json_rpc_error(id, -32000, &error.to_string()),
-        };
-
-        let submission = match &self.smtp_override {
-            Some(send) => send(&record.from, &record.recipients, &record.raw),
-            None => send_over_smtp(&config, oauth.as_ref(), record),
-        };
-        match submission {
-            Ok(()) => {
-                // SMTP success is final. If IMAP fails now, report that the
-                // message was sent and only its Sent copy is missing.
-                let copy = provider.append_sent(account_id, &sent_mailbox, &record.raw);
-                let mut payload = json!({
-                    "status": "sent",
-                    "recipients": record.recipients.len(),
-                    "attachment_count": record.attachments.len(),
-                    "total_attachment_bytes": total_attachment_bytes(&record.attachments),
-                    "sent_copy_mailbox": sent_mailbox
-                });
-                match copy {
-                    Ok(()) => payload["sent_copy_status"] = json!("saved"),
-                    Err(error) => {
-                        payload["sent_copy_status"] = json!("failed");
-                        payload["warning"] = json!(format!("message was sent, but the Sent copy could not be saved: {error}"));
-                    }
-                }
-                json_rpc_text_result(id, &payload)
-            }
-            Err(error) => json_rpc_error(id, -32000, &error.to_string()),
+    /// Shared durable submission service; IMAP is only post-submission work.
+    fn execute_send(&self, operation_id: &str, code: &str, id: &Value) -> String {
+        match self.confirm_submission(operation_id, code, false) {
+            Ok(payload) => json_rpc_text_result(id, &payload),
+            Err(error) => error.into_response(id),
         }
     }
 
@@ -1425,6 +1381,8 @@ impl LineMcpServer {
                 "account_id": account_id.as_str(),
                 "permissions": permissions_json(account.policy.permissions()),
                 "allow_create_drafts_mailbox": account.allow_create_drafts_mailbox,
+                "allow_create_sent_mailbox": account.allow_create_sent_mailbox,
+                "sent_copy_strategy": account.sent_copy_strategy,
                 "capabilities": capabilities_json(&account.policy)
             }),
         )
@@ -2894,7 +2852,7 @@ struct DraftSetup<'a> {
 fn compose_and_append(
     arguments: &Value,
     account_id: &AccountId,
-    provider: &mut dyn MailProvider,
+    provider: Option<&mut dyn MailProvider>,
     engine: PolicyEngine,
     setup: DraftSetup<'_>,
 ) -> Result<(String, DraftRecord), ToolFailure> {
@@ -2963,6 +2921,30 @@ fn compose_and_append(
             "the finished message exceeds the 20 MiB limit".into(),
         ));
     }
+    if provider.is_none() {
+        let mut recipients = to;
+        recipients.extend(cc);
+        recipients.extend(bcc);
+        if std::iter::once(from)
+            .chain(recipients.iter().map(String::as_str))
+            .any(|address| !address.contains('@') || address.contains(['\r', '\n', '<', '>']))
+        {
+            return Err(ToolFailure::InvalidParams("invalid SMTP envelope".into()));
+        }
+        return Ok((
+            "local".into(),
+            DraftRecord {
+                account_id: account_id.clone(),
+                from: from.into(),
+                recipients,
+                subject: subject.into(),
+                body: body.into(),
+                attachments: attachment_summaries,
+                raw: message,
+            },
+        ));
+    }
+    let provider = provider.expect("remote draft provider was checked");
     let state = policy_path
         .map(|path| draft_state::DraftState::open(path, account_id.as_str()))
         .transpose()?;
@@ -3011,6 +2993,7 @@ fn compose_and_append(
         from: from.to_owned(),
         recipients,
         subject: subject.to_owned(),
+        body: body.to_owned(),
         attachments: attachment_summaries,
         raw: message,
     };
@@ -3282,11 +3265,6 @@ fn execute_operation(
                 .map_err(ToolFailure::Core)?;
             Ok(json!({ "status": "deleted", "deleted": message_ids.len() }))
         }
-        // Sending is handled off the IMAP connection; confirm never routes it
-        // here.
-        Operation::Send { .. } => Err(ToolFailure::Core(CoreError::ProviderFailure(
-            "send is not a mailbox operation".to_owned(),
-        ))),
     }
 }
 
@@ -3296,8 +3274,8 @@ fn send_over_smtp(
     config: &ImapProviderConfig,
     oauth: Option<&OAuthFacts>,
     record: &DraftRecord,
-) -> CoreResult<()> {
-    let secret = resolve_credential(config, oauth)?;
+) -> Result<(), SubmissionError> {
+    let secret = resolve_credential(config, oauth).map_err(SubmissionError::NotAccepted)?;
     let auth = match config.auth {
         ImapAuth::Password => SmtpAuth::Login {
             username: config.username.clone(),
@@ -3315,10 +3293,11 @@ fn send_over_smtp(
         config.security,
         &ehlo_domain(&record.from),
         auth,
-    )?;
-    let outcome = client.send_message(&record.from, &record.recipients, &record.raw);
-    client.quit();
-    outcome
+    )
+    .map_err(SubmissionError::NotAccepted)?;
+    // Return immediately after DATA acknowledgement so the journal commits
+    // acceptance before any further network operation. Dropping closes SMTP.
+    client.submit_message(&record.from, &record.recipients, &record.raw)
 }
 
 /// What the client announces itself as: the sender's domain, or `localhost`
@@ -3489,6 +3468,13 @@ fn confirm_detail(arguments: &Value, payload: Option<&Value>) -> String {
             .unwrap_or_default()
             .to_owned();
     };
+    if let Some(submission) = payload["submission_status"].as_str() {
+        return format!(
+            "SMTP {submission}; Sent copy {} · {}",
+            payload["sent_copy_status"].as_str().unwrap_or_default(),
+            payload["operation_id"].as_str().unwrap_or_default()
+        );
+    }
     let n = |key: &str| payload[key].as_u64().unwrap_or_default();
     let at = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
     match payload["status"].as_str().unwrap_or_default() {

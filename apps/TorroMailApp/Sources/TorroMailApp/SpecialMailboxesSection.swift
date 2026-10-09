@@ -15,6 +15,16 @@ struct SpecialMailboxesSection: View {
 
     var body: some View {
         Section {
+            Picker(L("Sent copies for MCP messages"), selection: $account.sentCopyStrategy) {
+                Text(L("Save in the IMAP Sent folder")).tag(SentCopyStrategy.imap)
+                Text(L("The provider saves a copy")).tag(SentCopyStrategy.provider)
+                Text(L("Do not save an additional copy")).tag(SentCopyStrategy.none)
+            }
+            if account.sentCopyStrategy == .imap {
+                Toggle(L("Create a missing Sent folder"), isOn: $account.allowCreateSentMailbox)
+                Text(L("SMTP submission proceeds even if the Sent folder is unavailable. TorroMail retries only the copy."))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Toggle(L("Create a missing drafts folder"), isOn: $account.allowCreateDraftsMailbox)
             Text(L("Allows TorroMail to create only the drafts folder for this account. Sending still requires approval."))
                 .font(.footnote).foregroundStyle(.secondary)
@@ -31,7 +41,9 @@ struct SpecialMailboxesSection: View {
                     }
                 }
                 mailboxPicker(L("Drafts"), selection: $account.specialMailboxes.drafts)
-                mailboxPicker(L("Sent"), selection: $account.specialMailboxes.sent)
+                if account.sentCopyStrategy == .imap {
+                    mailboxPicker(L("Sent"), selection: $account.specialMailboxes.sent)
+                }
                 mailboxPicker(L("Archive"), selection: $account.specialMailboxes.archive)
                 mailboxPicker(L("Junk"), selection: $account.specialMailboxes.junk)
                 mailboxPicker(L("Trash"), selection: $account.specialMailboxes.trash)

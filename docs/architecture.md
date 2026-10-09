@@ -301,8 +301,9 @@ special-use attributes and existing common folder names. An account can
 override each of these five roles in the setup app by selecting an existing,
 selectable folder from the server's live list. The server checks that exact
 choice again when the action runs. `INBOX` is reserved by IMAP and has no
-manual mapping. Only automatic Drafts creation has separate consent; all other
-roles still require existing folders. A broken explicit mapping is reported,
+manual mapping. Automatic Drafts and Sent creation each have separate account
+consent (`allow_create_drafts_mailbox` and `allow_create_sent_mailbox`, both false
+by default); Archive, Junk and Trash require existing folders. A broken explicit mapping is reported,
 never replaced automatically.
 
 Draft operations use an optional `idempotency_key`, scoped to account and paired
@@ -324,12 +325,58 @@ JSON-RPC errors retain code -32000 and add `error.data.reason` for draft setup
 and storage failures. Draft audit entries contain counts, never recipients,
 subject, filenames, body, or attachment bytes.
 
-Before submitting a prepared send, TorroMail resolves the Sent folder. After
-SMTP accepts the message, it appends a `\Seen` copy there. If that append
-fails, the tool still reports the message as sent and separately reports the
-missing Sent copy, so a client has no reason to resubmit it. Archive and Junk
-can be selected as `target_role` in `mail_prepare_move`; soft delete resolves
-Trash automatically.
+`mail_create_draft` defaults to `storage: "imap"` for compatibility. With
+`storage: "local"` it composes and persists the exact MIME, envelope (including
+Bcc), body and attachment summaries without opening IMAP or creating a server
+folder. Both modes require the existing draft permission. Draft IDs and
+`idempotency_key` ownership survive MCP restarts and are scoped to account and
+client. A changed payload under the same key is rejected. The local snapshot
+is immutable: editing an IMAP draft does not edit the payload TorroMail will
+submit; use a new draft and obtain a new approval for changed content.
+
+SMTP and Sent-copy storage are separate outcomes. Submission checks the current
+client's account grant, the originating client's grant for GUI approval, the
+send permission, approval code/expiry, sender and content fingerprint, and SMTP
+configuration. It performs **no IMAP operation before SMTP**. The per-operation
+OS lock remains held through submission. A synced atomic journal checkpoint is
+written before the attempt and again immediately after the final DATA result.
+`submission_status` is `accepted`, `not_accepted` or `unknown` after an attempt;
+acceptance means SMTP's final 250 after DATA, **not recipient delivery**. Repeated
+confirmation returns the same operation's outcome. It cannot send again. A
+process that dies with `submitting` on disk recovers as `unknown`, even if the
+server accepted DATA: SMTP has no general exactly-once guarantee, and Message-ID
+alone does not prevent delivery twice. Unknown operations never retry SMTP.
+Inspect the provider before explicitly creating a new draft with a new key.
+
+The GUI and MCP both use `send_service`; the app's `--send-action` bridge lists,
+rejects and confirms the same persistent operations. The GUI preview shows the
+sender, full envelope, subject, body and attachment summaries. Send approvals
+retain the five-minute TTL. Move/delete preparations remain session-local.
+
+Each account chooses `sent_copy_strategy`: `imap` (the migration/default),
+`provider` (the provider files its own copy) or `none` (no extra copy).
+`sent_copy_status` is `saved`, `pending`, `provider` or `skipped` after acceptance;
+before acceptance it is `not_applicable`. IMAP connection, lookup, creation and
+APPEND failures affect only the copy. A missing automatically selected Sent
+folder may be created using the shared special-folder algorithm and separate
+account consent. A broken explicit mapping is never silently replaced.
+
+Private `send-state/<policy-hash>/` files (directories 0700, files 0600 on Unix)
+keep the exact MIME and envelope; no credentials are stored. This send spool is
+separate from the permission-capped read cache and is retained until explicitly
+removed. Audit logs contain only operation IDs, submission/copy outcomes and
+counts. SMTP acceptance is committed before copy work. An `appending` checkpoint
+records the original mailbox before APPEND; a retry verifies Message-ID **plus
+exact MIME and the Seen flag** there. A tagged refusal can retry APPEND. A lost
+APPEND acknowledgement can only reconcile; an invisible ambiguous copy stays
+pending rather than risking a duplicate. A failure before APPEND's first search
+is safe to retry. Automatic recovery runs at MCP startup and every 60 seconds
+while a server is running. `torromail-mcp --retry-sent-copies` uses the same
+pairing/account gates for an explicit copy-only recovery. Recovery never calls
+SMTP, and revoked grants/permissions stop it.
+
+Archive and Junk can be selected as `target_role` in `mail_prepare_move`;
+soft delete resolves Trash automatically.
 
 The MCP contract accepts `filename`, optional `media_type`, and
 `content_base64`. It deliberately accepts neither filesystem paths nor URLs:

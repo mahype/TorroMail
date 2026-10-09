@@ -38,7 +38,7 @@ fi
 # Share the checked-in Info.plist template with the release build so the two
 # never drift. Stamp a dev version so the bundle is identifiable.
 cp "$PKG/Resources/Info.plist" "$APP/Contents/Info.plist"
-DEV_VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+DEV_VERSION="${VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null | sed 's/^v//')}"
 /usr/libexec/PlistBuddy \
     -c "Set :CFBundleShortVersionString ${DEV_VERSION:-dev}" \
     -c "Add :TorroMailDisableUpdates bool true" \

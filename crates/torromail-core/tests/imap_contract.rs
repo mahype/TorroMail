@@ -1946,3 +1946,87 @@ fn a_broken_connection_is_not_reported_as_a_nonselectable_folder() {
         Err(CoreError::ProviderFailure(_))
     ));
 }
+
+#[test]
+fn sent_creation_shares_namespace_consent_and_selectability_rules() {
+    for (prefix, delimiter, name) in [
+        ("", "\"/\"", "Sent"),
+        ("INBOX.", "\".\"", "INBOX.Sent"),
+        ("Personal:", "\":\"", "Personal:Sent"),
+        ("", "NIL", "Sent"),
+    ] {
+        let script = draft_setup_script(prefix, delimiter, "OK created", "\\Sent")
+            .into_iter()
+            .map(|entry| match entry {
+                Incoming::Line(text) => Incoming::Line(text.replace("Drafts", "Sent")),
+                other => other,
+            })
+            .collect();
+        let log = SentLog::default();
+        let mut client = ImapClient::connect(
+            ScriptedTransport::new(script, log.clone()),
+            "test",
+            "secret",
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .ensure_special_mailbox(SpecialMailboxRole::Sent, None, true)
+                .unwrap(),
+            name
+        );
+        assert!(
+            log.lines()
+                .contains(&format!("t6 CREATE \"{name}\" (USE (\\Sent))"))
+        );
+    }
+    let script = draft_setup_script("", "\"/\"", "OK created", "\\Noselect")
+        .into_iter()
+        .map(|entry| match entry {
+            Incoming::Line(text) => Incoming::Line(text.replace("Drafts", "Sent")),
+            other => other,
+        })
+        .collect();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, SentLog::default()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert!(
+        client
+            .ensure_special_mailbox(SpecialMailboxRole::Sent, None, true)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be selected")
+    );
+}
+
+#[test]
+fn broken_manual_sent_mapping_is_never_replaced_or_created() {
+    let mut script = login_script();
+    script.extend([
+        line("* LIST (\\Sent) \"/\" \"OtherSent\""),
+        line("* LIST (\\Noselect) \"/\" \"Broken\""),
+        line("t2 OK list"),
+    ]);
+    let log = SentLog::default();
+    let mut client = ImapClient::connect(
+        ScriptedTransport::new(script, log.clone()),
+        "test",
+        "secret",
+    )
+    .unwrap();
+    assert!(
+        client
+            .ensure_special_mailbox(SpecialMailboxRole::Sent, Some("Broken"), true)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be selected")
+    );
+    assert!(
+        !log.lines()
+            .iter()
+            .any(|line| line.contains("CREATE") || line.contains("SELECT"))
+    );
+}

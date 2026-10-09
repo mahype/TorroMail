@@ -1577,6 +1577,43 @@ pub trait MailProvider {
         self.drafts_mailbox(account_id)
     }
 
+    fn ensure_special_mailbox(
+        &self,
+        account_id: &AccountId,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+        _allow_create: bool,
+    ) -> CoreResult<String> {
+        if let Some(chosen) = chosen {
+            return self
+                .selectable_mailboxes(account_id)?
+                .into_iter()
+                .find(|name| name == chosen)
+                .ok_or_else(|| {
+                    CoreError::ProviderFailure(format!(
+                        "selected {} folder is missing or not selectable: {chosen}",
+                        role.as_str()
+                    ))
+                });
+        }
+        self.special_mailbox(account_id, role)
+    }
+
+    /// Reconciliation never blindly repeats an ambiguous APPEND.
+    fn append_sent_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        _marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        if !allow_append {
+            return Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain));
+        }
+        self.append_sent(account_id, mailbox, message)
+    }
+
     /// Real IMAP providers search and fetch the exact stored MIME before success.
     fn append_draft_verified(
         &mut self,
@@ -1723,6 +1760,26 @@ impl<T: MailProvider + ?Sized> MailProvider for &mut T {
         message: &str,
     ) -> CoreResult<()> {
         (**self).append_draft(account_id, mailbox, message)
+    }
+
+    fn ensure_special_mailbox(
+        &self,
+        account_id: &AccountId,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        (**self).ensure_special_mailbox(account_id, role, chosen, allow_create)
+    }
+    fn append_sent_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        (**self).append_sent_verified(account_id, mailbox, message, marker, allow_append)
     }
 
     fn append_sent(

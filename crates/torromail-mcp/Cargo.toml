@@ -16,6 +16,7 @@ torromail-core = { path = "../torromail-core" }
 torromail-imap-tls = { path = "../torromail-imap-tls" }
 torromail-oauth = { path = "../torromail-oauth" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 fs2 = "0.4"
 

@@ -567,7 +567,7 @@ impl<T: ImapTransport> ImapClient<T> {
         {
             return Ok(entry.name.clone());
         }
-        if role == SpecialMailboxRole::Drafts {
+        if matches!(role, SpecialMailboxRole::Drafts | SpecialMailboxRole::Sent) {
             let kind = if listed.iter().any(|entry| {
                 entry.has_known_name(role)
                     || entry
@@ -595,6 +595,39 @@ impl<T: ImapTransport> ImapClient<T> {
         chosen: Option<&str>,
         allow_create: bool,
     ) -> CoreResult<String> {
+        self.ensure_special_mailbox(SpecialMailboxRole::Drafts, chosen, allow_create)
+    }
+
+    pub fn ensure_special_mailbox(
+        &mut self,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        if !matches!(role, SpecialMailboxRole::Drafts | SpecialMailboxRole::Sent) {
+            return Err(CoreError::ProviderFailure(
+                "creation is supported only for Drafts and Sent".into(),
+            ));
+        }
+        self.ensure_special_mailbox_inner(role, chosen, allow_create).map_err(|error| {
+            if role == SpecialMailboxRole::Sent {
+                match error {
+                    CoreError::DraftFailure(kind) => {
+                        let reason = match kind { DraftFailureKind::Missing => "does not exist", DraftFailureKind::NotSelectable => "cannot be selected", DraftFailureKind::CreationDenied => "creation was refused", DraftFailureKind::NamespaceUnknown => "has no usable personal namespace", _ => "is unavailable" };
+                        CoreError::ProviderFailure(format!("Sent folder{} {reason}; repair the selected folder or allow creation in TorroMail", chosen.map(|name| format!(" {name:?}")).unwrap_or_default()))
+                    },
+                    error => error,
+                }
+            } else { error }
+        })
+    }
+
+    fn ensure_special_mailbox_inner(
+        &mut self,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
         if let Some(chosen) = chosen {
             let entries = self.list_mailbox_entries("LIST \"\" \"*\"")?;
             if entries
@@ -612,7 +645,7 @@ impl<T: ImapTransport> ImapClient<T> {
                 },
             ));
         }
-        match self.drafts_mailbox() {
+        match self.special_mailbox(role) {
             Ok(name) => {
                 self.select_drafts(&name)?;
                 return Ok(name);
@@ -645,10 +678,15 @@ impl<T: ImapTransport> ImapClient<T> {
                 prefix.push(separator);
             }
         }
-        let name = format!("{prefix}Drafts");
+        let leaf = if role == SpecialMailboxRole::Drafts {
+            "Drafts"
+        } else {
+            "Sent"
+        };
+        let name = format!("{prefix}{leaf}");
         let command = format!("CREATE {}", imap_quoted(&name));
         let mut result = if supports("CREATE-SPECIAL-USE") {
-            self.command_or_refusal(&format!("{command} (USE (\\Drafts))"))?
+            self.command_or_refusal(&format!("{command} (USE ({}))", role.imap_attribute()))?
         } else {
             self.command_or_refusal(&command)?
         };
@@ -687,14 +725,37 @@ impl<T: ImapTransport> ImapClient<T> {
         marker: &str,
         allow_append: bool,
     ) -> CoreResult<()> {
-        let mut uids = self.uid_search_header(mailbox, "Message-ID", marker)?;
+        self.append_verified("\\Draft", mailbox, message, marker, allow_append)
+    }
+
+    pub fn append_sent_verified(
+        &mut self,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        self.append_verified("\\Seen", mailbox, message, marker, allow_append)
+    }
+
+    fn append_verified(
+        &mut self,
+        flag: &str,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        let mut uids = self
+            .uid_search_header(mailbox, "Message-ID", marker)
+            .map_err(|_| CoreError::DraftFailure(DraftFailureKind::StorageFailed))?;
         if uids.is_empty() {
             if !allow_append {
                 return Err(CoreError::DraftFailure(DraftFailureKind::StorageUncertain));
             }
             // A transport failure here may follow acceptance. Do not wrap it
             // as an ordinary retryable provider failure.
-            self.append_internal(mailbox, "\\Draft", message, true)
+            self.append_internal(mailbox, flag, message, true)
                 .map_err(|error| match error {
                     CoreError::DraftFailure(kind) => CoreError::DraftFailure(kind),
                     _ => CoreError::DraftFailure(DraftFailureKind::StorageUncertain),
@@ -715,7 +776,7 @@ impl<T: ImapTransport> ImapClient<T> {
                 && line
                     .text
                     .split([' ', '(', ')'])
-                    .any(|word| word.eq_ignore_ascii_case("\\Draft"))
+                    .any(|word| word.eq_ignore_ascii_case(flag))
                 && line
                     .literals
                     .iter()
@@ -1388,6 +1449,33 @@ impl<T: ImapTransport> MailProvider for ImapMailProvider<T> {
     ) -> CoreResult<()> {
         self.guard(account_id)?;
         self.client.borrow_mut().append(mailbox, "\\Draft", message)
+    }
+
+    fn ensure_special_mailbox(
+        &self,
+        account_id: &AccountId,
+        role: SpecialMailboxRole,
+        chosen: Option<&str>,
+        allow_create: bool,
+    ) -> CoreResult<String> {
+        self.guard(account_id)?;
+        self.client
+            .borrow_mut()
+            .ensure_special_mailbox(role, chosen, allow_create)
+    }
+
+    fn append_sent_verified(
+        &mut self,
+        account_id: &AccountId,
+        mailbox: &str,
+        message: &str,
+        marker: &str,
+        allow_append: bool,
+    ) -> CoreResult<()> {
+        self.guard(account_id)?;
+        self.client
+            .borrow_mut()
+            .append_sent_verified(mailbox, message, marker, allow_append)
     }
 
     fn append_sent(

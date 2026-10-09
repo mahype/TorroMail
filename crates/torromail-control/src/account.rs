@@ -287,6 +287,8 @@ pub struct MailAccount {
     pub permissions: PermissionSet,
     pub special_mailboxes: SpecialMailboxes,
     pub allow_create_drafts_mailbox: bool,
+    pub allow_create_sent_mailbox: bool,
+    pub sent_copy_strategy: String,
     pub cache_level: CacheLevel,
 }
 
@@ -335,7 +337,11 @@ impl MailAccount {
             login_method: match required_str(object, "loginMethod", &context)?.as_str() {
                 "password" => LoginMethod::Password,
                 "oauth" => LoginMethod::OAuth,
-                other => return Err(FormatError(format!("{context}: unknown loginMethod `{other}`"))),
+                other => {
+                    return Err(FormatError(format!(
+                        "{context}: unknown loginMethod `{other}`"
+                    )));
+                }
             },
             oauth_issuer: match object.get("oauthIssuer").and_then(Value::as_str) {
                 None => None,
@@ -367,6 +373,24 @@ impl MailAccount {
                     .ok_or_else(|| FormatError(format!("{context}: permissions is missing")))?,
                 &context,
             )?,
+            allow_create_sent_mailbox: match object.get("allowCreateSentMailbox") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                _ => {
+                    return Err(FormatError(format!(
+                        "{context}: allowCreateSentMailbox must be a boolean"
+                    )));
+                }
+            },
+            sent_copy_strategy: match object.get("sentCopyStrategy") {
+                None => "imap".into(),
+                Some(Value::String(value))
+                    if matches!(value.as_str(), "imap" | "provider" | "none") =>
+                {
+                    value.clone()
+                }
+                _ => return Err(FormatError(format!("{context}: unknown sentCopyStrategy"))),
+            },
             allow_create_drafts_mailbox: object
                 .get("allowCreateDraftsMailbox")
                 .and_then(Value::as_bool)
@@ -408,6 +432,11 @@ impl MailAccount {
             "allowCreateDraftsMailbox".into(),
             json!(self.allow_create_drafts_mailbox),
         );
+        object.insert(
+            "allowCreateSentMailbox".into(),
+            json!(self.allow_create_sent_mailbox),
+        );
+        object.insert("sentCopyStrategy".into(), json!(self.sent_copy_strategy));
         object.insert("permissions".into(), permissions_to_json(&self.permissions));
         object.insert(
             "specialMailboxes".into(),

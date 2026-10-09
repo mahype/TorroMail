@@ -39,6 +39,21 @@ pub enum SmtpAuth {
     },
 }
 
+/// A failed submission, classified by whether SMTP could have accepted DATA.
+#[derive(Debug)]
+pub enum SubmissionError {
+    NotAccepted(CoreError),
+    Unknown(CoreError),
+}
+
+impl SubmissionError {
+    pub fn into_core(self) -> CoreError {
+        match self {
+            Self::NotAccepted(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
 /// One authenticated SMTP submission session.
 pub struct SmtpClient<T: SmtpTransport> {
     transport: T,
@@ -84,34 +99,75 @@ impl<T: SmtpTransport> SmtpClient<T> {
         recipients: &[String],
         message: &str,
     ) -> CoreResult<()> {
-        if recipients.is_empty() {
-            return Err(CoreError::ProviderFailure(
-                "a message needs at least one recipient".to_owned(),
-            ));
-        }
+        self.submit_message(from, recipients, message)
+            .map_err(SubmissionError::into_core)
+    }
 
-        self.transport.send_line(&format!("MAIL FROM:<{from}>"))?;
-        self.read_reply("250")?;
+    /// Acceptance means the final 250 after DATA, never recipient delivery.
+    pub fn submit_message(
+        &mut self,
+        from: &str,
+        recipients: &[String],
+        message: &str,
+    ) -> Result<(), SubmissionError> {
+        let before_data = || CoreError::ProviderFailure("invalid SMTP envelope".into());
+        if recipients.is_empty()
+            || std::iter::once(from)
+                .chain(recipients.iter().map(String::as_str))
+                .any(|address| {
+                    address.is_empty()
+                        || address.contains(['\r', '\n', '<', '>'])
+                        || !address.contains('@')
+                })
+        {
+            return Err(SubmissionError::NotAccepted(before_data()));
+        }
+        self.transport
+            .send_line(&format!("MAIL FROM:<{from}>"))
+            .map_err(SubmissionError::NotAccepted)?;
+        self.read_reply("250")
+            .map_err(SubmissionError::NotAccepted)?;
         for recipient in recipients {
-            self.transport.send_line(&format!("RCPT TO:<{recipient}>"))?;
-            // 250 accepted, 251 will-forward — both are a yes.
-            self.read_reply("25")?;
+            self.transport
+                .send_line(&format!("RCPT TO:<{recipient}>"))
+                .map_err(SubmissionError::NotAccepted)?;
+            self.read_reply("25")
+                .map_err(SubmissionError::NotAccepted)?;
         }
-
-        self.transport.send_line("DATA")?;
-        self.read_reply("354")?;
-        for line in message.split("\r\n") {
-            // Dot-stuffing: a line that begins with a dot gets a second one so
-            // it cannot be read as the end-of-data marker.
-            if line.starts_with('.') {
-                self.transport.send_line(&format!(".{line}"))?;
+        self.transport
+            .send_line("DATA")
+            .map_err(SubmissionError::NotAccepted)?;
+        self.read_reply("354")
+            .map_err(SubmissionError::NotAccepted)?;
+        // Do not add an empty line to MIME that already ends in CRLF.
+        for line in message
+            .strip_suffix("\r\n")
+            .unwrap_or(message)
+            .split("\r\n")
+        {
+            let stuffed = if line.starts_with('.') {
+                format!(".{line}")
             } else {
-                self.transport.send_line(line)?;
-            }
+                line.to_owned()
+            };
+            self.transport
+                .send_line(&stuffed)
+                .map_err(SubmissionError::NotAccepted)?;
         }
-        self.transport.send_line(".")?;
-        self.read_reply("250")?;
-        Ok(())
+        // A write failure may occur after the complete terminator reached SMTP.
+        self.transport
+            .send_line(".")
+            .map_err(SubmissionError::Unknown)?;
+        let reply = self.reply().map_err(SubmissionError::Unknown)?;
+        if reply.starts_with("250 ") {
+            return Ok(());
+        }
+        let error = CoreError::ProviderFailure("SMTP did not acknowledge submission".into());
+        if reply.starts_with('4') || reply.starts_with('5') {
+            Err(SubmissionError::NotAccepted(error))
+        } else {
+            Err(SubmissionError::Unknown(error))
+        }
     }
 
     /// End the session politely. A failure here does not undo a sent message,
@@ -167,19 +223,37 @@ impl<T: SmtpTransport> SmtpClient<T> {
     /// A reply is one or more lines all carrying the code; a `-` right after
     /// the code marks a line as continued, a space marks the last.
     fn read_reply(&mut self, expected_prefix: &str) -> CoreResult<String> {
-        loop {
-            let line = self.transport.read_line()?;
-            let continued = line.as_bytes().get(3) == Some(&b'-');
-            if continued {
-                continue;
-            }
-            if !line.starts_with(expected_prefix) {
+        let reply = self.reply()?;
+        if !reply.starts_with(expected_prefix) {
                 return Err(CoreError::ProviderFailure(format!(
-                    "SMTP expected {expected_prefix}, got: {line}"
-                )));
-            }
-            return Ok(line);
+                    "SMTP expected {expected_prefix}, got: {reply}"
+            )));
         }
+        Ok(reply)
+    }
+
+    fn reply(&mut self) -> CoreResult<String> {
+        let mut code = None;
+        for _ in 0..100 {
+            let line = self.transport.read_line()?;
+            let bytes = line.as_bytes();
+            if bytes.len() < 4
+                || !bytes[..3].iter().all(u8::is_ascii_digit)
+                || !matches!(bytes[3], b'-' | b' ')
+                || code
+                    .as_ref()
+                    .is_some_and(|prior: &String| prior != &line[..3])
+            {
+                return Err(CoreError::ProviderFailure("malformed SMTP reply".into()));
+            }
+            code = Some(line[..3].to_owned());
+            if bytes[3] == b' ' {
+                return Ok(line);
+        }
+        }
+        Err(CoreError::ProviderFailure(
+            "SMTP reply exceeds continuation limit".into(),
+        ))
     }
 }
 

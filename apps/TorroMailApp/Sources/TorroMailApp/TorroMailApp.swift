@@ -517,6 +517,7 @@ struct TorroMailApp: App {
 
     @NSApplicationDelegateAdaptor(TorroMailPresence.self) private var presence
     @StateObject private var model = TorroMailModel.stored()
+    @StateObject private var sendActions = SendActionStore()
     @StateObject private var mcpSupervisor = MCPServerSupervisor()
     @StateObject private var updaterController = UpdaterController()
     @State private var auditWatcher = AuditWatcher()
@@ -556,11 +557,18 @@ struct TorroMailApp: App {
             TorroMailRootView()
                 .preferredTextSize()
                 .environmentObject(model)
+                .environmentObject(sendActions)
                 .environmentObject(mcpSupervisor)
                 .environmentObject(presence)
                 .environmentObject(updaterController)
                 .frame(minWidth: 1080, minHeight: 660)
                 .tint(.torroRed)
+                .task {
+                    while !Task.isCancelled {
+                        await sendActions.refresh(executableName: model.generalSettings.mcpExecutable)
+                        try? await Task.sleep(for: .seconds(5))
+                    }
+                }
                 .task {
                     mcpSupervisor.start(executableName: model.generalSettings.mcpExecutable)
                     let executable = model.generalSettings.mcpExecutable
@@ -702,6 +710,7 @@ struct TorroMailApp: App {
         ) {
             MenuBarContent()
                 .environmentObject(model)
+                .environmentObject(sendActions)
                 .environmentObject(presence)
         }
     }
@@ -758,6 +767,7 @@ private struct MenuBarContent: View {
 }
 
 private struct TorroMailRootView: View {
+    @EnvironmentObject private var sendActions: SendActionStore
     @EnvironmentObject private var model: TorroMailModel
     @EnvironmentObject private var presence: TorroMailPresence
     @Environment(\.openWindow) private var openWindow
@@ -809,6 +819,7 @@ private struct TorroMailRootView: View {
             AccountSetupWizard()
                 .preferredTextSize()
                 .environmentObject(model)
+                .environmentObject(sendActions)
         }
         // Dock clicks and notification taps need to reopen the window, and
         // only a view can reach SwiftUI's window actions.
@@ -886,6 +897,7 @@ private struct TorroMailRootView: View {
 private struct DashboardView: View {
     @Environment(\.textScale) private var textScale
     @EnvironmentObject private var model: TorroMailModel
+    @EnvironmentObject private var sendActions: SendActionStore
     @EnvironmentObject private var mcpSupervisor: MCPServerSupervisor
 
     var body: some View {
@@ -896,7 +908,7 @@ private struct DashboardView: View {
                 } else {
                     ServiceStatusCard()
                     BrokenAccountsCard()
-                    if !model.pendingActions.isEmpty {
+                    if !sendActions.actions.isEmpty || sendActions.notice != nil {
                         PendingApprovalsCard()
                     }
                     AccountsOverviewCard()
@@ -1057,44 +1069,10 @@ private struct StatusTile: View {
 /// The only card that asks for a decision, so it leads with the buttons and
 /// says plainly what it is about to do.
 private struct PendingApprovalsCard: View {
-    @Environment(\.textScale) private var textScale
-    @EnvironmentObject private var model: TorroMailModel
-
     var body: some View {
-        DashboardCard(
-            title: L("Waiting for you"),
-            footer: L("An assistant prepared these. Nothing happens until you approve.")
-        ) {
-            VStack(spacing: 0) {
-                ForEach(Array(model.pendingActions.enumerated()), id: \.element.id) { index, action in
-                    if index > 0 { Divider() }
-                    HStack(spacing: 12 * textScale) {
-                        VStack(alignment: .leading, spacing: 2 * textScale) {
-                            Text(action.subject).scaledFont(.headline).lineLimit(1)
-                            Text(sentence(for: action))
-                                .scaledFont(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 8)
-                        Text(action.expiresIn)
-                            .scaledFont(.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                        Button(L("Reject"), role: .destructive) {}
-                            .buttonStyle(.bordered)
-                        Button(L("Approve")) {}
-                            .torroButton()
-                    }
-                    .scaledPadding(.vertical, 10)
-                }
-            }
+        DashboardCard(title: L("Waiting for you"), footer: L("An assistant prepared these. Nothing happens until you approve.")) {
+            SendApprovalsView()
         }
-    }
-
-    private func sentence(for action: PendingAction) -> String {
-        let account = model.accountName(id: action.accountID) ?? action.accountID
-        return String(format: L("Send to %@ · from %@"), action.recipient, account)
     }
 }
 
@@ -1537,6 +1515,7 @@ private struct CredentialStatusDot: View {
 
 private struct AccountDetailView: View {
     @Environment(\.textScale) private var textScale
+    @EnvironmentObject private var sendActions: SendActionStore
     @EnvironmentObject private var model: TorroMailModel
     @Binding var account: MailAccount
     // Held only for the moment of saving; the keychain is the home.
@@ -1571,7 +1550,7 @@ private struct AccountDetailView: View {
             permissionsSection
             foldersSection
             cacheSection
-            if !account.pendingActions.isEmpty {
+            if sendActions.actions.contains(where: { $0.accountID == account.id }) {
                 pendingSection
             }
             Section {
@@ -2159,31 +2138,9 @@ private struct AccountDetailView: View {
 
     private var pendingSection: some View {
         Section {
-            ForEach(account.pendingActions) { action in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2 * textScale) {
-                        Text(action.subject)
-                            .fontWeight(.medium)
-                        Text(verbatim: "\(action.toolCall) → \(action.recipient)")
-                            .scaledFont(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(action.expiresIn)
-                        .scaledFont(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                    Button(L("Reject"), role: .destructive) {}
-                        .buttonStyle(.bordered)
-                    Button(L("Approve")) {}
-                        .torroButton()
-                }
-                .scaledPadding(.vertical, 2)
-            }
+            SendApprovalsView(accountID: account.id)
         } header: {
             Text(L("Pending Actions"))
-        } footer: {
-            Text(L("Actions an assistant prepared and is waiting for you to approve."))
         }
     }
 

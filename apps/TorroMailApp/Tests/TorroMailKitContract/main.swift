@@ -710,7 +710,7 @@ require(
     Set(storedAccounts?.first?.keys ?? [:].keys) == [
         "id", "name", "email", "provider", "loginMethod", "imapHost",
         "imapPort", "imapSecurity", "smtpHost", "smtpPort", "smtpSecurity",
-        "username", "knownMailboxes", "permissions", "specialMailboxes", "searchCache", "isVerified", "allowCreateDraftsMailbox"
+        "username", "knownMailboxes", "permissions", "specialMailboxes", "searchCache", "isVerified", "allowCreateDraftsMailbox", "sentCopyStrategy", "allowCreateSentMailbox"
     ],
     "the state file stores the configured facts and nothing else"
 )
