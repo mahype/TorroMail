@@ -26,6 +26,9 @@ struct AccountSetupWizard: View {
         case login
         case permissions
         case testing
+        /// The check met a certificate nobody vouches for. Not a failure to
+        /// fix in the fields: a decision only the user can make.
+        case certificate
     }
 
     @State private var step: Step = .identity
@@ -35,6 +38,10 @@ struct AccountSetupWizard: View {
     @State private var password = ""
     @State private var permissions = PermissionSet()
     @State private var failure: String?
+    @State private var untrusted: UntrustedCertificate?
+    /// Fingerprints the user chose to trust during this setup; they travel
+    /// with the account once it is added.
+    @State private var trustedCertificates: [String] = []
     @State private var showManualDetails = false
     /// Set when the user leaves the OAuth step for the server fields. The
     /// escape hatch for a tenant that only filters inbound mail through
@@ -70,6 +77,7 @@ struct AccountSetupWizard: View {
                 case .login: loginStep
                 case .permissions: permissionsStep
                 case .testing: waitingStep(L("Checking the connection…"))
+                case .certificate: certificateStep
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -110,6 +118,7 @@ struct AccountSetupWizard: View {
         case .discovering, .testing: ""
         case .login: discovered.map { "\($0.providerLabel) · \($0.imapHost)" } ?? L("Enter the server by hand.")
         case .permissions: L("The one thing left to decide.")
+        case .certificate: L("This server needs your decision.")
         }
     }
 
@@ -151,6 +160,14 @@ struct AccountSetupWizard: View {
                 }
                 .torroButton()
                 Button(L("Add")) { beginTrial() }
+                    .buttonStyle(.borderedProminent)
+            case .certificate:
+                Button(L("Back")) {
+                    untrusted = nil
+                    step = .login
+                }
+                .torroButton()
+                Button(L("Trust and Add")) { trustCertificate() }
                     .buttonStyle(.borderedProminent)
             case .discovering, .testing:
                 EmptyView()
@@ -372,6 +389,17 @@ struct AccountSetupWizard: View {
         }
     }
 
+    @ViewBuilder
+    private var certificateStep: some View {
+        if let untrusted {
+            ScrollView {
+                UntrustedCertificateNotice(certificate: untrusted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .scaledPadding(20)
+            }
+        }
+    }
+
     private var permissionsStep: some View {
         VStack(spacing: 18 * textScale) {
             Spacer()
@@ -506,22 +534,41 @@ struct AccountSetupWizard: View {
         let candidate = draftAccount()
         let executable = model.generalSettings.mcpExecutable
         Task.detached(priority: .userInitiated) {
-            let state = AccountTrial.check(account: candidate, executableName: executable)
+            let result = AccountTrial.check(account: candidate, executableName: executable)
             await MainActor.run {
-                switch state {
-                case .connected:
+                guard let cause = ConnectionFailure(result) else {
                     password = ""
                     finish()
-                case .failed(let reason):
-                    NSLog("TorroMail: account check failed: %@", reason)
-                    failure = L("The server did not accept these details. Check the password, or open the server details below.")
+                    return
+                }
+                NSLog("TorroMail: account check failed (%@): %@", result.outcome.rawValue, result.detail)
+                switch cause {
+                case let .untrustedCertificate(certificate):
+                    untrusted = certificate
+                    step = .certificate
+                case .serverUnreachable, .encryptionFailed:
+                    // The fix is in the server fields, so they are opened.
+                    showManualDetails = true
+                    failure = cause.sentence
                     step = .login
-                case .notConfigured, .needsTest:
-                    failure = L("The connection could not be checked.")
+                case .credentialsRejected, .other:
+                    failure = cause.sentence
                     step = .login
                 }
             }
         }
+    }
+
+    /// The user looked at the certificate and trusts it: remembered with the
+    /// account, then the same check again — which now gets past TLS and says
+    /// whether the login itself works.
+    private func trustCertificate() {
+        guard let untrusted else { return }
+        if !trustedCertificates.contains(untrusted.sha256) {
+            trustedCertificates.append(untrusted.sha256)
+        }
+        self.untrusted = nil
+        beginTrial()
     }
 
     private func draftAccount() -> MailAccount {
@@ -544,7 +591,8 @@ struct AccountSetupWizard: View {
             smtpSecurity: smtpSecurity,
             username: username.isEmpty ? email : username,
             connectionState: .connected,
-            permissions: permissions
+            permissions: permissions,
+            trustedCertificates: trustedCertificates
         )
     }
 

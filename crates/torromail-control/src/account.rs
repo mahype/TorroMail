@@ -290,6 +290,10 @@ pub struct MailAccount {
     pub allow_create_sent_mailbox: bool,
     pub sent_copy_strategy: String,
     pub cache_level: CacheLevel,
+    /// SHA-256 fingerprints (lowercase hex) of server certificates the user
+    /// chose to trust although verification refuses them. Shared by IMAP and
+    /// SMTP; published into both connection blocks.
+    pub trusted_certificates: Vec<String>,
 }
 
 /// Whether an account id is safe to build a file name from. Ids are UUIDs
@@ -395,6 +399,22 @@ impl MailAccount {
                 .get("allowCreateDraftsMailbox")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            trusted_certificates: match object.get("trustedCertificates") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(entries)) => entries
+                    .iter()
+                    .map(|entry| {
+                        entry.as_str().map(str::to_owned).ok_or_else(|| {
+                            FormatError(format!("{context}: trustedCertificates must be strings"))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => {
+                    return Err(FormatError(format!(
+                        "{context}: trustedCertificates must be an array"
+                    )));
+                }
+            },
             special_mailboxes: object
                 .get("specialMailboxes")
                 .map(special_mailboxes_from_json)
@@ -437,6 +457,9 @@ impl MailAccount {
             json!(self.allow_create_sent_mailbox),
         );
         object.insert("sentCopyStrategy".into(), json!(self.sent_copy_strategy));
+        if !self.trusted_certificates.is_empty() {
+            object.insert("trustedCertificates".into(), json!(self.trusted_certificates));
+        }
         object.insert("permissions".into(), permissions_to_json(&self.permissions));
         object.insert(
             "specialMailboxes".into(),

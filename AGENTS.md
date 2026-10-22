@@ -101,7 +101,12 @@ nor a missing one may take the window down. Deriving is in `HealthLog.derive`
 and is the only place the rule lives: a transport failure needs three
 consecutive strikes to turn the dot red, a refused credential turns it at once
 — a flaky network is not a wrong password, and a false red teaches people to
-ignore the dot.
+ignore the dot. An untrusted server certificate (`untrusted`) also turns it at
+once, and is never reported as a password problem: the app shows the
+certificate's SHA-256 fingerprint with a warning, and the user may trust it
+permanently for that account (`trusted_certificates` in the policy document,
+consulted only when normal verification fails). That is how a self-signed
+local server such as Proton Mail Bridge gets connected.
 
 Core rule: account setup, secret changes, OAuth setup, and permission edits stay
 outside MCP tools. MCP clients can search and read within policy, prepare risky

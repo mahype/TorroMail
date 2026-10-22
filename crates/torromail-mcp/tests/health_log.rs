@@ -312,6 +312,17 @@ fn an_error_maps_to_the_outcome_its_handling_requires() {
         Some(HealthOutcome::Unreachable),
         "a connection that failed on the way may well fix itself"
     );
+    assert_eq!(
+        HealthOutcome::from_error(&CoreError::UntrustedCertificate(
+            torromail_core::UntrustedCertificate {
+                server: "127.0.0.1:1143".to_owned(),
+                reason: "unknown_issuer".to_owned(),
+                sha256: "ab".to_owned(),
+            }
+        )),
+        Some(HealthOutcome::Untrusted),
+        "a refused certificate is neither the password nor the network"
+    );
 }
 
 /// A stored password the process cannot read is on the accusing side of that

@@ -237,6 +237,12 @@ fn connection_object(
         "secret_ref".into(),
         json!(format!("{}{}", context.secret_ref_prefix, account.id)),
     );
+    // The account's trusted certificates go with both blocks: one decision by
+    // the user, and a local bridge or home server usually presents the same
+    // certificate for IMAP and SMTP anyway.
+    if !account.trusted_certificates.is_empty() {
+        object.insert("trusted_certificates".into(), json!(account.trusted_certificates));
+    }
     // OAuth accounts keep a token set behind that reference instead of a
     // password. The server renews it on its own, which is why the endpoint and
     // client id travel with the facts.

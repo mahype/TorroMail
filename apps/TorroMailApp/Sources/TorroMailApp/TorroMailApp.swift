@@ -1144,7 +1144,7 @@ private struct BrokenAccountsCard: View {
         guard case let .failed(message) = account.connectionState, !message.isEmpty else {
             return L("TorroMail can no longer reach this account.")
         }
-        return message
+        return connectionStateText(message)
     }
 }
 
@@ -1508,7 +1508,7 @@ private struct CredentialStatusDot: View {
         case .connected: L("Credentials verified")
         case .needsTest: L("Not tested yet — run Test Connection.")
         case .notConfigured: L("No credentials stored yet.")
-        case let .failed(message): message
+        case let .failed(message): connectionStateText(message)
         }
     }
 }
@@ -1658,7 +1658,29 @@ private struct AccountDetailView: View {
                 .torroButton()
                 .disabled(isCheckingConnection)
             }
+
+            // Where the refusal shows is where the decision is made — the
+            // same one the wizard asks for, for a certificate that changed
+            // since or one an older build could not offer to trust.
+            if let certificate = account.connectionState.untrustedCertificate {
+                UntrustedCertificateNotice(certificate: certificate) {
+                    trust(certificate)
+                }
+                .disabled(isCheckingConnection)
+                .scaledPadding(.vertical, 4)
+            }
         }
+    }
+
+    /// Remembers the certificate with the account and checks again. Published
+    /// here rather than left to the change handler, so the check below reads a
+    /// document that already trusts it.
+    private func trust(_ certificate: UntrustedCertificate) {
+        if !account.trustedCertificates.contains(certificate.sha256) {
+            account.trustedCertificates.append(certificate.sha256)
+        }
+        publishPolicyDocument(for: model.accounts)
+        testConnection()
     }
 
     /// "Last checked 5 min. ago" — shown for a healthy account too, which is
@@ -2230,7 +2252,7 @@ private struct ConnectionStatusBadge: View {
         case .connected: L("Connected")
         case .needsTest: L("Not tested yet")
         case .notConfigured: L("No credentials stored yet")
-        case let .failed(message): message
+        case let .failed(message): connectionStateText(message)
         }
     }
 }

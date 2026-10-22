@@ -7,6 +7,9 @@ public enum HealthOutcome: String, Hashable, Sendable {
     case ok
     case rejected
     case unreachable
+    /// The server presented a certificate nobody vouches for. Neither the
+    /// password nor the network: only a person who looks at it can decide.
+    case untrusted
 }
 
 /// One check, as the server or the app recorded it.
@@ -192,6 +195,8 @@ public enum HealthLog {
             return .connected
         case .rejected:
             return .failed(reason(last, or: "credentials rejected"))
+        case .untrusted:
+            return .failed(reason(last, or: "certificate not trusted"))
         case .unreachable:
             let streak = mine.reversed().prefix { $0.outcome == .unreachable }.count
             guard streak >= grace else {
@@ -202,9 +207,11 @@ public enum HealthLog {
                 guard let settled = mine.last(where: { $0.outcome != .unreachable }) else {
                     return fallback
                 }
-                return settled.outcome == .ok
-                    ? .connected
-                    : .failed(reason(settled, or: "credentials rejected"))
+                switch settled.outcome {
+                case .ok: return .connected
+                case .untrusted: return .failed(reason(settled, or: "certificate not trusted"))
+                default: return .failed(reason(settled, or: "credentials rejected"))
+                }
             }
             return .failed(reason(last, or: "server not reachable"))
         }

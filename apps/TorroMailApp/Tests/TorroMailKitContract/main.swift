@@ -1462,6 +1462,66 @@ require(
     "a failing check shows its reason rather than waiting for a streak"
 )
 
+// A refused certificate travels as the server's sentence (`CoreError`'s
+// display in torromail-core); the decision is offered from what this reads out
+// of it, so the parse is pinned against that exact shape.
+let bridgeDetail = "certificate not trusted: server=127.0.0.1:1143 reason=unknown_issuer sha256=0dfdc9b445e6eda2d1c1cc81d79999725b22b75faab2f34b302fe181ae75ac24 — review and trust it in TorroMail"
+let bridgeCheck = AccountCheckResult.parsing(stderr: "untrusted\n\(bridgeDetail)")
+require(bridgeCheck.outcome == .untrusted, "an untrusted certificate keeps its own outcome word")
+require(
+    ConnectionFailure(bridgeCheck) == .untrustedCertificate(UntrustedCertificate(
+        server: "127.0.0.1:1143",
+        reason: "unknown_issuer",
+        sha256: "0dfdc9b445e6eda2d1c1cc81d79999725b22b75faab2f34b302fe181ae75ac24"
+    )),
+    "a refused certificate is read back with server, reason and fingerprint"
+)
+require(
+    bridgeCheck.state.untrustedCertificate?.displayFingerprint
+        == "0D:FD:C9:B4:45:E6:ED:A2:D1:C1:CC:81:D7:99:99:72:5B:22:B7:5F:AA:B2:F3:4B:30:2F:E1:81:AE:75:AC:24",
+    "the fingerprint is shown the way openssl and Keychain Access print it"
+)
+require(
+    UntrustedCertificate(detail: "certificate not trusted: server=h:993 reason=expired sha256=abc") == nil,
+    "a truncated fingerprint offers nothing to trust"
+)
+require(
+    ConnectionState.failed("credentials rejected: NO").untrustedCertificate == nil,
+    "any other failure offers no certificate decision"
+)
+// Each cause gets its own sentence; only a spoken refusal blames the login.
+require(
+    ConnectionFailure(AccountCheckResult(outcome: .rejected, detail: "credentials rejected: NO")) == .credentialsRejected,
+    "a refused login is the credentials"
+)
+require(
+    ConnectionFailure(AccountCheckResult(
+        outcome: .unreachable,
+        detail: "mail provider failure: connecting 127.0.0.1:1143 failed: Connection refused (os error 61)"
+    )) == .serverUnreachable,
+    "a refused TCP connection is an unreachable server, not a password"
+)
+require(
+    ConnectionFailure(AccountCheckResult(outcome: .unreachable, detail: "the connection check timed out"))
+        == .serverUnreachable,
+    "a check that ran out of time is an unreachable server"
+)
+require(
+    ConnectionFailure(AccountCheckResult(
+        outcome: .unreachable,
+        detail: "mail provider failure: TLS handshake with imap.example.com:143 failed: received corrupt message"
+    )) == .encryptionFailed,
+    "a failed handshake points at the encryption setting"
+)
+require(
+    ConnectionFailure(AccountCheckResult(outcome: .unreachable, detail: "something new")) == .other("something new"),
+    "an unknown failure keeps its own words instead of a guessed cause"
+)
+require(
+    ConnectionFailure(AccountCheckResult(outcome: .ok, detail: "")) == nil,
+    "a passing check is no failure"
+)
+
 // Notifications follow crossings, not states — otherwise a broken account
 // announces itself every fifteen minutes until the user stops reading.
 let brokenAccount = MailAccount(

@@ -28,7 +28,8 @@
 //!              "secret_ref": "keychain://TorroMail/work",
 //!              "auth": "xoauth2",
 //!              "token_endpoint": "https://oauth2.googleapis.com/token",
-//!              "client_id": "…apps.googleusercontent.com"}
+//!              "client_id": "…apps.googleusercontent.com",
+//!              "trusted_certificates": ["0dfdc9b4…"]}
 //!   }],
 //!   "clients": [{
 //!     "id": "claude-desktop",
@@ -402,6 +403,25 @@ fn parse_connection_config(
         }
     };
 
+    // Certificates the user looked at and chose to trust although they fail
+    // verification. Anything but a list of strings is refused: a misread
+    // entry must not quietly trust the wrong certificate, nor drop the right
+    // one and lock a working account out without saying why.
+    let trusted_certificates = match block.get("trusted_certificates") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(str::to_owned).ok_or_else(|| {
+                    "policy document invalid: trusted_certificates must be strings".to_owned()
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => {
+            return Err("policy document invalid: trusted_certificates must be an array".into());
+        }
+    };
+
     Ok(ImapProviderConfig::new(
         AccountId::new(id),
         host,
@@ -410,7 +430,8 @@ fn parse_connection_config(
         SecretRef::new(secret_ref),
     )
     .with_auth(auth)
-    .with_security(security))
+    .with_security(security)
+    .with_trusted_certificates(trusted_certificates))
 }
 
 /// What renewing an access token takes. Deliberately not part of
@@ -534,6 +555,38 @@ mod tests {
             account.smtp.as_ref().expect("the SMTP block parsed").security,
             ConnectionSecurity::StartTls
         );
+    }
+
+    #[test]
+    fn trusted_certificates_reach_both_connections() {
+        let parsed = account_with(
+            r#""imap":{"host":"127.0.0.1","port":1143,"security":"starttls","username":"u","secret_ref":"keychain://s/a","trusted_certificates":["0dfd"]},
+               "smtp":{"host":"127.0.0.1","port":1025,"security":"starttls","username":"u","secret_ref":"keychain://s/a","trusted_certificates":["0dfd"]}"#,
+        );
+        let account = &parsed.accounts[0];
+        assert_eq!(account.imap.as_ref().expect("imap").trusted_certificates, ["0dfd"]);
+        assert_eq!(account.smtp.as_ref().expect("smtp").trusted_certificates, ["0dfd"]);
+    }
+
+    #[test]
+    fn no_trusted_certificates_means_verification_alone() {
+        let parsed = account_with(
+            r#""imap":{"host":"h","port":993,"username":"u","secret_ref":"keychain://s/a"}"#,
+        );
+        assert!(parsed.accounts[0].imap.as_ref().expect("imap").trusted_certificates.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_trusted_certificate_list_is_refused() {
+        // Misread, it would either trust the wrong certificate or quietly drop
+        // the right one and lock a working account out.
+        for value in [r#""0dfd""#, "[1]"] {
+            let outcome = parse_policy_document(&format!(
+                r#"{{"accounts":[{{"id":"a","read":"headers","imap":{{"host":"h","port":993,"username":"u","secret_ref":"keychain://s/a","trusted_certificates":{value}}}}}]}}"#
+            ));
+            let error = outcome.err().expect("a malformed list is an error");
+            assert!(error.contains("trusted_certificates"), "{error}");
+        }
     }
 
     #[test]
