@@ -585,6 +585,108 @@ public struct AccountCheckResult: Hashable, Sendable {
     }
 }
 
+/// A certificate the server presented and verification refused, as the server
+/// reports it: `certificate not trusted: server=… reason=… sha256=…`. Read back
+/// out of a check's detail — the same sentence the health log keeps — so the
+/// decision can be offered wherever the failure shows, without a second
+/// channel that could disagree with the first.
+public struct UntrustedCertificate: Hashable, Sendable {
+    /// `host:port`, as connected to.
+    public var server: String
+    /// `unknown_issuer`, `expired`, `not_yet_valid`, `wrong_name` or `invalid`.
+    public var reason: String
+    /// Lowercase hex, no separators — what goes into `trustedCertificates`.
+    public var sha256: String
+
+    public init(server: String, reason: String, sha256: String) {
+        self.server = server
+        self.reason = reason
+        self.sha256 = sha256
+    }
+
+    /// Nil for any detail that is not a refused certificate.
+    public init?(detail: String) {
+        guard detail.contains("certificate not trusted:") else { return nil }
+        var fields: [String: String] = [:]
+        for token in detail.split(whereSeparator: \.isWhitespace) {
+            guard let equals = token.firstIndex(of: "=") else { continue }
+            fields[String(token[..<equals])] = String(token[token.index(after: equals)...])
+        }
+        guard let sha256 = fields["sha256"]?.lowercased(),
+              sha256.count == 64,
+              sha256.allSatisfy(\.isHexDigit) else {
+            return nil
+        }
+        self.init(server: fields["server"] ?? "", reason: fields["reason"] ?? "invalid", sha256: sha256)
+    }
+
+    /// `0D:FD:C9:…` — the spelling Keychain Access, `openssl` and the Proton
+    /// Mail Bridge show, so the user can compare it with what they see there.
+    public var displayFingerprint: String {
+        var pairs: [String] = []
+        var index = sha256.startIndex
+        while index < sha256.endIndex {
+            let next = sha256.index(index, offsetBy: 2, limitedBy: sha256.endIndex) ?? sha256.endIndex
+            pairs.append(sha256[index..<next].uppercased())
+            index = next
+        }
+        return pairs.joined(separator: ":")
+    }
+}
+
+/// What a failed check means for the person who has to fix it. One sentence
+/// blaming the password for every failure is what sent people re-typing a
+/// correct password at a server whose certificate was the problem — so each
+/// cause gets its own sentence, and only a spoken refusal accuses the login.
+public enum ConnectionFailure: Hashable, Sendable {
+    /// The server answered and refused the login.
+    case credentialsRejected
+    /// The server presented a certificate nobody vouches for.
+    case untrustedCertificate(UntrustedCertificate)
+    /// Nothing answered at that host and port, or not in time.
+    case serverUnreachable
+    /// Something answered, but the encrypted connection did not come up —
+    /// usually SSL/TLS and STARTTLS mixed up.
+    case encryptionFailed
+    /// Anything else; the detail is all there is to say.
+    case other(String)
+
+    /// Nil for a check that worked.
+    public init?(_ result: AccountCheckResult) {
+        switch result.outcome {
+        case .ok:
+            return nil
+        case .rejected:
+            self = .credentialsRejected
+        case .untrusted:
+            self = UntrustedCertificate(detail: result.detail).map(Self.untrustedCertificate)
+                ?? .other(result.detail)
+        case .unreachable:
+            self = Self.classifyUnreachable(result.detail)
+        }
+    }
+
+    /// The server's own phrases (`torromail-imap-tls`), matched as written
+    /// there. A phrase this build does not know falls through to `other`, which
+    /// still shows the detail rather than guessing at a cause.
+    private static func classifyUnreachable(_ detail: String) -> ConnectionFailure {
+        let unreachable = ["connecting ", "connection check timed out", "invalid host"]
+        let encryption = ["TLS handshake with", "STARTTLS refused", "unexpected IMAP greeting",
+                          "closed the connection during STARTTLS", "TLS setup failed"]
+        if encryption.contains(where: detail.contains) { return .encryptionFailed }
+        if unreachable.contains(where: detail.contains) { return .serverUnreachable }
+        return .other(detail)
+    }
+}
+
+extension ConnectionState {
+    /// The refused certificate behind a failure, when that is what failed.
+    public var untrustedCertificate: UntrustedCertificate? {
+        guard case let .failed(detail) = self else { return nil }
+        return UntrustedCertificate(detail: detail)
+    }
+}
+
 /// Collects a subprocess's stderr on a thread of its own.
 ///
 /// Separate from the wait because the reading has to happen *while* the child
@@ -1422,7 +1524,7 @@ public enum AccountTrial {
     public static func check(
         account: MailAccount,
         executableName: String
-    ) -> ConnectionState {
+    ) -> AccountCheckResult {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("torromail-trial-\(account.id).json")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -1439,7 +1541,7 @@ public enum AccountTrial {
             try PolicyDocument.data(for: [account], clients: [appPairing], executableName: executableName)
                 .write(to: url, options: .atomic)
         } catch {
-            return .failed(error.localizedDescription)
+            return AccountCheckResult(outcome: .unreachable, detail: error.localizedDescription)
         }
         // A trial is a manual check: the user is standing in the wizard, so it
         // wants this one check's verdict, not the monitor's patience. Nothing
@@ -1449,7 +1551,7 @@ public enum AccountTrial {
             accountID: account.id,
             executableName: executableName,
             policyURL: url
-        ).state
+        )
     }
 }
 
@@ -3669,6 +3771,10 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
     public var allowCreateDraftsMailbox: Bool
     public var specialMailboxes: SpecialMailboxSettings
     public var searchCache: SearchCacheSettings
+    /// SHA-256 fingerprints (lowercase hex) of server certificates the user
+    /// chose to trust although verification refuses them — a local Proton Mail
+    /// Bridge, a home server. One decision covers IMAP and SMTP.
+    public var trustedCertificates: [String]
     public var pendingActions: [PendingAction]
 
     public init(
@@ -3693,6 +3799,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         allowCreateSentMailbox: Bool = false,
         specialMailboxes: SpecialMailboxSettings = SpecialMailboxSettings(),
         searchCache: SearchCacheSettings = SearchCacheSettings(),
+        trustedCertificates: [String] = [],
         pendingActions: [PendingAction] = []
     ) {
         self.id = id
@@ -3716,6 +3823,7 @@ public struct MailAccount: Identifiable, Hashable, Sendable {
         self.allowCreateSentMailbox = allowCreateSentMailbox
         self.specialMailboxes = specialMailboxes
         self.searchCache = searchCache
+        self.trustedCertificates = trustedCertificates
         self.pendingActions = pendingActions
     }
 
@@ -3747,6 +3855,7 @@ extension MailAccount: Codable {
         case username, knownMailboxes, permissions, specialMailboxes, searchCache, isVerified
         case imapPort, smtpPort, oauthIssuer
         case imapSecurity, smtpSecurity, allowCreateDraftsMailbox, sentCopyStrategy, allowCreateSentMailbox
+        case trustedCertificates
     }
 
     public init(from decoder: Decoder) throws {
@@ -3793,7 +3902,8 @@ extension MailAccount: Codable {
             sentCopyStrategy: try container.decodeIfPresent(SentCopyStrategy.self, forKey: .sentCopyStrategy) ?? .imap,
             allowCreateSentMailbox: try container.decodeIfPresent(Bool.self, forKey: .allowCreateSentMailbox) ?? false,
             specialMailboxes: try container.decodeIfPresent(SpecialMailboxSettings.self, forKey: .specialMailboxes) ?? SpecialMailboxSettings(),
-            searchCache: try container.decode(SearchCacheSettings.self, forKey: .searchCache)
+            searchCache: try container.decode(SearchCacheSettings.self, forKey: .searchCache),
+            trustedCertificates: try container.decodeIfPresent([String].self, forKey: .trustedCertificates) ?? []
         )
     }
 
@@ -3819,6 +3929,9 @@ extension MailAccount: Codable {
         try container.encode(allowCreateSentMailbox, forKey: .allowCreateSentMailbox)
         try container.encode(specialMailboxes, forKey: .specialMailboxes)
         try container.encode(searchCache, forKey: .searchCache)
+        if !trustedCertificates.isEmpty {
+            try container.encode(trustedCertificates, forKey: .trustedCertificates)
+        }
         try container.encode(connectionState == .connected, forKey: .isVerified)
     }
 

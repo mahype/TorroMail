@@ -135,7 +135,7 @@ final class HealthNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// answer to make room for the question.
     private func brokenBody(reason: String) -> String {
         let sentence = L("TorroMail can no longer reach this account.")
-        let detail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = connectionStateText(reason).trimmingCharacters(in: .whitespacesAndNewlines)
         return detail.isEmpty ? sentence : "\(sentence)\n\(detail)"
     }
 

@@ -3291,6 +3291,7 @@ fn send_over_smtp(
         &config.host,
         config.port,
         config.security,
+        &config.trusted_certificates,
         &ehlo_domain(&record.from),
         auth,
     )

@@ -41,6 +41,11 @@ pub enum CoreError {
     /// from `ProviderFailure` because the two need opposite handling — this
     /// one will not fix itself, and retrying it is pointless.
     CredentialRejected(String),
+    /// The server's TLS certificate failed verification and is not one the
+    /// user chose to trust. Neither transient nor the password: only a person
+    /// who looked at the certificate can decide, so it carries what they need
+    /// to look at.
+    UntrustedCertificate(UntrustedCertificate),
     PendingActionNotFound(String),
     PendingActionExpired(String),
     PendingActionAlreadyConfirmed(String),
@@ -73,6 +78,7 @@ impl Display for CoreError {
             Self::CredentialRejected(message) => {
                 write!(f, "credentials rejected: {message}")
             }
+            Self::UntrustedCertificate(certificate) => write!(f, "{certificate}"),
             Self::PendingActionNotFound(id) => write!(f, "pending action not found: {id}"),
             Self::PendingActionExpired(id) => write!(f, "pending action expired: {id}"),
             Self::PendingActionAlreadyConfirmed(id) => {
@@ -81,6 +87,32 @@ impl Display for CoreError {
             Self::SearchResultSetNotFound(id) => write!(f, "search result set not found: {id}"),
             Self::SearchResultSetExpired(id) => write!(f, "search result set expired: {id}"),
         }
+    }
+}
+
+/// A certificate the server presented and verification refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrustedCertificate {
+    /// `host:port`, as connected to.
+    pub server: String,
+    /// Why verification refused it, as one stable word: `unknown_issuer`
+    /// (self-signed included), `expired`, `not_yet_valid`, `wrong_name` or
+    /// `invalid`.
+    pub reason: String,
+    /// SHA-256 of the server's own (leaf) certificate, lowercase hex — what
+    /// the user trusts when they decide to.
+    pub sha256: String,
+}
+
+/// One line with `key=value` tokens: assistants read it as a sentence, and the
+/// configuration surfaces pick the fingerprint out of it without guessing.
+impl Display for UntrustedCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "certificate not trusted: server={} reason={} sha256={} — review and trust it in TorroMail",
+            self.server, self.reason, self.sha256
+        )
     }
 }
 

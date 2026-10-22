@@ -12,14 +12,17 @@ use std::path::Path;
 use serde_json::{Value, json};
 use torromail_core::CoreError;
 
-/// What one login attempt proved. Deliberately three-valued: "we could not
-/// get there" and "it said no" need opposite handling, and collapsing them is
-/// what made every account look green.
+/// What one login attempt proved. "We could not get there" and "it said no"
+/// need opposite handling, and collapsing them is what made every account look
+/// green. `Untrusted` is neither: the server answered with a certificate
+/// nobody vouches for, and only a person who looks at it can decide — the
+/// password is not the problem, and waiting will not fix it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthOutcome {
     Ok,
     Rejected,
     Unreachable,
+    Untrusted,
 }
 
 impl HealthOutcome {
@@ -31,6 +34,7 @@ impl HealthOutcome {
             Self::Ok => "ok",
             Self::Rejected => "rejected",
             Self::Unreachable => "unreachable",
+            Self::Untrusted => "untrusted",
         }
     }
 
@@ -40,6 +44,7 @@ impl HealthOutcome {
             "ok" => Some(Self::Ok),
             "rejected" => Some(Self::Rejected),
             "unreachable" => Some(Self::Unreachable),
+            "untrusted" => Some(Self::Untrusted),
             _ => None,
         }
     }
@@ -51,6 +56,7 @@ impl HealthOutcome {
     pub fn from_error(error: &CoreError) -> Option<Self> {
         match error {
             CoreError::CredentialRejected(_) => Some(Self::Rejected),
+            CoreError::UntrustedCertificate(_) => Some(Self::Untrusted),
             CoreError::ProviderFailure(_) => Some(Self::Unreachable),
             _ => None,
         }
@@ -292,8 +298,9 @@ fn verdict_for(record: &HealthRecord, fallback_reason: &str) -> HealthVerdict {
 /// The status one account's records add up to, or `None` when they settle
 /// nothing and the caller's stored state stands.
 ///
-/// The rule every surface shares: a success is green, refused credentials are
-/// red at once — they will not fix themselves — and an unreachable server only
+/// The rule every surface shares: a success is green, refused credentials and
+/// an untrusted certificate are red at once — neither fixes itself, both wait
+/// for a person — and an unreachable server only
 /// counts after `grace` checks in a row. A streak shorter than that falls back
 /// to the last real verdict, because a couple of missed checks is a network,
 /// not an account, and it is no evidence a refused password started working
@@ -312,6 +319,7 @@ pub fn derive(records: &[HealthRecord], account: &str, grace: usize) -> Option<H
     match last.outcome {
         HealthOutcome::Ok => Some(HealthVerdict::Connected),
         HealthOutcome::Rejected => Some(verdict_for(last, "credentials rejected")),
+        HealthOutcome::Untrusted => Some(verdict_for(last, "certificate not trusted")),
         HealthOutcome::Unreachable => {
             let streak = mine
                 .iter()
@@ -324,7 +332,14 @@ pub fn derive(records: &[HealthRecord], account: &str, grace: usize) -> Option<H
             mine.iter()
                 .rev()
                 .find(|record| record.outcome != HealthOutcome::Unreachable)
-                .map(|settled| verdict_for(settled, "credentials rejected"))
+                .map(|settled| {
+                    let fallback = if settled.outcome == HealthOutcome::Untrusted {
+                        "certificate not trusted"
+                    } else {
+                        "credentials rejected"
+                    };
+                    verdict_for(settled, fallback)
+                })
         }
     }
 }

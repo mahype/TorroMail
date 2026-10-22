@@ -350,11 +350,14 @@ impl Backend {
             CheckOutcome::Ok => (HealthOutcome::Ok, ""),
             CheckOutcome::Rejected(reason) => (HealthOutcome::Rejected, reason.as_str()),
             CheckOutcome::Unreachable(reason) => (HealthOutcome::Unreachable, reason.as_str()),
+            CheckOutcome::Untrusted(reason) => (HealthOutcome::Untrusted, reason.as_str()),
         };
         health::append(&self.data_directory.join(paths::HEALTH_LOG), account_id, word, source, detail);
         match outcome {
             CheckOutcome::Ok => Ok(()),
-            CheckOutcome::Rejected(reason) | CheckOutcome::Unreachable(reason) => Err(reason),
+            CheckOutcome::Rejected(reason)
+            | CheckOutcome::Unreachable(reason)
+            | CheckOutcome::Untrusted(reason) => Err(reason),
         }
     }
 
@@ -506,7 +509,11 @@ pub fn check_account(binary: &Path, policy: &Path, token: &str, account_id: &str
     let mut lines = stderr.lines();
     let word = lines.next().unwrap_or_default();
     let reason = lines.collect::<Vec<_>>().join(" ").trim().to_owned();
-    if word == "rejected" { CheckOutcome::Rejected(reason) } else { CheckOutcome::Unreachable(reason) }
+    match word {
+        "rejected" => CheckOutcome::Rejected(reason),
+        "untrusted" => CheckOutcome::Untrusted(reason),
+        _ => CheckOutcome::Unreachable(reason),
+    }
 }
 
 /// `torromail-mcp --list-account-mailboxes`: a JSON array of wire names on

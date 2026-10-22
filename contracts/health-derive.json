@@ -27,6 +27,30 @@
       "expect": { "state": "failed", "reason": "credentials rejected" }
     },
     {
+      "name": "an untrusted certificate goes red immediately, in the server's own words",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "ok", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "untrusted", "detail": "certificate not trusted: server=h:993 reason=expired sha256=ab" }
+      ],
+      "expect": { "state": "failed", "reason": "certificate not trusted: server=h:993 reason=expired sha256=ab" }
+    },
+    {
+      "name": "an untrusted certificate without a reason still says why",
+      "account": "work",
+      "records": [{ "account": "work", "ts": 100, "outcome": "untrusted", "detail": "" }],
+      "expect": { "state": "failed", "reason": "certificate not trusted" }
+    },
+    {
+      "name": "a short unreachable streak keeps an untrusted certificate red, for the certificate",
+      "account": "work",
+      "records": [
+        { "account": "work", "ts": 100, "outcome": "untrusted", "detail": "" },
+        { "account": "work", "ts": 200, "outcome": "unreachable", "detail": "timed out" }
+      ],
+      "expect": { "state": "failed", "reason": "certificate not trusted" }
+    },
+    {
       "name": "two unreachable checks are a flaky network, not a broken account",
       "account": "work",
       "records": [

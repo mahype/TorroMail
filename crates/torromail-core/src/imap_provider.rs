@@ -96,6 +96,11 @@ pub struct ImapProviderConfig {
     pub secret_ref: SecretRef,
     pub auth: ImapAuth,
     pub security: ConnectionSecurity,
+    /// SHA-256 fingerprints (lowercase hex) of server certificates the user
+    /// chose to trust although verification refuses them — a self-signed
+    /// local bridge, a home server. Matched against the leaf certificate only
+    /// when normal verification fails; a valid certificate needs no entry.
+    pub trusted_certificates: Vec<String>,
 }
 
 impl ImapProviderConfig {
@@ -114,6 +119,7 @@ impl ImapProviderConfig {
             secret_ref,
             auth: ImapAuth::Password,
             security: ConnectionSecurity::Tls,
+            trusted_certificates: Vec::new(),
         }
     }
 
@@ -126,6 +132,12 @@ impl ImapProviderConfig {
     #[must_use]
     pub fn with_security(mut self, security: ConnectionSecurity) -> Self {
         self.security = security;
+        self
+    }
+
+    #[must_use]
+    pub fn with_trusted_certificates(mut self, fingerprints: Vec<String>) -> Self {
+        self.trusted_certificates = fingerprints;
         self
     }
 }

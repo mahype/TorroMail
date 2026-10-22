@@ -28,6 +28,9 @@ pub enum CheckOutcome {
     Rejected(String),
     /// Nothing answered, or not in time.
     Unreachable(String),
+    /// The server presented a certificate nobody vouches for; the reason
+    /// carries its fingerprint for the user to decide on.
+    Untrusted(String),
 }
 
 /// Runs the server's `--check-account` for one account against one policy
@@ -45,7 +48,11 @@ pub enum EnrollError {
 impl std::fmt::Display for EnrollError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Check(CheckOutcome::Rejected(reason) | CheckOutcome::Unreachable(reason)) => formatter.write_str(reason),
+            Self::Check(
+                CheckOutcome::Rejected(reason)
+                | CheckOutcome::Unreachable(reason)
+                | CheckOutcome::Untrusted(reason),
+            ) => formatter.write_str(reason),
             Self::Check(CheckOutcome::Ok) => formatter.write_str("ok"),
             Self::Other(reason) => formatter.write_str(reason),
         }
@@ -92,6 +99,7 @@ pub fn password_account(id: String, name: &str, email: &str, config: &Discovered
         permissions: PermissionSet::default(),
         special_mailboxes: SpecialMailboxes::default(),
         allow_create_drafts_mailbox: false,
+        trusted_certificates: Vec::new(),
         allow_create_sent_mailbox: false,
         sent_copy_strategy: "imap".into(),
         cache_level: CacheLevel::Headers,

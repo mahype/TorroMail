@@ -181,6 +181,19 @@ TCP for local development, and implicit TLS from `torromail-imap-tls`
 (rustls with the bundled Mozilla roots; custom CAs arrive with platform
 verification).
 
+A certificate that verification refuses — the self-signed one a local Proton
+Mail Bridge presents, an expired one, one for another name — is not the end
+of the account. The handshake runs eagerly, so the refusal surfaces as
+`CoreError::UntrustedCertificate` with the server, a reason word and the
+leaf certificate's SHA-256 instead of an anonymous I/O error. The check
+reports it as its own outcome (`untrusted`: red at once, like a refused
+login, but never blamed on the password), and the app shows the fingerprint
+with a plain warning and one decision: trust it. Trusted fingerprints are
+stored per account (`trustedCertificates` in `state.json`) and published as
+`trusted_certificates` in both connection blocks; they are consulted only
+after normal verification fails, and handshake signatures are still checked
+against the trusted certificate's key. A changed certificate asks again.
+
 Secrets close the chain: the app stores passwords in the macOS keychain
 under service `TorroMail`; the policy document carries connection facts and
 the reference (`keychain://TorroMail/{account}`) — never the password. The

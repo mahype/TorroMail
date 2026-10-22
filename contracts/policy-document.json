@@ -1017,6 +1017,126 @@
         "version": 1
       },
       "name": "sent copy strategy none and folder consent survive publication"
+    },
+    {
+      "accounts": [
+        {
+          "allowCreateDraftsMailbox": false,
+          "allowCreateSentMailbox": false,
+          "email": "sven@proton.me",
+          "id": "bridge",
+          "imapHost": "127.0.0.1",
+          "imapPort": 1143,
+          "imapSecurity": "starttls",
+          "isVerified": true,
+          "knownMailboxes": [
+            "INBOX"
+          ],
+          "loginMethod": "password",
+          "name": "Proton",
+          "permissions": {
+            "folderRules": {},
+            "perFolder": false,
+            "read": 2,
+            "send": false,
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanentDelete": false,
+              "trash": false
+            }
+          },
+          "provider": "IMAP/SMTP",
+          "searchCache": {
+            "level": "headers"
+          },
+          "sentCopyStrategy": "imap",
+          "smtpHost": "127.0.0.1",
+          "smtpPort": 1025,
+          "smtpSecurity": "starttls",
+          "specialMailboxes": {
+            "archive": "",
+            "drafts": "",
+            "junk": "",
+            "manual": false,
+            "sent": "",
+            "trash": ""
+          },
+          "trustedCertificates": [
+            "0dfdc9b445e6eda2d1c1cc81d79999725b22b75faab2f34b302fe181ae75ac24"
+          ],
+          "username": "sven@proton.me"
+        }
+      ],
+      "clients": [
+        {
+          "account_access": {
+            "mode": "all"
+          },
+          "id": "claude-code",
+          "name": "Claude Code",
+          "token_sha256": "aa11"
+        }
+      ],
+      "expected": {
+        "accounts": [
+          {
+            "allow_create_drafts_mailbox": false,
+            "allow_create_sent_mailbox": false,
+            "cache": {
+              "level": "headers"
+            },
+            "email": "sven@proton.me",
+            "folder_rules": {},
+            "id": "bridge",
+            "imap": {
+              "host": "127.0.0.1",
+              "port": 1143,
+              "secret_ref": "keychain://TorroMail/bridge",
+              "security": "starttls",
+              "trusted_certificates": [
+                "0dfdc9b445e6eda2d1c1cc81d79999725b22b75faab2f34b302fe181ae75ac24"
+              ],
+              "username": "sven@proton.me"
+            },
+            "name": "Proton",
+            "per_folder": false,
+            "read": "full_message",
+            "send": false,
+            "sent_copy_strategy": "imap",
+            "smtp": {
+              "host": "127.0.0.1",
+              "port": 1025,
+              "secret_ref": "keychain://TorroMail/bridge",
+              "security": "starttls",
+              "trusted_certificates": [
+                "0dfdc9b445e6eda2d1c1cc81d79999725b22b75faab2f34b302fe181ae75ac24"
+              ],
+              "username": "sven@proton.me"
+            },
+            "write": {
+              "drafts": true,
+              "mark": false,
+              "move": false,
+              "permanent_delete": false,
+              "trash": false
+            }
+          }
+        ],
+        "clients": [
+          {
+            "account_access": {
+              "mode": "all"
+            },
+            "id": "claude-code",
+            "name": "Claude Code",
+            "token_sha256": "aa11"
+          }
+        ],
+        "version": 1
+      },
+      "name": "trusted certificates are published with both connection blocks"
     }
   ],
   "secret_ref_prefix": "keychain://TorroMail/"

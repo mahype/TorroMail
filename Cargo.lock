@@ -1798,6 +1798,7 @@ name = "torromail-imap-tls"
 version = "0.14.0"
 dependencies = [
  "rustls",
+ "sha2",
  "torromail-core",
  "webpki-roots 0.26.11",
 ]
