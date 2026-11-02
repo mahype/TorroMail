@@ -5,3 +5,4 @@ dist/
 .superpowers/
 .DS_Store
 .claude/settings.local.json
+.tbd/
