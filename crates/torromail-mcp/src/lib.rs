@@ -1972,8 +1972,56 @@ fn check_account_inner(
     policy_path: Option<PathBuf>,
     presented_token: Option<&str>,
 ) -> Result<String, (HealthOutcome, String)> {
-    let mailboxes = list_account_mailboxes_inner(account_id, policy_path, presented_token, false)?;
-    Ok(format!("login ok, {} mailboxes visible", mailboxes.len()))
+    let account = cli_account(account_id, policy_path, presented_token, false)?;
+    let mailboxes = mailboxes_of(&account)?;
+    // The outgoing server is half of the account: a wrong host, port or
+    // password there stays invisible until the first send unless it is proven
+    // here too. Only reached once IMAP answered, so the verdict a failing
+    // mailbox gets is never overwritten by the smaller question.
+    let outgoing = check_outgoing_server(&account)?;
+    Ok(format!(
+        "login ok, {} mailboxes visible{outgoing}",
+        mailboxes.len()
+    ))
+}
+
+/// Logs into the account's outgoing (SMTP) server without sending anything:
+/// TLS or STARTTLS, EHLO and AUTH, then the session is dropped. The
+/// credential path is the one a send takes, token renewal included. An
+/// account without an outgoing server has nothing to prove and contributes
+/// nothing to the summary.
+///
+/// Failures classify like the mailbox's and say "outgoing server", so whoever
+/// reads them knows which half of the account to fix.
+fn check_outgoing_server(account: &DocumentAccount) -> Result<String, (HealthOutcome, String)> {
+    let Some(config) = account.smtp.as_ref() else {
+        return Ok(String::new());
+    };
+    let outgoing = |error: &CoreError| {
+        let (outcome, message) = classify(error);
+        (outcome, format!("outgoing server: {message}"))
+    };
+    let secret = resolve_credential(config, account.oauth.as_ref()).map_err(|e| outgoing(&e))?;
+    let auth = match config.auth {
+        ImapAuth::Password => SmtpAuth::Login {
+            username: config.username.clone(),
+            secret,
+        },
+        ImapAuth::XOAuth2 => SmtpAuth::XOAuth2 {
+            username: config.username.clone(),
+            access_token: secret,
+        },
+    };
+    torromail_imap_tls::connect_smtp(
+        &config.host,
+        config.port,
+        config.security,
+        &config.trusted_certificates,
+        &ehlo_domain(&account.email),
+        auth,
+    )
+    .map_err(|e| outgoing(&e))?;
+    Ok(", outgoing server login ok".to_owned())
 }
 
 /// The setup app lists real folders for its manual role pickers. It uses the
@@ -1994,6 +2042,18 @@ fn list_account_mailboxes_inner(
     presented_token: Option<&str>,
     app_only: bool,
 ) -> Result<Vec<String>, (HealthOutcome, String)> {
+    let account = cli_account(account_id, policy_path, presented_token, app_only)?;
+    mailboxes_of(&account)
+}
+
+/// The account a CLI command acts on, after the document is read and the
+/// pairing gate (and, for `app_only`, the app-only rule) has been passed.
+fn cli_account(
+    account_id: &str,
+    policy_path: Option<PathBuf>,
+    presented_token: Option<&str>,
+    app_only: bool,
+) -> Result<DocumentAccount, (HealthOutcome, String)> {
     let path = policy_path.ok_or_else(|| unreachable("no policy document path available"))?;
     let text = std::fs::read_to_string(&path)
         .map_err(|error| unreachable(format!("policy document unreadable: {error}")))?;
@@ -2021,13 +2081,17 @@ fn list_account_mailboxes_inner(
     // account whose setup is unfinished is told apart from one nobody has ever
     // heard of. The caller needs that difference: only one of the two is worth
     // asking about again.
-    let account = document
+    document
         .accounts
-        .iter()
+        .into_iter()
         .find(|account| account.policy.account_id().as_str() == account_id)
         .ok_or_else(|| {
             unreachable(CoreError::AccountNotFound(AccountId::new(account_id)).to_string())
-        })?;
+        })
+}
+
+/// Logs into the account's mailbox and lists what can be selected.
+fn mailboxes_of(account: &DocumentAccount) -> Result<Vec<String>, (HealthOutcome, String)> {
     let config = account
         .imap
         .as_ref()
@@ -3674,4 +3738,35 @@ fn escape_json_string(value: &str) -> String {
             character => vec![character],
         })
         .collect()
+}
+
+#[cfg(test)]
+mod outgoing_check_tests {
+    use super::*;
+
+    fn account_from(json: &str) -> DocumentAccount {
+        let mut document = parse_policy_document(json).expect("document parses");
+        document.accounts.remove(0)
+    }
+
+    #[test]
+    fn an_account_without_an_outgoing_server_has_nothing_to_prove() {
+        let account = account_from(
+            r#"{"version":1,"accounts":[{"id":"work","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"imap.example.com","username":"w","secret_ref":"keychain://TorroMail/work"}}]}"#,
+        );
+        assert_eq!(check_outgoing_server(&account), Ok(String::new()));
+    }
+
+    #[test]
+    fn a_dead_outgoing_server_fails_the_check_and_says_which_half() {
+        // Port 1 on loopback refuses at once; the secret is a literal so the
+        // failure is the connection, not the keychain.
+        let account = account_from(
+            r#"{"version":1,"accounts":[{"id":"work","email":"w@example.com","read":"headers","write":{},"send":false,"per_folder":false,"folder_rules":{},"imap":{"host":"imap.example.com","username":"w","secret_ref":"keychain://TorroMail/work"},"smtp":{"host":"127.0.0.1","port":1,"username":"w","secret_ref":"test-only"}}]}"#,
+        );
+        let (outcome, message) =
+            check_outgoing_server(&account).expect_err("a refused connection must fail the check");
+        assert_ne!(outcome, HealthOutcome::Ok);
+        assert!(message.starts_with("outgoing server:"), "got: {message}");
+    }
 }
