@@ -477,14 +477,80 @@ fn decode_quoted_printable(text: &str) -> Vec<u8> {
     bytes
 }
 
+/// Quoted-printable body encoding (RFC 2045 §6.7) for parts we write. Every
+/// line ends in CRLF and no encoded line exceeds 76 characters, so a long
+/// HTML line stays inside the 998-byte limit of RFC 5322. Line breaks of the
+/// input become hard CRLF breaks; overlong lines get `=` soft breaks that
+/// never split an `=XX` escape. The output contains `=` only as an escape or a
+/// soft break, never followed by `_`, which keeps `=_…` boundaries safe.
+pub(crate) fn encode_quoted_printable(text: &str) -> String {
+    const MAX_LINE: usize = 76;
+    let mut encoded = String::with_capacity(text.len() + text.len() / 8);
+
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let bytes = line.as_bytes();
+        let mut tokens: Vec<String> = Vec::with_capacity(bytes.len());
+        for (index, &byte) in bytes.iter().enumerate() {
+            let at_line_end = index + 1 == bytes.len();
+            let literal = match byte {
+                b' ' | b'\t' => !at_line_end,
+                b'=' => false,
+                33..=126 => true,
+                _ => false,
+            };
+            if literal {
+                tokens.push(char::from(byte).to_string());
+            } else {
+                tokens.push(format!("={byte:02X}"));
+            }
+        }
+
+        let mut current = 0;
+        for (index, token) in tokens.iter().enumerate() {
+            // A token that is not the last one may still be followed by a
+            // soft break, which needs one column for its `=`.
+            let limit = if index + 1 == tokens.len() { MAX_LINE } else { MAX_LINE - 1 };
+            if current + token.len() > limit {
+                encoded.push_str("=\r\n");
+                current = 0;
+            }
+            encoded.push_str(token);
+            current += token.len();
+        }
+        encoded.push_str("\r\n");
+    }
+    encoded
+}
+
 /// HTML to something an assistant can read: script and style blocks dropped,
 /// block-level tags turned into line breaks, every other tag removed,
 /// entities resolved. A best effort, not a renderer — but the words survive
 /// and the markup does not.
 fn html_to_text(html: &str) -> String {
-    let cleaned = strip_noise(html);
+    render_html(&strip_noise(html), false)
+}
+
+/// The plain-text alternative TorroMail derives from an assistant's
+/// `html_body`. Like the reading view, but it also drops the `<title>` (a
+/// client never shows it in the body) and names every link target as
+/// ` <target>` after the link text — the person approving the send, and a
+/// recipient whose client only shows text, must see where a link goes.
+/// Targets that add nothing are left out: empty ones, in-page `#anchors`, and
+/// those equal to their own text (also with `mailto:` removed).
+pub fn html_to_plain_text(html: &str) -> String {
+    let cleaned = remove_ranges(&strip_noise(html), "<title", "</title>");
+    collapse_blank_lines(render_html(&cleaned, true).trim())
+}
+
+/// The tag-stripping loop shared by the reading view and the derived
+/// plain-text part. With `links`, each closed `<a href>` gains its target.
+fn render_html(cleaned: &str, links: bool) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
+    // The target of the currently open link and where its text starts in
+    // `out`. A new `<a>` replaces it; one never closed simply lapses.
+    let mut open_link: Option<(String, usize)> = None;
 
     while let Some(character) = chars.next() {
         if character != '<' {
@@ -497,6 +563,20 @@ fn html_to_text(html: &str) -> String {
                 break;
             }
             tag.push(inside);
+        }
+        if links && tag_name(&tag) == "a" {
+            if tag.trim_start().starts_with('/') {
+                if let Some((target, start)) = open_link.take() {
+                    if target_adds_information(&target, &out[start..]) {
+                        out.push_str(" <");
+                        out.push_str(target.trim());
+                        out.push('>');
+                    }
+                }
+            } else {
+                open_link = attribute_value(&tag, "href").map(|target| (target, out.len()));
+            }
+            continue;
         }
         if breaks_line(&tag) {
             out.push('\n');
@@ -585,6 +665,89 @@ fn tag_name(tag: &str) -> String {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+/// One attribute of a start tag (the text between `<` and `>`), its name
+/// matched case-insensitively. Values may be double-quoted, single-quoted or
+/// bare; an attribute without a value yields an empty string.
+fn attribute_value(tag: &str, wanted: &str) -> Option<String> {
+    let chars: Vec<char> = tag.chars().collect();
+    let mut index = 0;
+    // Skip the element name.
+    while index < chars.len() && !chars[index].is_whitespace() && chars[index] != '/' {
+        index += 1;
+    }
+
+    while index < chars.len() {
+        while index < chars.len() && (chars[index].is_whitespace() || chars[index] == '/') {
+            index += 1;
+        }
+        let name_start = index;
+        while index < chars.len()
+            && !chars[index].is_whitespace()
+            && chars[index] != '='
+            && chars[index] != '/'
+        {
+            index += 1;
+        }
+        let name: String = chars[name_start..index].iter().collect();
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+
+        let mut value = String::new();
+        if chars.get(index) == Some(&'=') {
+            index += 1;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            match chars.get(index) {
+                Some(&quote) if quote == '"' || quote == '\'' => {
+                    index += 1;
+                    while index < chars.len() && chars[index] != quote {
+                        value.push(chars[index]);
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                _ => {
+                    while index < chars.len() && !chars[index].is_whitespace() {
+                        value.push(chars[index]);
+                        index += 1;
+                    }
+                }
+            }
+        }
+
+        if name.is_empty() {
+            // Stray `=` or similar: step past it so the scan always advances.
+            index += 1;
+            continue;
+        }
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Whether a link's target tells the reader something its text does not.
+/// Both sides are compared after entity decoding and whitespace folding, the
+/// way the text finally reads.
+fn target_adds_information(target: &str, raw_text: &str) -> bool {
+    let target = decode_entities(target.trim());
+    if target.is_empty() || target.starts_with('#') {
+        return false;
+    }
+    let text = decode_entities(raw_text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let without_mailto = target
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &target[7..]);
+    text != target && without_mailto != Some(text.as_str())
 }
 
 /// The handful of HTML entities that actually show up in mail text, plus
@@ -800,6 +963,78 @@ mod tests {
         assert!(!text.contains("track()"));
         assert!(!text.contains("color:red"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn the_reading_view_still_hides_link_targets() {
+        let text = body_to_text(
+            "<p>Siehe <a href=\"https://example.com/x\">hier</a>.</p>",
+            "text/html",
+            "7bit",
+        );
+        assert_eq!(text, "Siehe hier.");
+    }
+
+    #[test]
+    fn plain_text_alternative_names_link_targets() {
+        let html = concat!(
+            "<html><head><title>Newsletter</title></head><body>",
+            "<header><p>Kopf</p></header>",
+            "<p>Siehe <A HREF=\"https://example.com/a?x=1&amp;y=2\">die Seite</a>.</p>",
+            "<p><a href='https://example.com/b'>https://example.com/b</a></p>",
+            "<p><a href=mailto:me@example.com>me@example.com</a></p>",
+            "<p><a href=\"#oben\">nach oben</a> <a data-href=\"x\" href=\"\">leer</a></p>",
+            "<p><a href=\"https://alt.example\">offen <a href=\"https://neu.example\">neu</a></p>",
+            "</body></html>",
+        );
+        let text = html_to_plain_text(html);
+        assert_eq!(
+            text,
+            "Kopf\n\nSiehe die Seite <https://example.com/a?x=1&y=2>.\n\nhttps://example.com/b\n\nme@example.com\n\nnach oben leer\n\noffen neu <https://neu.example>"
+        );
+    }
+
+    #[test]
+    fn plain_text_alternative_of_an_image_is_empty() {
+        assert_eq!(html_to_plain_text("<p><img src=\"x\"></p>"), "");
+    }
+
+    #[test]
+    fn quoted_printable_wraps_long_lines_without_splitting_escapes() {
+        let encoded = encode_quoted_printable(&"a".repeat(2000));
+        for line in encoded.split_terminator("\r\n") {
+            assert!(line.len() <= 76, "{line}");
+        }
+        assert!(encoded.ends_with("\r\n"));
+        // The hard line end is the only CRLF left once soft breaks vanish.
+        let decoded = String::from_utf8(decode_quoted_printable(&encoded)).expect("UTF-8");
+        assert!(decoded == "a".repeat(2000) + "\r\n", "soft breaks did not rejoin");
+
+        let escapes = encode_quoted_printable(&"ü".repeat(100));
+        for line in escapes.split_terminator("\r\n") {
+            assert!(line.len() <= 76, "{line}");
+            let body = line.strip_suffix('=').unwrap_or(line);
+            assert_eq!(body.len() % 3, 0, "escape split in {line}");
+        }
+        let decoded = String::from_utf8(decode_quoted_printable(&escapes)).expect("UTF-8");
+        assert!(decoded == "ü".repeat(100) + "\r\n", "escapes did not rejoin");
+    }
+
+    #[test]
+    fn quoted_printable_escapes_equals_non_ascii_and_trailing_space() {
+        assert_eq!(encode_quoted_printable("a=b"), "a=3Db\r\n");
+        assert_eq!(encode_quoted_printable("ü"), "=C3=BC\r\n");
+        assert_eq!(encode_quoted_printable("x \nzwei\t"), "x=20\r\nzwei=09\r\n");
+        assert_eq!(encode_quoted_printable("a b\r\nc"), "a b\r\nc\r\n");
+        assert_eq!(encode_quoted_printable(""), "\r\n");
+    }
+
+    #[test]
+    fn quoted_printable_round_trips() {
+        let text = "Grüße = gut\n<p style=\"x\">Ein langer Absatz, der über die Zeilengrenze von sechsundsiebzig Zeichen hinausreicht – mit Gedankenstrich.</p> \nEnde";
+        let decoded = decode_quoted_printable(&encode_quoted_printable(text));
+        let decoded = String::from_utf8(decoded).expect("valid UTF-8");
+        assert_eq!(decoded, text.replace('\n', "\r\n") + "\r\n");
     }
 
     #[test]
