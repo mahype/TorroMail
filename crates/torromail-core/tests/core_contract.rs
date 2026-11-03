@@ -4,7 +4,8 @@ use torromail_core::{
     FixtureMailProvider, FolderRule, MailAccessService, MailProvider, MarkChange,
     OutgoingAttachment, PendingActionRequest, PendingActionStore, PermissionPreset, PermissionSet,
     Policy, PolicyEngine, ReadAccess, SearchHit, SearchSessionStore, SearchWindow, StoredMessage,
-    WriteAccess, compose_message, compose_message_with_attachments,
+    WriteAccess, compose_message, compose_message_with_alternatives,
+    compose_message_with_attachments,
 };
 
 #[test]
@@ -55,6 +56,81 @@ fn compose_without_html_is_byte_identical() {
         with_attachment,
         "From: me@example.com\r\nTo: a@example.com\r\nSubject: Bericht\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"=_TorroMail_mixed_1\"\r\n\r\n--=_TorroMail_mixed_1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nAnbei der Bericht.\r\n\r\n--=_TorroMail_mixed_1\r\nContent-Type: text/plain; name*=UTF-8''Bericht.txt\r\nContent-Disposition: attachment; filename*=UTF-8''Bericht.txt\r\nContent-Transfer-Encoding: base64\r\n\r\nSW5oYWx0\r\n--=_TorroMail_mixed_1--\r\n"
     );
+}
+
+#[test]
+fn compose_with_html_builds_a_quoted_printable_alternative() {
+    let message = compose_message_with_alternatives(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Neu",
+        "Grüße = gut",
+        Some("<p>Grüße = gut</p>"),
+        &[],
+    );
+
+    assert_eq!(
+        message,
+        concat!(
+            "From: me@example.com\r\nTo: a@example.com\r\nSubject: Neu\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"=_TorroMail_alt_1\"\r\n\r\n",
+            "--=_TorroMail_alt_1\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n\r\n",
+            "Gr=C3=BC=C3=9Fe =3D gut\r\n",
+            "--=_TorroMail_alt_1\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n\r\n",
+            "<p>Gr=C3=BC=C3=9Fe =3D gut</p>\r\n",
+            "--=_TorroMail_alt_1--\r\n",
+        )
+    );
+}
+
+#[test]
+fn compose_with_html_and_attachment_nests_the_alternative_in_mixed() {
+    let message = compose_message_with_alternatives(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Neu",
+        "Text",
+        Some("<p>Text</p>"),
+        &[OutgoingAttachment::new("a.bin", "application/octet-stream", vec![1, 2, 3])],
+    );
+
+    let mixed = message
+        .split("Content-Type: multipart/mixed; boundary=\"=_TorroMail_mixed_1\"\r\n\r\n")
+        .nth(1)
+        .expect("top-level multipart/mixed");
+    assert!(mixed.starts_with(
+        "--=_TorroMail_mixed_1\r\nContent-Type: multipart/alternative; boundary=\"=_TorroMail_alt_1\"\r\n\r\n"
+    ));
+    let alternative_end = mixed.find("--=_TorroMail_alt_1--\r\n").expect("alternative closed");
+    let attachment = mixed.find("Content-Disposition: attachment").expect("attachment part");
+    assert!(alternative_end < attachment, "attachment sits after the alternative");
+    assert!(mixed.contains("Content-Type: text/html; charset=utf-8\r\n"));
+    assert!(mixed.contains("Content-Transfer-Encoding: base64\r\n\r\nAQID\r\n"));
+    assert!(message.ends_with("--=_TorroMail_mixed_1--\r\n"));
+}
+
+#[test]
+fn compose_with_a_long_html_line_keeps_every_line_short() {
+    let html = format!("<p>{}</p>", "x".repeat(1500));
+    let message = compose_message_with_alternatives(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Lang",
+        &"y".repeat(1500),
+        Some(&html),
+        &[],
+    );
+
+    for line in message.split("\r\n") {
+        assert!(line.len() + 2 <= 78, "line of {} bytes", line.len());
+    }
 }
 
 #[test]
