@@ -566,12 +566,12 @@ fn render_html(cleaned: &str, links: bool) -> String {
         }
         if links && tag_name(&tag) == "a" {
             if tag.trim_start().starts_with('/') {
-                if let Some((target, start)) = open_link.take() {
-                    if target_adds_information(&target, &out[start..]) {
-                        out.push_str(" <");
-                        out.push_str(target.trim());
-                        out.push('>');
-                    }
+                if let Some((target, start)) = open_link.take()
+                    && target_adds_information(&target, &out[start..])
+                {
+                    out.push_str(" <");
+                    out.push_str(target.trim());
+                    out.push('>');
                 }
             } else {
                 open_link = attribute_value(&tag, "href").map(|target| (target, out.len()));
