@@ -549,7 +549,9 @@ fn render_html(cleaned: &str, links: bool) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
     // The target of the currently open link and where its text starts in
-    // `out`. A new `<a>` replaces it; one never closed simply lapses.
+    // `out`. A link is named when it closes — by `</a>`, by the next `<a>`
+    // (which ends it, as in a browser), or by the end of the document — so an
+    // unclosed or overwritten link can never hide where it goes.
     let mut open_link: Option<(String, usize)> = None;
 
     while let Some(character) = chars.next() {
@@ -558,22 +560,23 @@ fn render_html(cleaned: &str, links: bool) -> String {
             continue;
         }
         let mut tag = String::new();
+        // With links, a `>` inside a quoted attribute value does not end the
+        // tag: the text the person approves must not carry markup remnants.
+        // The reading view keeps its original first-`>` rule.
+        let mut quote: Option<char> = None;
         for inside in chars.by_ref() {
-            if inside == '>' {
-                break;
+            match quote {
+                Some(open) if inside == open => quote = None,
+                Some(_) => {}
+                None if inside == '>' => break,
+                None if links && (inside == '"' || inside == '\'') => quote = Some(inside),
+                None => {}
             }
             tag.push(inside);
         }
         if links && tag_name(&tag) == "a" {
-            if tag.trim_start().starts_with('/') {
-                if let Some((target, start)) = open_link.take()
-                    && target_adds_information(&target, &out[start..])
-                {
-                    out.push_str(" <");
-                    out.push_str(target.trim());
-                    out.push('>');
-                }
-            } else {
+            close_link(&mut out, open_link.take());
+            if !tag.trim_start().starts_with('/') {
                 open_link = attribute_value(&tag, "href").map(|target| (target, out.len()));
             }
             continue;
@@ -584,6 +587,7 @@ fn render_html(cleaned: &str, links: bool) -> String {
             out.push(' ');
         }
     }
+    close_link(&mut out, open_link);
 
     let decoded = decode_entities(&out);
     decoded
@@ -591,6 +595,18 @@ fn render_html(cleaned: &str, links: bool) -> String {
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Name a link's target right after its text, when the target tells the
+/// reader something the text does not. Whitespace or a line break that
+/// already followed the text stays after the target.
+fn close_link(out: &mut String, link: Option<(String, usize)>) {
+    if let Some((target, start)) = link
+        && target_adds_information(&target, &out[start..])
+    {
+        let end = start + out[start..].trim_end().len();
+        out.insert_str(end, &format!(" <{}>", target.trim()));
+    }
 }
 
 /// Drop the parts of an HTML document that carry no readable text: script and
@@ -990,7 +1006,31 @@ mod tests {
         let text = html_to_plain_text(html);
         assert_eq!(
             text,
-            "Kopf\n\nSiehe die Seite <https://example.com/a?x=1&y=2>.\n\nhttps://example.com/b\n\nme@example.com\n\nnach oben leer\n\noffen neu <https://neu.example>"
+            "Kopf\n\nSiehe die Seite <https://example.com/a?x=1&y=2>.\n\nhttps://example.com/b\n\nme@example.com\n\nnach oben leer\n\noffen <https://alt.example> neu <https://neu.example>"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_or_interrupted_link_still_names_its_target() {
+        assert_eq!(
+            html_to_plain_text("<p><a href=\"https://evil.example\">Hier bezahlen</p><p>Gruss</p>"),
+            "Hier bezahlen\n\nGruss <https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<a href=\"https://evil.example\">Zum Banking<a name=\"x\"></a></a>"),
+            "Zum Banking <https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<a href=\"https://evil.example\">Bank &lt;https://good.example&gt;"),
+            "Bank <https://good.example> <https://evil.example>"
+        );
+    }
+
+    #[test]
+    fn a_quoted_angle_bracket_does_not_end_the_tag() {
+        assert_eq!(
+            html_to_plain_text("<a title=\">\" href=\"https://evil.example\">Bank</a>"),
+            "Bank <https://evil.example>"
         );
     }
 
