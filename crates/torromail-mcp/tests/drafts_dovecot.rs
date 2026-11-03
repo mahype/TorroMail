@@ -561,3 +561,101 @@ fn real_sent_copy_creation_refusal_append_failure_restart_and_reconciliation() {
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+/// An HTML draft travels as quoted-printable `multipart/alternative`. The
+/// verified APPEND compares the fetched MIME exactly, so this shows Dovecot
+/// keeps the encoded lines as written; reading the draft back yields the
+/// derived plain text, and the send carries the HTML part.
+#[test]
+#[ignore = "requires disposable Dovecot; run scripts/test-drafts-dovecot.sh"]
+fn real_dovecot_html_draft_with_attachment_is_verified_read_and_sent() {
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let user = format!("html-{suffix}@example.invalid");
+    let directory = std::env::temp_dir().join(format!("torromail-html-drafts-{suffix}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("policy.json");
+    let expected_mailbox =
+        std::env::var("TORROMAIL_TEST_DRAFTS_MAILBOX").unwrap_or_else(|_| "Drafts".into());
+    std::fs::write(
+        &path,
+        json!({"version":1,"accounts":[{
+            "id":"test", "email":"sender@example.invalid", "read":"full_message",
+            "write":{"drafts":true}, "send":true, "allow_create_drafts_mailbox":true,
+            "sent_copy_strategy":"none",
+            "imap":{"host":"test.invalid", "username":"test", "secret_ref":"test-only"},
+            "smtp":{"host":"test.invalid", "username":"test", "secret_ref":"test-only"}
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let fault = Arc::new(AtomicBool::new(false));
+    let html = format!(
+        "<html><body><p>Grüße: siehe <a href=\"https://example.com/angebot\">das Angebot</a>.</p><p>{}</p></body></html>",
+        "lang ".repeat(300)
+    );
+    let draft = payload(&call(
+        &server(&path, &user, fault.clone()),
+        "mail_create_draft",
+        json!({"account_id":"test", "to":["to@example.invalid"], "subject":"HTML-Entwurf", "html_body":html,
+            "attachments":[{"filename":"sample.bin", "content_base64":"AAECA/8=", "media_type":"application/octet-stream"}]}),
+    ));
+    let mailbox = draft["mailbox"].as_str().unwrap();
+    assert_eq!(mailbox, expected_mailbox);
+    let draft_id = draft["draft_id"].as_str().unwrap().to_owned();
+
+    let mut check = client(&user, fault.clone());
+    let hits = check.uid_search(mailbox, "", &Default::default()).unwrap();
+    assert_eq!(hits.len(), 1, "one verified HTML draft");
+    let provider = ImapMailProvider::new(AccountId::new("test"), check);
+    let id = format!("{mailbox}/{}", hits[0]);
+    let stored = provider.get_message(&AccountId::new("test"), &id).unwrap();
+    assert!(
+        stored.body().contains("das Angebot <https://example.com/angebot>"),
+        "{}",
+        stored.body()
+    );
+    assert!(!stored.body().contains("<p>"), "{}", stored.body());
+    assert_eq!(stored.attachments().len(), 1);
+
+    let (smtp_port, sink) = smtp_sink();
+    let sender = server(&path, &user, fault.clone()).with_smtp_override(
+        move |from, recipients, mime| {
+            let socket = TcpStream::connect(("127.0.0.1", smtp_port)).unwrap();
+            let mut smtp = SmtpClient::connect(
+                StreamImapTransport::new(socket),
+                "example.invalid",
+                SmtpAuth::Login {
+                    username: "test".into(),
+                    secret: "test".into(),
+                },
+            )?;
+            let result = smtp.send_message(from, recipients, mime);
+            smtp.quit();
+            result
+        },
+    );
+    let prepared = payload(&call(
+        &sender,
+        "mail_prepare_send",
+        json!({"account_id":"test","draft_id":draft_id}),
+    ));
+    let sent = payload(&call(
+        &sender,
+        "mail_confirm_action",
+        json!({"pending_action_id":prepared["pending_action_id"],"confirmation_code":prepared["confirmation_code"]}),
+    ));
+    assert_eq!(sent["submission_status"], "accepted", "{sent}");
+    let (_, mime) = sink.join().unwrap();
+    assert!(mime.contains("Content-Type: multipart/alternative;"), "{mime}");
+    assert!(mime.contains("Content-Type: text/html; charset=utf-8\r\n"), "{mime}");
+    assert!(mime.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+    assert!(mime.contains("AAECA/8="));
+    std::fs::remove_dir_all(directory).unwrap();
+}
