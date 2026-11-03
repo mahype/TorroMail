@@ -988,6 +988,10 @@ fn html_body_is_refused_with_body_blank_html_or_no_readable_text() {
             serde_json::json!({"body": 5, "html_body": "<p>Text</p>"}),
             "send either body or html_body",
         ),
+        (
+            serde_json::json!({"html_body": "<p>x</p>".repeat(3 * 1024 * 1024)}),
+            "the finished message limit",
+        ),
     ];
 
     for (index, (fields, expected)) in cases.iter().enumerate() {

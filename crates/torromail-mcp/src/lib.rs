@@ -141,7 +141,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string","description":"Plain text. Omit when html_body is given."},"html_body":{"type":"string","minLength":1,"description":"HTML for a formatted message. TorroMail derives the plain-text part from it, link targets included, and that text is what the person approves; do not combine with body. Embedded cid: images are not supported."},"storage":{"type":"string","enum":["imap","local"],"default":"imap","description":"Use local for a durable sendable draft without connecting to IMAP."},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string","description":"Plain text. Omit when html_body is given."},"html_body":{"type":"string","minLength":1,"description":"HTML for a formatted message. TorroMail derives the plain-text part from it, link targets and images included, and that text is what the person approves; do not combine with body. Embedded cid: images are not supported."},"storage":{"type":"string","enum":["imap","local"],"default":"imap","description":"Use local for a durable sendable draft without connecting to IMAP."},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject"]}"#
             }
             ToolName::MailPrepareSend => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
@@ -3071,14 +3071,24 @@ fn compose_and_append(
 /// the text from the HTML itself and refuses a separate `body`: the person
 /// approves the derived text rather than a second text the agent wrote
 /// alongside. The derivation is a best effort, not a renderer — the HTML is
-/// not sanitized, so client-specific markup (such as Outlook conditional
-/// comments) can still show what the text omits. HTML without visible text
-/// is refused — it would be approved from an empty preview.
+/// not sanitized, so CSS-generated text, form values, image content and
+/// client-specific markup (such as Outlook conditional comments) can still
+/// show what the text omits; docs/architecture.md lists these limits. HTML
+/// without visible words is refused — it would be approved from a preview
+/// that says nothing.
 fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure> {
     let html = match arguments.get("html_body") {
         None | Some(Value::Null) => {
             let body = arguments["body"].as_str().unwrap_or_default();
             return Ok((body.to_owned(), None));
+        }
+        // Too large to fit the message anyway; refused before parsing so a
+        // huge document cannot hold the server.
+        Some(Value::String(html)) if html.len() > MAX_MESSAGE_BYTES => {
+            return Err(ToolFailure::InvalidParams(format!(
+                "html_body is {} bytes; the finished message limit is {MAX_MESSAGE_BYTES} bytes",
+                html.len()
+            )));
         }
         Some(Value::String(html)) if !html.trim().is_empty() => html.as_str(),
         Some(_) => {
@@ -3099,7 +3109,12 @@ fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure
         ));
     }
     let text = torromail_core::html_to_plain_text(html);
-    if text.chars().all(is_invisible) {
+    // Image markers do not count as words: an image-only body would be
+    // approved from a preview that says nothing about its content.
+    if torromail_core::html_to_plain_text_without_images(html)
+        .chars()
+        .all(is_invisible)
+    {
         return Err(ToolFailure::InvalidParams(
             "html_body contains no readable text".into(),
         ));
