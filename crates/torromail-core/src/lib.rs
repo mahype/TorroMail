@@ -12,7 +12,7 @@ pub use imap_provider::{
 /// attachment downloads without a second implementation. The plain-text
 /// rendering of an assistant's HTML body is shared the same way: the MCP
 /// layer stores it as the draft text the person approves.
-pub use mime::{encode_base64, html_to_plain_text};
+pub use mime::{encode_base64, html_to_plain_text, html_to_plain_text_without_images};
 
 use std::collections::BTreeMap;
 use std::error::Error;
