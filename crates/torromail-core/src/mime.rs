@@ -528,7 +528,7 @@ pub(crate) fn encode_quoted_printable(text: &str) -> String {
 /// entities resolved. A best effort, not a renderer — but the words survive
 /// and the markup does not.
 fn html_to_text(html: &str) -> String {
-    render_html(&strip_noise(html), false)
+    render_html(&strip_noise(html), None)
 }
 
 /// The plain-text alternative TorroMail derives from an assistant's
@@ -536,16 +536,74 @@ fn html_to_text(html: &str) -> String {
 /// client never shows it in the body) and names every link target as
 /// ` <target>` after the link text — the person approving the send, and a
 /// recipient whose client only shows text, must see where a link goes.
-/// Targets that add nothing are left out: empty ones, in-page `#anchors`, and
-/// those equal to their own text (also with `mailto:` removed).
+/// Targets that add nothing are left out: empty ones, in-page `#anchors`
+/// (unless a `<base>` could send them elsewhere), and those equal to their
+/// own text (also with `mailto:` removed). Its parsing follows the browser
+/// more closely than the reading view, so text a recipient sees is not lost:
+/// only whole `script`/`style`/`title` elements are dropped, a `<` that cannot
+/// start a tag is text, and a `>` ends a tag only outside quoted values.
 pub fn html_to_plain_text(html: &str) -> String {
-    let cleaned = remove_ranges(&strip_noise(html), "<title", "</title>");
-    collapse_blank_lines(render_html(&cleaned, true).trim())
+    let mut cleaned = remove_ranges(html, "<!--", "-->");
+    for element in ["script", "style", "title"] {
+        cleaned = remove_elements(&cleaned, element);
+    }
+    let links = Links {
+        has_base: find_element(&cleaned, "base", 0).is_some(),
+    };
+    collapse_blank_lines(render_html(&cleaned, Some(links)).trim())
+}
+
+/// How the derived plain text treats links; absent for the reading view.
+#[derive(Clone, Copy)]
+struct Links {
+    /// A `<base href>` re-targets relative links, `#fragments` included.
+    has_base: bool,
+}
+
+/// The first `<name` at or after `from` that really opens that element —
+/// followed by whitespace, `>`, `/` or the end, so `<title-bar>` is not a
+/// `<title>`. Case-insensitive; returns the byte offset of the `<`.
+fn find_element(input: &str, name: &str, from: usize) -> Option<usize> {
+    let haystack = input.to_ascii_lowercase();
+    let open = format!("<{name}");
+    let mut cursor = from;
+    while let Some(relative) = haystack[cursor..].find(&open) {
+        let start = cursor + relative;
+        let after = haystack[start + open.len()..].chars().next();
+        if after.is_none_or(|c| c.is_ascii_whitespace() || c == '>' || c == '/') {
+            return Some(start);
+        }
+        cursor = start + open.len();
+    }
+    None
+}
+
+/// Remove every complete `<name …>…</name>` element. An element never closed
+/// takes the rest of the input with it, as it does in a browser for
+/// `script`, `style` and `title`, whose content is raw text.
+fn remove_elements(input: &str, name: &str) -> String {
+    let haystack = input.to_ascii_lowercase();
+    let close = format!("</{name}");
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(start) = find_element(input, name, cursor) {
+        out.push_str(&input[cursor..start]);
+        let Some(end) = haystack[start..].find(&close) else {
+            return out;
+        };
+        let close_start = start + end;
+        cursor = match haystack[close_start..].find('>') {
+            Some(gt) => close_start + gt + 1,
+            None => return out,
+        };
+    }
+    out.push_str(&input[cursor..]);
+    out
 }
 
 /// The tag-stripping loop shared by the reading view and the derived
-/// plain-text part. With `links`, each closed `<a href>` gains its target.
-fn render_html(cleaned: &str, links: bool) -> String {
+/// plain-text part. With `links`, each `<a href>` gains its target.
+fn render_html(cleaned: &str, links: Option<Links>) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
     // The target of the currently open link and where its text starts in
@@ -559,27 +617,60 @@ fn render_html(cleaned: &str, links: bool) -> String {
             out.push(character);
             continue;
         }
+        // In a browser `<` opens a tag only before a letter, `/`, `!` or `?`;
+        // otherwise (`a < b`) it is text the recipient sees.
+        if links.is_some()
+            && !chars
+                .peek()
+                .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
+        {
+            out.push(character);
+            continue;
+        }
         let mut tag = String::new();
         // With links, a `>` inside a quoted attribute value does not end the
-        // tag: the text the person approves must not carry markup remnants.
-        // The reading view keeps its original first-`>` rule.
+        // tag. A quote opens a value only right after `=` (whitespace
+        // between allowed), as in a browser; elsewhere it is an ordinary
+        // character. The reading view keeps its original first-`>` rule.
         let mut quote: Option<char> = None;
+        let mut after_equals = false;
         for inside in chars.by_ref() {
             match quote {
                 Some(open) if inside == open => quote = None,
                 Some(_) => {}
                 None if inside == '>' => break,
-                None if links && (inside == '"' || inside == '\'') => quote = Some(inside),
+                None if links.is_some() && after_equals && (inside == '"' || inside == '\'') => {
+                    quote = Some(inside);
+                }
                 None => {}
+            }
+            if quote.is_none() && !inside.is_whitespace() {
+                after_equals = inside == '=';
+            } else if quote.is_some() {
+                after_equals = false;
             }
             tag.push(inside);
         }
-        if links && tag_name(&tag) == "a" {
-            close_link(&mut out, open_link.take());
-            if !tag.trim_start().starts_with('/') {
-                open_link = attribute_value(&tag, "href").map(|target| (target, out.len()));
+        if let Some(links) = links {
+            let name = tag_name(&tag);
+            let closing = tag.trim_start().starts_with('/');
+            if name == "a" {
+                close_link(&mut out, open_link.take(), links);
+                if !closing {
+                    open_link = link_target(&tag).map(|target| (target, out.len()));
+                }
+                continue;
             }
-            continue;
+            // An image-map area has no text of its own; name its target where
+            // it stands.
+            if name == "area" && !closing {
+                if let Some(target) = link_target(&tag)
+                    && target_adds_information(&target, "", links)
+                {
+                    out.push_str(&format!(" <{}>", target.trim()));
+                }
+                continue;
+            }
         }
         if breaks_line(&tag) {
             out.push('\n');
@@ -587,7 +678,9 @@ fn render_html(cleaned: &str, links: bool) -> String {
             out.push(' ');
         }
     }
-    close_link(&mut out, open_link);
+    if let Some(links) = links {
+        close_link(&mut out, open_link, links);
+    }
 
     let decoded = decode_entities(&out);
     decoded
@@ -597,12 +690,17 @@ fn render_html(cleaned: &str, links: bool) -> String {
         .join("\n")
 }
 
+/// A link's target: `href`, or SVG's `xlink:href`.
+fn link_target(tag: &str) -> Option<String> {
+    attribute_value(tag, "href").or_else(|| attribute_value(tag, "xlink:href"))
+}
+
 /// Name a link's target right after its text, when the target tells the
 /// reader something the text does not. Whitespace or a line break that
 /// already followed the text stays after the target.
-fn close_link(out: &mut String, link: Option<(String, usize)>) {
+fn close_link(out: &mut String, link: Option<(String, usize)>, links: Links) {
     if let Some((target, start)) = link
-        && target_adds_information(&target, &out[start..])
+        && target_adds_information(&target, &out[start..], links)
     {
         let end = start + out[start..].trim_end().len();
         out.insert_str(end, &format!(" <{}>", target.trim()));
@@ -750,9 +848,9 @@ fn attribute_value(tag: &str, wanted: &str) -> Option<String> {
 /// Whether a link's target tells the reader something its text does not.
 /// Both sides are compared after entity decoding and whitespace folding, the
 /// way the text finally reads.
-fn target_adds_information(target: &str, raw_text: &str) -> bool {
+fn target_adds_information(target: &str, raw_text: &str, links: Links) -> bool {
     let target = decode_entities(target.trim());
-    if target.is_empty() || target.starts_with('#') {
+    if target.is_empty() || (target.starts_with('#') && !links.has_base) {
         return false;
     }
     let text = decode_entities(raw_text)
@@ -1031,6 +1129,54 @@ mod tests {
         assert_eq!(
             html_to_plain_text("<a title=\">\" href=\"https://evil.example\">Bank</a>"),
             "Bank <https://evil.example>"
+        );
+    }
+
+    #[test]
+    fn stray_quotes_and_bare_angle_brackets_hide_no_text() {
+        assert_eq!(
+            html_to_plain_text("<p \">Ueberweise an DE99 evil</p><p \">Gruss</p>"),
+            "Ueberweise an DE99 evil\n\nGruss"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>Hallo</p><td title=don't>Zahle an DE99 evil</td><p>Rest</p>"),
+            "Hallo\nZahle an DE99 evil\nRest"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>if a < b it's fine</p><p>Zahle an evil</p>"),
+            "if a < b it's fine\n\nZahle an evil"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>Betrag < 100 EUR, Konto DE99 <b>x</b></p>"),
+            "Betrag < 100 EUR, Konto DE99 x"
+        );
+    }
+
+    #[test]
+    fn only_real_title_script_and_style_elements_are_dropped() {
+        assert_eq!(
+            html_to_plain_text("<p>Hi</p><title-bar>Zahle an evil</title-bar><scripture>Vers</scripture>"),
+            "Hi\nZahle an evilVers"
+        );
+        assert_eq!(
+            html_to_plain_text("<TITLE>weg</TITLE><Script type=x>weg()</Script ><p>da</p>"),
+            "da"
+        );
+    }
+
+    #[test]
+    fn base_area_and_svg_links_name_their_targets() {
+        assert_eq!(
+            html_to_plain_text("<base href=\"https://evil.example/\"><a href=\"#pay\">Pay here</a>"),
+            "Pay here <#pay>"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>Karte</p><map name=\"m\"><area href=\"https://evil.example\"></map>"),
+            "Karte\n<https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<svg><a xlink:href=\"https://evil.example\"><text>Los</text></a></svg>"),
+            "Los <https://evil.example>"
         );
     }
 
