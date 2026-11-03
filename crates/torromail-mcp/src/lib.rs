@@ -141,7 +141,7 @@ impl ToolDescriptor {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"message_ids":{"type":"array","items":{"type":"string"},"description":"IDs from mail_search; each already carries its mailbox."},"mark":{"type":"string","enum":["seen","unseen","flagged","unflagged"]}},"required":["account_id","message_ids","mark"]}"#
             }
             ToolName::MailCreateDraft => {
-                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string"},"storage":{"type":"string","enum":["imap","local"],"default":"imap","description":"Use local for a durable sendable draft without connecting to IMAP."},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject","body"]}"#
+                r#"{"type":"object","properties":{"account_id":{"type":"string"},"to":{"type":"array","items":{"type":"string"}},"cc":{"type":"array","items":{"type":"string"}},"bcc":{"type":"array","items":{"type":"string"}},"subject":{"type":"string"},"body":{"type":"string","description":"Plain text. Omit when html_body is given."},"html_body":{"type":"string","minLength":1,"description":"HTML for a formatted message. TorroMail derives the plain-text part from it, link targets included, and that text is what the person approves; do not combine with body. Embedded cid: images are not supported."},"storage":{"type":"string","enum":["imap","local"],"default":"imap","description":"Use local for a durable sendable draft without connecting to IMAP."},"idempotency_key":{"type":"string","minLength":1,"maxLength":128,"description":"Reuse this key on retries, including after a restart. Use a new key for an intentional second identical draft. Without a key, identical contents are deduplicated for this account and client."},"attachments":{"type":"array","maxItems":20,"description":"Files to attach. Pass bytes as standard padded base64; TorroMail never reads local paths or URLs.","items":{"type":"object","additionalProperties":false,"properties":{"filename":{"type":"string","minLength":1,"maxLength":255},"media_type":{"type":"string","maxLength":127,"description":"IANA media type; defaults to application/octet-stream."},"content_base64":{"type":"string"}},"required":["filename","content_base64"]}}},"required":["account_id","to","subject"]}"#
             }
             ToolName::MailPrepareSend => {
                 r#"{"type":"object","properties":{"account_id":{"type":"string"},"draft_id":{"type":"string"}},"required":["account_id","draft_id"]}"#
@@ -2931,7 +2931,8 @@ fn compose_and_append(
     let cc = string_array(&arguments["cc"]);
     let bcc = string_array(&arguments["bcc"]);
     let subject = arguments["subject"].as_str().unwrap_or_default();
-    let body = arguments["body"].as_str().unwrap_or_default();
+    let (body, html) = draft_bodies(arguments)?;
+    let body = body.as_str();
     let attachments = parse_attachments(&arguments["attachments"])?;
 
     if to.is_empty() {
@@ -2948,12 +2949,13 @@ fn compose_and_append(
             size_bytes: attachment.content().len(),
         })
         .collect::<Vec<_>>();
-    let mut message = torromail_core::compose_message_with_attachments(
+    let mut message = torromail_core::compose_message_with_alternatives(
         from,
         &to,
         &cc,
         subject,
         body,
+        html,
         &attachments,
     );
     if message.len() > MAX_MESSAGE_BYTES {
@@ -3062,6 +3064,40 @@ fn compose_and_append(
         raw: message,
     };
     Ok((mailbox, record))
+}
+
+/// The draft's plain text and optional HTML. Without `html_body` the text is
+/// `body` exactly as before (absent means empty). With it, TorroMail derives
+/// the text from the HTML itself and refuses a separate `body`: the person
+/// approves the derived text, so the HTML cannot say something the approval
+/// never showed. HTML without readable text is refused for the same reason —
+/// it would be approved from an empty preview.
+fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure> {
+    let html = match arguments.get("html_body") {
+        None | Some(Value::Null) => {
+            let body = arguments["body"].as_str().unwrap_or_default();
+            return Ok((body.to_owned(), None));
+        }
+        Some(Value::String(html)) if !html.trim().is_empty() => html.as_str(),
+        Some(_) => {
+            return Err(ToolFailure::InvalidParams(
+                "html_body must be a nonempty string".into(),
+            ));
+        }
+    };
+    if !arguments["body"].as_str().unwrap_or_default().is_empty() {
+        return Err(ToolFailure::InvalidParams(
+            "send either body or html_body; with html_body TorroMail derives the plain-text part"
+                .into(),
+        ));
+    }
+    let text = torromail_core::html_to_plain_text(html);
+    if text.is_empty() {
+        return Err(ToolFailure::InvalidParams(
+            "html_body contains no readable text".into(),
+        ));
+    }
+    Ok((text, Some(html)))
 }
 
 /// Parse the only attachment source TorroMail accepts: bytes carried by the
@@ -3646,7 +3682,7 @@ fn canonical_tools() -> Vec<ToolDescriptor> {
         ),
         prepare(
             ToolName::MailCreateDraft,
-            "Create a plain-text draft with optional base64 attachments when the account policy allows drafts.",
+            "Create a plain-text or HTML draft with optional base64 attachments when the account policy allows drafts.",
         ),
         prepare(
             ToolName::MailPrepareSend,
