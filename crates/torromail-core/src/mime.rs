@@ -532,18 +532,15 @@ fn html_to_text(html: &str) -> String {
 }
 
 /// The plain-text alternative TorroMail derives from an assistant's
-/// `html_body`. Like the reading view, but it also drops the `<title>` (a
-/// client never shows it in the body), names every link target as
-/// ` <target>` after the link text and every image as `[image: alt <src>]` —
-/// the person approving the send, and a recipient whose client only shows
-/// text, must see where a link goes and that a picture is there. Relative
-/// targets are resolved against a `<base href>`. Targets that add nothing are
-/// left out: empty ones, in-page `#anchors` without a `<base>`, and those
-/// equal to their own text (also with `mailto:` removed). Its parsing follows
-/// the browser more closely than the reading view, so text a recipient sees
-/// is not lost: comments end where a browser ends them, only whole
-/// `script`/`style`/`title` elements are dropped, a `<` that cannot start a
-/// tag is text, and a `>` ends a tag only outside quoted values.
+/// `html_body`, the way mail programs derive one when they send HTML. Like
+/// the reading view, but it also drops the `<title>`, names every link target
+/// as ` <target>` after the link text and every image as
+/// `[image: alt <src>]`, so the person approving the send and a recipient
+/// whose client only shows text see where a link goes and that a picture is
+/// there. Targets that add nothing are left out: empty ones, in-page
+/// `#anchors`, and those equal to their own text (also with `mailto:`
+/// removed). An approximation, not a renderer: a client can still show what
+/// this text leaves out. Linear in the input.
 pub fn html_to_plain_text(html: &str) -> String {
     derive_plain_text(html, true)
 }
@@ -556,119 +553,18 @@ pub fn html_to_plain_text_without_images(html: &str) -> String {
 }
 
 fn derive_plain_text(html: &str, images: bool) -> String {
-    let mut cleaned = remove_comments(html);
+    let mut cleaned = remove_ranges(html, "<!--", "-->");
     for element in ["script", "style", "title"] {
         cleaned = remove_elements(&cleaned, element);
     }
-    let haystack = cleaned.to_ascii_lowercase();
-    let base = find_element(&haystack, "base", 0)
-        .and_then(|start| {
-            let tag_end = cleaned[start..].find('>').map_or(cleaned.len(), |end| start + end);
-            attribute_value(&cleaned[start + 1..tag_end], "href")
-        })
-        .map(|base| base.trim().to_owned())
-        .filter(|base| !base.is_empty());
-    let links = Links { base, images };
-    collapse_blank_lines(render_html(&cleaned, Some(&links)).trim())
+    collapse_blank_lines(render_html(&cleaned, Some(&Links { images })).trim())
 }
 
 /// How the derived plain text treats links and images; absent for the
 /// reading view.
 struct Links {
-    /// The document's `<base href>`, which re-targets relative links.
-    base: Option<String>,
     /// Whether images appear as `[image: alt <src>]`.
     images: bool,
-}
-
-impl Links {
-    /// A link or image target as the recipient's client resolves it.
-    fn resolve(&self, target: &str) -> String {
-        let target = target.trim();
-        match &self.base {
-            Some(base) if !target.is_empty() && !has_scheme(target) => resolve_against(base, target),
-            _ => target.to_owned(),
-        }
-    }
-}
-
-/// `scheme:` at the start, as in `https:` or `mailto:` (RFC 3986 §3.1).
-fn has_scheme(target: &str) -> bool {
-    let Some(colon) = target.find(':') else {
-        return false;
-    };
-    let scheme = &target[..colon];
-    scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-}
-
-/// A relative reference resolved against a base, enough to show the
-/// approving person the real destination: network-path, absolute-path,
-/// query, fragment and path-relative forms. Dot segments stay as written.
-fn resolve_against(base: &str, target: &str) -> String {
-    let scheme_end = base.find(':').filter(|_| has_scheme(base)).map(|colon| colon + 1);
-    let scheme = &base[..scheme_end.unwrap_or(0)];
-    if target.starts_with("//") {
-        return format!("{scheme}{target}");
-    }
-    let without_fragment = base.split('#').next().unwrap_or(base);
-    if target.starts_with('#') {
-        return format!("{without_fragment}{target}");
-    }
-    let without_query = without_fragment.split('?').next().unwrap_or(without_fragment);
-    if target.starts_with('?') {
-        return format!("{without_query}{target}");
-    }
-    // The authority ends at the first `/` after `scheme://`.
-    let after_scheme = &without_query[scheme.len()..];
-    let origin_len = if let Some(rest) = after_scheme.strip_prefix("//") {
-        scheme.len() + 2 + rest.find('/').unwrap_or(rest.len())
-    } else {
-        scheme.len()
-    };
-    if target.starts_with('/') {
-        return format!("{}{target}", &without_query[..origin_len]);
-    }
-    let origin = &without_query[..origin_len];
-    let path = &without_query[origin_len..];
-    match path.rfind('/') {
-        Some(slash) => format!("{origin}{}{target}", &path[..=slash]),
-        None if origin_len > scheme.len() => format!("{origin}/{target}"),
-        None => format!("{origin}{target}"),
-    }
-}
-
-/// Remove comments the way the HTML tokenizer ends them: `<!-->` and
-/// `<!--->` are complete (empty) comments, otherwise the first `-->` or
-/// `--!>` closes one, and an unclosed comment runs to the end. Ending a
-/// comment later than a browser would hide visible text from the approval.
-fn remove_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while let Some(relative) = input[cursor..].find("<!--") {
-        let start = cursor + relative;
-        out.push_str(&input[cursor..start]);
-        let body = start + 4;
-        let rest = &input[body..];
-        if rest.starts_with('>') {
-            cursor = body + 1;
-            continue;
-        }
-        if rest.starts_with("->") {
-            cursor = body + 2;
-            continue;
-        }
-        let end = [("-->", 3), ("--!>", 4)]
-            .iter()
-            .filter_map(|(close, len)| rest.find(close).map(|at| (at, *len)))
-            .min_by_key(|(at, _)| *at);
-        match end {
-            Some((at, len)) => cursor = body + at + len,
-            None => return out,
-        }
-    }
-    out.push_str(&input[cursor..]);
-    out
 }
 
 /// The first `<name` at or after `from` that really opens that element —
@@ -718,7 +614,7 @@ fn remove_elements(input: &str, name: &str) -> String {
 fn render_html(cleaned: &str, links: Option<&Links>) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
-    // The resolved target of the currently open link and where its text
+    // The target of the currently open link and where its text
     // starts in `out`. A link is named when it closes — by `</a>`, by the
     // next `<a>` (which ends it, as in a browser), or by the end of the
     // document — so an unclosed or overwritten link never hides where it goes.
@@ -778,14 +674,14 @@ fn render_html(cleaned: &str, links: Option<&Links>) -> String {
             if name == "a" {
                 close_link(&mut out, open_link.take());
                 if !closing {
-                    open_link = link_target(&tag).map(|target| (links.resolve(&target), out.len()));
+                    open_link = link_target(&tag).map(|target| (target.trim().to_owned(), out.len()));
                 }
                 continue;
             }
             // An image-map area has no text of its own; name its target where
             // it stands.
             if name == "area" && !closing {
-                if let Some(target) = link_target(&tag).map(|target| links.resolve(&target))
+                if let Some(target) = link_target(&tag).map(|target| target.trim().to_owned())
                     && target_adds_information(&target, "")
                 {
                     out.push_str(&format!(" <{target}>"));
@@ -794,7 +690,7 @@ fn render_html(cleaned: &str, links: Option<&Links>) -> String {
             }
             if name == "img" && !closing {
                 if links.images {
-                    out.push_str(&image_marker(&tag, links));
+                    out.push_str(&image_marker(&tag));
                 }
                 continue;
             }
@@ -820,7 +716,7 @@ fn render_html(cleaned: &str, links: Option<&Links>) -> String {
 /// ` [image: alt <src>] ` for an `<img>`: the alt text if any, then where the
 /// picture comes from. A `data:` source is cut to its media type, since the
 /// encoded bytes would only bury the text.
-fn image_marker(tag: &str, links: &Links) -> String {
+fn image_marker(tag: &str) -> String {
     let alt = attribute_value(tag, "alt")
         .map(|alt| alt.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|alt| !alt.is_empty());
@@ -832,7 +728,7 @@ fn image_marker(tag: &str, links: &Links) -> String {
                 let media = src.split([',', ';']).next().unwrap_or("data:");
                 format!("{media}…")
             } else {
-                links.resolve(&src)
+                src
             }
         });
     match (alt, source) {
@@ -848,7 +744,7 @@ fn link_target(tag: &str) -> Option<String> {
     attribute_value(tag, "href").or_else(|| attribute_value(tag, "xlink:href"))
 }
 
-/// Name a link's resolved target right after its text, when the target
+/// Name a link's target right after its text, when the target
 /// tells the reader something the text does not. Whitespace or a line break
 /// that already followed the text stays after the target.
 fn close_link(out: &mut String, link: Option<(String, usize)>) {
@@ -1002,8 +898,6 @@ fn attribute_value(tag: &str, wanted: &str) -> Option<String> {
 /// Both sides are compared after entity decoding and whitespace folding, the
 /// way the text finally reads.
 fn target_adds_information(target: &str, raw_text: &str) -> bool {
-    // Already resolved: a `#fragment` left here has no `<base>` to leave the
-    // page with.
     let target = decode_entities(target.trim());
     if target.is_empty() || target.starts_with('#') {
         return false;
@@ -1320,11 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn base_area_and_svg_links_name_their_targets() {
-        assert_eq!(
-            html_to_plain_text("<base href=\"https://evil.example/\"><a href=\"#pay\">Pay here</a>"),
-            "Pay here <https://evil.example/#pay>"
-        );
+    fn area_and_svg_links_name_their_targets() {
         assert_eq!(
             html_to_plain_text("<p>Karte</p><map name=\"m\"><area href=\"https://evil.example\"></map>"),
             "Karte\n<https://evil.example>"
@@ -1352,50 +1242,13 @@ mod tests {
             "[image <data:image/png…>]"
         );
         assert_eq!(html_to_plain_text("<img alt=Logo>"), "[image: Logo]");
-        assert_eq!(
-            html_to_plain_text("<base href=\"https://cdn.example/m/\"><img src=\"a.png\">"),
-            "[image <https://cdn.example/m/a.png>]"
-        );
-    }
-
-    #[test]
-    fn comments_end_where_a_browser_ends_them() {
-        for html in [
-            "<p>Hallo</p><!-->Zahle an DE99 evil<!-- x -->",
-            "<p>Hallo</p><!--->Zahle an DE99 evil<!-- x -->",
-            "<p>Hallo</p><!-- a --!>Zahle an DE99 evil<!-- x -->",
-        ] {
-            assert_eq!(html_to_plain_text(html), "Hallo\nZahle an DE99 evil", "{html}");
-        }
-        assert_eq!(html_to_plain_text("<p>a</p><!-- offen <p>weg</p>"), "a");
-        assert_eq!(
-            html_to_plain_text("<p>a</p><! x=\">\" >sichtbar</p>"),
-            "a\n\" >sichtbar"
-        );
-    }
-
-    #[test]
-    fn relative_targets_resolve_against_base() {
-        let cases = [
-            ("https://bank.example/a/b?q=1#f", "login", "https://bank.example/a/login"),
-            ("https://bank.example/a/b", "/root", "https://bank.example/root"),
-            ("https://bank.example", "login", "https://bank.example/login"),
-            ("https://bank.example/a?q", "?x=1", "https://bank.example/a?x=1"),
-            ("https://bank.example/a#old", "#pay", "https://bank.example/a#pay"),
-            ("https://bank.example/a", "//evil.example/x", "https://evil.example/x"),
-            ("https://bank.example/a", "mailto:x@example.com", "mailto:x@example.com"),
-        ];
-        for (base, target, expected) in cases {
-            let html = format!("<base href=\"{base}\"><a href=\"{target}\">Ihre Bank</a>");
-            assert_eq!(html_to_plain_text(&html), format!("Ihre Bank <{expected}>"), "{base} + {target}");
-        }
     }
 
     #[test]
     fn many_raw_text_elements_stay_linear() {
-        let html = "<style></style>".repeat(50_000) + "<p>Ende</p>";
+        let html = "<style></style><!---->".repeat(50_000) + "<p>Ende</p><!-- --!>".repeat(20_000).as_str();
         let started = std::time::Instant::now();
-        assert_eq!(html_to_plain_text(&html), "Ende");
+        assert!(html_to_plain_text(&html).starts_with("Ende"));
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
     }
 

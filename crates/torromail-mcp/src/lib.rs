@@ -3070,10 +3070,8 @@ fn compose_and_append(
 /// `body` exactly as before (absent means empty). With it, TorroMail derives
 /// the text from the HTML itself and refuses a separate `body`: the person
 /// approves the derived text rather than a second text the agent wrote
-/// alongside. The derivation is a best effort, not a renderer — the HTML is
-/// not sanitized, so CSS-generated text, form values, image content and
-/// client-specific markup (such as Outlook conditional comments) can still
-/// show what the text omits; docs/architecture.md lists these limits. HTML
+/// alongside. The derived text is an approximation, not a renderer, and the
+/// HTML is not sanitized; docs/architecture.md names the limits. HTML
 /// without visible words is refused — it would be approved from a preview
 /// that says nothing.
 fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure> {
