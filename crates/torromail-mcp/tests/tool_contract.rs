@@ -980,6 +980,10 @@ fn html_body_is_refused_with_body_blank_html_or_no_readable_text() {
             serde_json::json!({"html_body": "<img src=\"x\">"}),
             "html_body contains no readable text",
         ),
+        (
+            serde_json::json!({"html_body": "<p>&#8203;\u{200B}\u{FEFF}</p>"}),
+            "html_body contains no readable text",
+        ),
     ];
 
     for (index, (fields, expected)) in cases.iter().enumerate() {

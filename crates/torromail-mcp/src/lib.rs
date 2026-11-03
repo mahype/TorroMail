@@ -3069,9 +3069,11 @@ fn compose_and_append(
 /// The draft's plain text and optional HTML. Without `html_body` the text is
 /// `body` exactly as before (absent means empty). With it, TorroMail derives
 /// the text from the HTML itself and refuses a separate `body`: the person
-/// approves the derived text, so the HTML cannot say something the approval
-/// never showed. HTML without readable text is refused for the same reason —
-/// it would be approved from an empty preview.
+/// approves the derived text rather than a second text the agent wrote
+/// alongside. The derivation is a best effort, not a renderer — the HTML is
+/// not sanitized, so client-specific markup (such as Outlook conditional
+/// comments) can still show what the text omits. HTML without visible text
+/// is refused — it would be approved from an empty preview.
 fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure> {
     let html = match arguments.get("html_body") {
         None | Some(Value::Null) => {
@@ -3092,7 +3094,12 @@ fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure
         ));
     }
     let text = torromail_core::html_to_plain_text(html);
-    if text.is_empty() {
+    // Zero-width and soft-hyphen characters survive whitespace folding but
+    // show nothing.
+    let invisible = |c: char| {
+        c.is_whitespace() || matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+    };
+    if text.chars().all(invisible) {
         return Err(ToolFailure::InvalidParams(
             "html_body contains no readable text".into(),
         ));
