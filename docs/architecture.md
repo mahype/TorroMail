@@ -315,11 +315,14 @@ then the `text/html` part, both UTF-8 and quoted-printable so long HTML lines
 stay within the 998-byte line limit of RFC 5322. With attachments that
 alternative is the first part of the `multipart/mixed`. TorroMail derives the
 plain-text part from the HTML (tags dropped, link targets named as ` <url>`)
-and refuses a separate `body`, so the text the person approves is the text the
-message carries; HTML without readable text is refused. The HTML is not
-sanitized, and `cid:` images (`multipart/related`) are not supported. Without
-`html_body` the message keeps its plain-text shape byte for byte, so drafts in
-the journal keep their idempotency and fingerprint.
+and refuses a separate `body`, so the person approves the text TorroMail derived
+rather than a second text from the agent; HTML without visible text is
+refused. The derivation is a best effort: the HTML is not sanitized, so
+client-specific markup such as Outlook conditional comments can still show
+content the text omits, and `cid:` images (`multipart/related`) are not
+supported. Without `html_body` the message is composed exactly as before,
+byte for byte, so drafts in the journal keep their idempotency and
+fingerprint.
 
 The same lookup applies to Sent, Archive, Junk, and Trash using their IMAP
 special-use attributes and existing common folder names. An account can

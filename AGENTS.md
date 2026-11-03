@@ -149,7 +149,8 @@ Prepared action tools:
   `multipart/mixed` with attachments). TorroMail derives the plain-text part
   from the HTML itself, naming link targets as ` <url>`, and that text is what
   the person approves; `body` is then refused, as is HTML without readable
-  text. Without `html_body` the message stays plain text, byte for byte.
+  text. Without `html_body` the message is composed exactly as before, byte
+  for byte.
 - `mail_prepare_move` — holds a move for confirmation; gated by the move right.
   `target_role` can select the account's Archive or Junk folder instead of an
   explicit `target_mailbox`.
