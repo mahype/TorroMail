@@ -26,6 +26,37 @@ fn compose_message_builds_headers_and_encodes_a_non_ascii_subject() {
     assert!(message.contains("\r\nZeile eins\r\nZeile zwei\r\n"), "{message}");
 }
 
+/// Pinned from the composer before HTML bodies existed: a message without
+/// `html_body` must keep every byte, or the idempotency and fingerprint of
+/// drafts already in the journal stop matching their retries.
+#[test]
+fn compose_without_html_is_byte_identical() {
+    let plain = compose_message(
+        "me@example.com",
+        &["a@example.com".to_owned(), "b@example.com".to_owned()],
+        &["c@example.com".to_owned()],
+        "Grüße aus Köln",
+        "Hallo,\nZeile zwei\r\n\nGruß",
+    );
+    assert_eq!(
+        plain,
+        "From: me@example.com\r\nTo: a@example.com, b@example.com\r\nCc: c@example.com\r\nSubject: =?UTF-8?B?R3LDvMOfZSBhdXMgS8O2bG4=?=\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nHallo,\r\nZeile zwei\r\n\r\nGruß\r\n"
+    );
+
+    let with_attachment = compose_message_with_attachments(
+        "me@example.com",
+        &["a@example.com".to_owned()],
+        &[],
+        "Bericht",
+        "Anbei der Bericht.\n",
+        &[OutgoingAttachment::new("Bericht.txt", "text/plain", b"Inhalt".to_vec())],
+    );
+    assert_eq!(
+        with_attachment,
+        "From: me@example.com\r\nTo: a@example.com\r\nSubject: Bericht\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"=_TorroMail_mixed_1\"\r\n\r\n--=_TorroMail_mixed_1\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nAnbei der Bericht.\r\n\r\n--=_TorroMail_mixed_1\r\nContent-Type: text/plain; name*=UTF-8''Bericht.txt\r\nContent-Disposition: attachment; filename*=UTF-8''Bericht.txt\r\nContent-Transfer-Encoding: base64\r\n\r\nSW5oYWx0\r\n--=_TorroMail_mixed_1--\r\n"
+    );
+}
+
 #[test]
 fn compose_message_builds_a_multipart_attachment() {
     let attachment = OutgoingAttachment::new(
