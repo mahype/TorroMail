@@ -477,32 +477,232 @@ fn decode_quoted_printable(text: &str) -> Vec<u8> {
     bytes
 }
 
+/// Quoted-printable body encoding (RFC 2045 §6.7) for parts we write. Every
+/// line ends in CRLF and no encoded line exceeds 76 characters, so a long
+/// HTML line stays inside the 998-byte limit of RFC 5322. Line breaks of the
+/// input become hard CRLF breaks; overlong lines get `=` soft breaks that
+/// never split an `=XX` escape. The output contains `=` only as an escape or a
+/// soft break, never followed by `_`, which keeps `=_…` boundaries safe.
+pub(crate) fn encode_quoted_printable(text: &str) -> String {
+    const MAX_LINE: usize = 76;
+    let mut encoded = String::with_capacity(text.len() + text.len() / 8);
+
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let bytes = line.as_bytes();
+        let mut tokens: Vec<String> = Vec::with_capacity(bytes.len());
+        for (index, &byte) in bytes.iter().enumerate() {
+            let at_line_end = index + 1 == bytes.len();
+            let literal = match byte {
+                b' ' | b'\t' => !at_line_end,
+                b'=' => false,
+                33..=126 => true,
+                _ => false,
+            };
+            if literal {
+                tokens.push(char::from(byte).to_string());
+            } else {
+                tokens.push(format!("={byte:02X}"));
+            }
+        }
+
+        let mut current = 0;
+        for (index, token) in tokens.iter().enumerate() {
+            // A token that is not the last one may still be followed by a
+            // soft break, which needs one column for its `=`.
+            let limit = if index + 1 == tokens.len() { MAX_LINE } else { MAX_LINE - 1 };
+            if current + token.len() > limit {
+                encoded.push_str("=\r\n");
+                current = 0;
+            }
+            encoded.push_str(token);
+            current += token.len();
+        }
+        encoded.push_str("\r\n");
+    }
+    encoded
+}
+
 /// HTML to something an assistant can read: script and style blocks dropped,
 /// block-level tags turned into line breaks, every other tag removed,
 /// entities resolved. A best effort, not a renderer — but the words survive
 /// and the markup does not.
 fn html_to_text(html: &str) -> String {
-    let cleaned = strip_noise(html);
+    render_html(&strip_noise(html), None)
+}
+
+/// The plain-text alternative TorroMail derives from an assistant's
+/// `html_body`, the way mail programs derive one when they send HTML. Like
+/// the reading view, but it also drops the `<title>`, names every link target
+/// as ` <target>` after the link text and every image as
+/// `[image: alt <src>]`, so the person approving the send and a recipient
+/// whose client only shows text see where a link goes and that a picture is
+/// there. Targets that add nothing are left out: empty ones, in-page
+/// `#anchors`, and those equal to their own text (also with `mailto:`
+/// removed). An approximation, not a renderer: a client can still show what
+/// this text leaves out. Linear in the input.
+pub fn html_to_plain_text(html: &str) -> String {
+    derive_plain_text(html, true)
+}
+
+/// The derived plain text without image markers: what remains to read once
+/// pictures are left aside. HTML whose text is empty here (only images, say)
+/// would be approved from a preview that shows no words.
+pub fn html_to_plain_text_without_images(html: &str) -> String {
+    derive_plain_text(html, false)
+}
+
+fn derive_plain_text(html: &str, images: bool) -> String {
+    let mut cleaned = remove_ranges(html, "<!--", "-->");
+    for element in ["script", "style", "title"] {
+        cleaned = remove_elements(&cleaned, element);
+    }
+    collapse_blank_lines(render_html(&cleaned, Some(&Links { images })).trim())
+}
+
+/// How the derived plain text treats links and images; absent for the
+/// reading view.
+struct Links {
+    /// Whether images appear as `[image: alt <src>]`.
+    images: bool,
+}
+
+/// The first `<name` at or after `from` that really opens that element —
+/// followed by whitespace, `>`, `/` or the end, so `<title-bar>` is not a
+/// `<title>`. `haystack` is the document already ASCII-lowercased (byte
+/// offsets match the original); returns the byte offset of the `<`.
+fn find_element(haystack: &str, name: &str, from: usize) -> Option<usize> {
+    let open = format!("<{name}");
+    let mut cursor = from;
+    while let Some(relative) = haystack[cursor..].find(&open) {
+        let start = cursor + relative;
+        let after = haystack[start + open.len()..].chars().next();
+        if after.is_none_or(|c| c.is_ascii_whitespace() || c == '>' || c == '/') {
+            return Some(start);
+        }
+        cursor = start + open.len();
+    }
+    None
+}
+
+/// Remove every complete `<name …>…</name>` element. An element never closed
+/// takes the rest of the input with it, as it does in a browser for
+/// `script`, `style` and `title`, whose content is raw text.
+fn remove_elements(input: &str, name: &str) -> String {
+    // Lowercased once: per-element lowercasing made large documents quadratic.
+    let haystack = input.to_ascii_lowercase();
+    let close = format!("</{name}");
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(start) = find_element(&haystack, name, cursor) {
+        out.push_str(&input[cursor..start]);
+        let Some(end) = haystack[start..].find(&close) else {
+            return out;
+        };
+        let close_start = start + end;
+        cursor = match haystack[close_start..].find('>') {
+            Some(gt) => close_start + gt + 1,
+            None => return out,
+        };
+    }
+    out.push_str(&input[cursor..]);
+    out
+}
+
+/// The tag-stripping loop shared by the reading view and the derived
+/// plain-text part. With `links`, each `<a href>` gains its target.
+fn render_html(cleaned: &str, links: Option<&Links>) -> String {
     let mut out = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
+    // The target of the currently open link and where its text
+    // starts in `out`. A link is named when it closes — by `</a>`, by the
+    // next `<a>` (which ends it, as in a browser), or by the end of the
+    // document — so an unclosed or overwritten link never hides where it goes.
+    let mut open_link: Option<(String, usize)> = None;
 
     while let Some(character) = chars.next() {
         if character != '<' {
             out.push(character);
             continue;
         }
+        // In a browser `<` opens a tag only before a letter, `/`, `!` or `?`;
+        // otherwise (`a < b`) it is text the recipient sees.
+        if links.is_some()
+            && !chars
+                .peek()
+                .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
+        {
+            out.push(character);
+            continue;
+        }
+        // `<!…>` and `<?…>` are bogus comments to a browser: the first `>`
+        // ends them, quotes or not.
+        let bogus = links.is_some() && chars.peek().is_some_and(|c| matches!(c, '!' | '?'));
         let mut tag = String::new();
+        // With links, a `>` inside a quoted attribute value does not end the
+        // tag. A quote opens a value only right after `=` (whitespace
+        // between allowed), as in a browser; elsewhere it is an ordinary
+        // character. The reading view keeps its original first-`>` rule.
+        let mut quote: Option<char> = None;
+        let mut after_equals = false;
         for inside in chars.by_ref() {
-            if inside == '>' {
-                break;
+            match quote {
+                Some(open) if inside == open => quote = None,
+                Some(_) => {}
+                None if inside == '>' => break,
+                None if links.is_some()
+                    && !bogus
+                    && after_equals
+                    && (inside == '"' || inside == '\'') =>
+                {
+                    quote = Some(inside);
+                }
+                None => {}
+            }
+            if quote.is_none() && !inside.is_whitespace() {
+                after_equals = inside == '=';
+            } else if quote.is_some() {
+                after_equals = false;
             }
             tag.push(inside);
+        }
+        if let Some(links) = links
+            && !bogus
+        {
+            let name = tag_name(&tag);
+            let closing = tag.trim_start().starts_with('/');
+            if name == "a" {
+                close_link(&mut out, open_link.take());
+                if !closing {
+                    open_link = link_target(&tag).map(|target| (target.trim().to_owned(), out.len()));
+                }
+                continue;
+            }
+            // An image-map area has no text of its own; name its target where
+            // it stands.
+            if name == "area" && !closing {
+                if let Some(target) = link_target(&tag).map(|target| target.trim().to_owned())
+                    && target_adds_information(&target, "")
+                {
+                    out.push_str(&format!(" <{target}>"));
+                }
+                continue;
+            }
+            if name == "img" && !closing {
+                if links.images {
+                    out.push_str(&image_marker(&tag));
+                }
+                continue;
+            }
         }
         if breaks_line(&tag) {
             out.push('\n');
         } else if separates_cell(&tag) {
             out.push(' ');
         }
+    }
+    if links.is_some() {
+        close_link(&mut out, open_link);
     }
 
     let decoded = decode_entities(&out);
@@ -511,6 +711,49 @@ fn html_to_text(html: &str) -> String {
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// ` [image: alt <src>] ` for an `<img>`: the alt text if any, then where the
+/// picture comes from. A `data:` source is cut to its media type, since the
+/// encoded bytes would only bury the text.
+fn image_marker(tag: &str) -> String {
+    let alt = attribute_value(tag, "alt")
+        .map(|alt| alt.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|alt| !alt.is_empty());
+    let source = attribute_value(tag, "src")
+        .map(|src| src.trim().to_owned())
+        .filter(|src| !src.is_empty())
+        .map(|src| {
+            if src.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:")) {
+                let media = src.split([',', ';']).next().unwrap_or("data:");
+                format!("{media}…")
+            } else {
+                src
+            }
+        });
+    match (alt, source) {
+        (Some(alt), Some(source)) => format!(" [image: {alt} <{source}>] "),
+        (Some(alt), None) => format!(" [image: {alt}] "),
+        (None, Some(source)) => format!(" [image <{source}>] "),
+        (None, None) => " [image] ".to_owned(),
+    }
+}
+
+/// A link's target: `href`, or SVG's `xlink:href`.
+fn link_target(tag: &str) -> Option<String> {
+    attribute_value(tag, "href").or_else(|| attribute_value(tag, "xlink:href"))
+}
+
+/// Name a link's target right after its text, when the target
+/// tells the reader something the text does not. Whitespace or a line break
+/// that already followed the text stays after the target.
+fn close_link(out: &mut String, link: Option<(String, usize)>) {
+    if let Some((target, start)) = link
+        && target_adds_information(&target, &out[start..])
+    {
+        let end = start + out[start..].trim_end().len();
+        out.insert_str(end, &format!(" <{target}>"));
+    }
 }
 
 /// Drop the parts of an HTML document that carry no readable text: script and
@@ -585,6 +828,89 @@ fn tag_name(tag: &str) -> String {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+/// One attribute of a start tag (the text between `<` and `>`), its name
+/// matched case-insensitively. Values may be double-quoted, single-quoted or
+/// bare; an attribute without a value yields an empty string.
+fn attribute_value(tag: &str, wanted: &str) -> Option<String> {
+    let chars: Vec<char> = tag.chars().collect();
+    let mut index = 0;
+    // Skip the element name.
+    while index < chars.len() && !chars[index].is_whitespace() && chars[index] != '/' {
+        index += 1;
+    }
+
+    while index < chars.len() {
+        while index < chars.len() && (chars[index].is_whitespace() || chars[index] == '/') {
+            index += 1;
+        }
+        let name_start = index;
+        while index < chars.len()
+            && !chars[index].is_whitespace()
+            && chars[index] != '='
+            && chars[index] != '/'
+        {
+            index += 1;
+        }
+        let name: String = chars[name_start..index].iter().collect();
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+
+        let mut value = String::new();
+        if chars.get(index) == Some(&'=') {
+            index += 1;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            match chars.get(index) {
+                Some(&quote) if quote == '"' || quote == '\'' => {
+                    index += 1;
+                    while index < chars.len() && chars[index] != quote {
+                        value.push(chars[index]);
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                _ => {
+                    while index < chars.len() && !chars[index].is_whitespace() {
+                        value.push(chars[index]);
+                        index += 1;
+                    }
+                }
+            }
+        }
+
+        if name.is_empty() {
+            // Stray `=` or similar: step past it so the scan always advances.
+            index += 1;
+            continue;
+        }
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Whether a link's target tells the reader something its text does not.
+/// Both sides are compared after entity decoding and whitespace folding, the
+/// way the text finally reads.
+fn target_adds_information(target: &str, raw_text: &str) -> bool {
+    let target = decode_entities(target.trim());
+    if target.is_empty() || target.starts_with('#') {
+        return false;
+    }
+    let text = decode_entities(raw_text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let without_mailto = target
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &target[7..]);
+    text != target && without_mailto != Some(text.as_str())
 }
 
 /// The handful of HTML entities that actually show up in mail text, plus
@@ -800,6 +1126,168 @@ mod tests {
         assert!(!text.contains("track()"));
         assert!(!text.contains("color:red"));
         assert!(!text.contains('<'));
+    }
+
+    #[test]
+    fn the_reading_view_still_hides_link_targets() {
+        let text = body_to_text(
+            "<p>Siehe <a href=\"https://example.com/x\">hier</a>.</p>",
+            "text/html",
+            "7bit",
+        );
+        assert_eq!(text, "Siehe hier.");
+    }
+
+    #[test]
+    fn plain_text_alternative_names_link_targets() {
+        let html = concat!(
+            "<html><head><title>Newsletter</title></head><body>",
+            "<header><p>Kopf</p></header>",
+            "<p>Siehe <A HREF=\"https://example.com/a?x=1&amp;y=2\">die Seite</a>.</p>",
+            "<p><a href='https://example.com/b'>https://example.com/b</a></p>",
+            "<p><a href=mailto:me@example.com>me@example.com</a></p>",
+            "<p><a href=\"#oben\">nach oben</a> <a data-href=\"x\" href=\"\">leer</a></p>",
+            "<p><a href=\"https://alt.example\">offen <a href=\"https://neu.example\">neu</a></p>",
+            "</body></html>",
+        );
+        let text = html_to_plain_text(html);
+        assert_eq!(
+            text,
+            "Kopf\n\nSiehe die Seite <https://example.com/a?x=1&y=2>.\n\nhttps://example.com/b\n\nme@example.com\n\nnach oben leer\n\noffen <https://alt.example> neu <https://neu.example>"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_or_interrupted_link_still_names_its_target() {
+        assert_eq!(
+            html_to_plain_text("<p><a href=\"https://evil.example\">Hier bezahlen</p><p>Gruss</p>"),
+            "Hier bezahlen\n\nGruss <https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<a href=\"https://evil.example\">Zum Banking<a name=\"x\"></a></a>"),
+            "Zum Banking <https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<a href=\"https://evil.example\">Bank &lt;https://good.example&gt;"),
+            "Bank <https://good.example> <https://evil.example>"
+        );
+    }
+
+    #[test]
+    fn a_quoted_angle_bracket_does_not_end_the_tag() {
+        assert_eq!(
+            html_to_plain_text("<a title=\">\" href=\"https://evil.example\">Bank</a>"),
+            "Bank <https://evil.example>"
+        );
+    }
+
+    #[test]
+    fn stray_quotes_and_bare_angle_brackets_hide_no_text() {
+        assert_eq!(
+            html_to_plain_text("<p \">Ueberweise an DE99 evil</p><p \">Gruss</p>"),
+            "Ueberweise an DE99 evil\n\nGruss"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>Hallo</p><td title=don't>Zahle an DE99 evil</td><p>Rest</p>"),
+            "Hallo\nZahle an DE99 evil\nRest"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>if a < b it's fine</p><p>Zahle an evil</p>"),
+            "if a < b it's fine\n\nZahle an evil"
+        );
+        assert_eq!(
+            html_to_plain_text("<p>Betrag < 100 EUR, Konto DE99 <b>x</b></p>"),
+            "Betrag < 100 EUR, Konto DE99 x"
+        );
+    }
+
+    #[test]
+    fn only_real_title_script_and_style_elements_are_dropped() {
+        assert_eq!(
+            html_to_plain_text("<p>Hi</p><title-bar>Zahle an evil</title-bar><scripture>Vers</scripture>"),
+            "Hi\nZahle an evilVers"
+        );
+        assert_eq!(
+            html_to_plain_text("<TITLE>weg</TITLE><Script type=x>weg()</Script ><p>da</p>"),
+            "da"
+        );
+    }
+
+    #[test]
+    fn area_and_svg_links_name_their_targets() {
+        assert_eq!(
+            html_to_plain_text("<p>Karte</p><map name=\"m\"><area href=\"https://evil.example\"></map>"),
+            "Karte\n<https://evil.example>"
+        );
+        assert_eq!(
+            html_to_plain_text("<svg><a xlink:href=\"https://evil.example\"><text>Los</text></a></svg>"),
+            "Los <https://evil.example>"
+        );
+    }
+
+    #[test]
+    fn an_image_only_document_has_no_words_but_names_the_image() {
+        assert_eq!(html_to_plain_text_without_images("<p><img src=\"x\"></p>"), "");
+        assert_eq!(html_to_plain_text("<p><img src=\"x\"></p>"), "[image <x>]");
+    }
+
+    #[test]
+    fn images_are_named_with_alt_and_source() {
+        assert_eq!(
+            html_to_plain_text("<p>Konto:<img alt=\"Bank  DE99\" src=\"https://cdn.example/k.png\">fertig</p>"),
+            "Konto: [image: Bank DE99 <https://cdn.example/k.png>] fertig"
+        );
+        assert_eq!(
+            html_to_plain_text("<img src=\"data:image/png;base64,AAAA\" alt=\"\">"),
+            "[image <data:image/png…>]"
+        );
+        assert_eq!(html_to_plain_text("<img alt=Logo>"), "[image: Logo]");
+    }
+
+    #[test]
+    fn many_raw_text_elements_stay_linear() {
+        let html = "<style></style><!---->".repeat(50_000) + "<p>Ende</p><!-- --!>".repeat(20_000).as_str();
+        let started = std::time::Instant::now();
+        assert!(html_to_plain_text(&html).starts_with("Ende"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn quoted_printable_wraps_long_lines_without_splitting_escapes() {
+        let encoded = encode_quoted_printable(&"a".repeat(2000));
+        for line in encoded.split_terminator("\r\n") {
+            assert!(line.len() <= 76, "{line}");
+        }
+        assert!(encoded.ends_with("\r\n"));
+        // The hard line end is the only CRLF left once soft breaks vanish.
+        let decoded = String::from_utf8(decode_quoted_printable(&encoded)).expect("UTF-8");
+        assert!(decoded == "a".repeat(2000) + "\r\n", "soft breaks did not rejoin");
+
+        let escapes = encode_quoted_printable(&"ü".repeat(100));
+        for line in escapes.split_terminator("\r\n") {
+            assert!(line.len() <= 76, "{line}");
+            let body = line.strip_suffix('=').unwrap_or(line);
+            assert_eq!(body.len() % 3, 0, "escape split in {line}");
+        }
+        let decoded = String::from_utf8(decode_quoted_printable(&escapes)).expect("UTF-8");
+        assert!(decoded == "ü".repeat(100) + "\r\n", "escapes did not rejoin");
+    }
+
+    #[test]
+    fn quoted_printable_escapes_equals_non_ascii_and_trailing_space() {
+        assert_eq!(encode_quoted_printable("a=b"), "a=3Db\r\n");
+        assert_eq!(encode_quoted_printable("ü"), "=C3=BC\r\n");
+        assert_eq!(encode_quoted_printable("x \nzwei\t"), "x=20\r\nzwei=09\r\n");
+        assert_eq!(encode_quoted_printable("a b\r\nc"), "a b\r\nc\r\n");
+        assert_eq!(encode_quoted_printable(""), "\r\n");
+    }
+
+    #[test]
+    fn quoted_printable_round_trips() {
+        let text = "Grüße = gut\n<p style=\"x\">Ein langer Absatz, der über die Zeilengrenze von sechsundsiebzig Zeichen hinausreicht – mit Gedankenstrich.</p> \nEnde";
+        let decoded = decode_quoted_printable(&encode_quoted_printable(text));
+        let decoded = String::from_utf8(decoded).expect("valid UTF-8");
+        assert_eq!(decoded, text.replace('\n', "\r\n") + "\r\n");
     }
 
     #[test]

@@ -402,3 +402,55 @@ fn process_crash_after_committed_acceptance_recovers_copy_without_smtp() {
         "accepted"
     );
 }
+
+#[test]
+fn an_html_local_draft_keeps_its_html_and_sends_it_unchanged() {
+    let directory = Directory::new();
+    let path = directory.policy("provider", true);
+    let long_line = "x".repeat(1500);
+    let html = format!(
+        "<html><body><p>Hallo, siehe <a href=\"https://example.com/angebot\">das Angebot</a>.</p><p>{long_line}</p></body></html>"
+    );
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_in = captured.clone();
+    let (port, sink) = smtp::smtp_sink();
+    let server = LineMcpServer::with_connect_override(&path, false, |_| {
+        panic!("a local draft with provider copies must not open IMAP")
+    })
+    .with_submission_override(move |from, to, mime| {
+        *captured_in.lock().unwrap() = mime.to_owned();
+        transport(port, from, to, mime)
+    });
+
+    let draft = payload(call(
+        &server,
+        "mail_create_draft",
+        json!({"account_id":"test","storage":"local","to":["to@example.invalid"],"subject":"HTML","html_body":html,
+            "attachments":[{"filename":"test.bin","content_base64":"AAEC/w=="}],"idempotency_key":"html-once"}),
+    ));
+    let disk: Value = serde_json::from_slice(
+        &std::fs::read(stored(&path, draft["draft_id"].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    let raw = disk["record"]["raw"].as_str().unwrap().to_owned();
+    assert!(raw.contains("Content-Type: multipart/mixed;"), "{raw}");
+    assert!(raw.contains("Content-Type: multipart/alternative;"), "{raw}");
+    assert!(raw.contains("Content-Type: text/html; charset=utf-8\r\n"), "{raw}");
+    let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+    assert!(
+        body.split("\r\n").all(|line| line.len() <= 76),
+        "the 1500-character HTML line is wrapped"
+    );
+
+    let action = prepare(&server, &draft);
+    let listed = server.send_action_request(&json!({"action":"list"})).unwrap();
+    let preview = listed[0]["body"].as_str().unwrap();
+    assert!(preview.contains("das Angebot <https://example.com/angebot>"), "{preview}");
+    assert!(!preview.contains("<p>"), "{preview}");
+
+    let result = payload(confirm(&server, &action));
+    assert_eq!(result["submission_status"], "accepted");
+    let (_, wire) = sink.join().unwrap();
+    assert_eq!(*captured.lock().unwrap(), raw, "the send service hands over the stored MIME");
+    assert_eq!(wire, raw, "SMTP DATA carries the stored MIME unchanged");
+}

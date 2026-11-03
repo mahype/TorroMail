@@ -916,6 +916,108 @@ fn a_draft_is_composed_and_appended() {
 }
 
 #[test]
+fn the_draft_schema_offers_html_body_and_no_longer_requires_body() {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&ToolCatalog::default().to_mcp_tools_json()).expect("valid JSON");
+    let tool = manifest["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .find(|tool| tool["name"] == "mail_create_draft")
+        .expect("mail_create_draft listed");
+    let schema = &tool["inputSchema"];
+
+    assert_eq!(schema["properties"]["html_body"]["type"], "string");
+    assert_eq!(schema["properties"]["html_body"]["minLength"], 1);
+    assert!(
+        schema["properties"]["html_body"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("plain-text part")),
+        "got: {schema}"
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["account_id", "to", "subject"])
+    );
+}
+
+#[test]
+fn an_html_draft_is_created() {
+    let server = LineMcpServer::fixture();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 80,
+        "method": "tools/call",
+        "params": {
+            "name": "mail_create_draft",
+            "arguments": {
+                "account_id": "work",
+                "to": ["someone@example.com"],
+                "subject": "Formatiert",
+                "body": "",
+                "html_body": "<p>Hallo <b>Welt</b>, siehe <a href=\"https://example.com\">hier</a>.</p>"
+            }
+        }
+    });
+    let response = server
+        .handle_line(&request.to_string())
+        .expect("a response");
+
+    assert!(response.contains("draft_created"), "got: {response}");
+}
+
+#[test]
+fn html_body_is_refused_with_body_blank_html_or_no_readable_text() {
+    let server = LineMcpServer::fixture();
+    let cases = [
+        (
+            serde_json::json!({"body": "Text", "html_body": "<p>Text</p>"}),
+            "send either body or html_body",
+        ),
+        (serde_json::json!({"html_body": "  \n "}), "html_body must be a nonempty string"),
+        (serde_json::json!({"html_body": 42}), "html_body must be a nonempty string"),
+        (
+            serde_json::json!({"html_body": "<img src=\"x\">"}),
+            "html_body contains no readable text",
+        ),
+        (
+            serde_json::json!({"html_body": "<p>&#8203;\u{200B}\u{FEFF}\u{200E}\u{202E}\u{2800}\u{E0041}</p>"}),
+            "html_body contains no readable text",
+        ),
+        (
+            serde_json::json!({"body": 5, "html_body": "<p>Text</p>"}),
+            "send either body or html_body",
+        ),
+        (
+            serde_json::json!({"html_body": "<p>x</p>".repeat(3 * 1024 * 1024)}),
+            "the finished message limit",
+        ),
+    ];
+
+    for (index, (fields, expected)) in cases.iter().enumerate() {
+        let mut arguments = serde_json::json!({
+            "account_id": "work",
+            "to": ["someone@example.com"],
+            "subject": "HTML"
+        });
+        for (key, value) in fields.as_object().expect("fields object") {
+            arguments[key] = value.clone();
+        }
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 81 + index,
+            "method": "tools/call",
+            "params": {"name": "mail_create_draft", "arguments": arguments}
+        });
+        let response = server
+            .handle_line(&request.to_string())
+            .expect("a response");
+        assert!(response.contains(r#""code":-32602"#), "got: {response}");
+        assert!(response.contains(expected), "got: {response}");
+    }
+}
+
+#[test]
 fn create_draft_uses_an_existing_localized_folder() {
     let path = temp_policy_path("localized-drafts");
     fixture_account_document(&path);

@@ -9,8 +9,10 @@ pub use imap_provider::{
     ImapTransport, SecretRef, StreamImapTransport, TcpImapTransport,
 };
 /// Standard padded base64, shared so the MCP layer can inline small
-/// attachment downloads without a second implementation.
-pub use mime::encode_base64;
+/// attachment downloads without a second implementation. The plain-text
+/// rendering of an assistant's HTML body is shared the same way: the MCP
+/// layer stores it as the draft text the person approves.
+pub use mime::{encode_base64, html_to_plain_text, html_to_plain_text_without_images};
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -1350,6 +1352,26 @@ pub fn compose_message_with_attachments(
     body: &str,
     attachments: &[OutgoingAttachment],
 ) -> String {
+    compose_message_with_alternatives(from, to, cc, subject, body, None, attachments)
+}
+
+/// Compose with an optional HTML alternative. `None` is exactly
+/// [`compose_message_with_attachments`]. With `Some(html)` the body becomes
+/// `multipart/alternative` — `text` first, then `html`, both UTF-8 and
+/// quoted-printable so long HTML lines stay within RFC 5322's line limit —
+/// and with attachments that alternative is the first part of a
+/// `multipart/mixed`. The boundaries are fixed: quoted-printable output never
+/// contains `=_` and base64 never contains `-`, so no part can collide.
+pub fn compose_message_with_alternatives(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    text: &str,
+    html: Option<&str>,
+    attachments: &[OutgoingAttachment],
+) -> String {
+    let body = text;
     let mut message = String::new();
     message.push_str(&format!("From: {from}\r\n"));
     message.push_str(&format!("To: {}\r\n", to.join(", ")));
@@ -1358,6 +1380,21 @@ pub fn compose_message_with_attachments(
     }
     message.push_str(&format!("Subject: {}\r\n", mime::encode_rfc2047(subject)));
     message.push_str("MIME-Version: 1.0\r\n");
+
+    if let Some(html) = html {
+        if attachments.is_empty() {
+            append_alternative_entity(&mut message, text, html);
+            return message;
+        }
+        const MIXED: &str = "=_TorroMail_mixed_1";
+        message.push_str(&format!(
+            "Content-Type: multipart/mixed; boundary=\"{MIXED}\"\r\n\r\n"
+        ));
+        message.push_str(&format!("--{MIXED}\r\n"));
+        append_alternative_entity(&mut message, text, html);
+        append_attachment_parts(&mut message, MIXED, attachments);
+        return message;
+    }
 
     if attachments.is_empty() {
         append_plain_text_part(&mut message, body);
@@ -1371,7 +1408,13 @@ pub fn compose_message_with_attachments(
 
     message.push_str(&format!("--{boundary}\r\n"));
     append_plain_text_part(&mut message, body);
+    append_attachment_parts(&mut message, &boundary, attachments);
+    message
+}
 
+/// Every attachment as a base64 part of the open `multipart/mixed`, then the
+/// closing delimiter.
+fn append_attachment_parts(message: &mut String, boundary: &str, attachments: &[OutgoingAttachment]) {
     for attachment in attachments {
         message.push_str(&format!("--{boundary}\r\n"));
         let filename = mime_parameter_value(attachment.filename());
@@ -1383,11 +1426,27 @@ pub fn compose_message_with_attachments(
             "Content-Disposition: attachment; filename*=UTF-8''{filename}\r\n"
         ));
         message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
-        append_wrapped_base64(&mut message, attachment.content());
+        append_wrapped_base64(message, attachment.content());
     }
 
     message.push_str(&format!("--{boundary}--\r\n"));
-    message
+}
+
+/// A complete `multipart/alternative` entity — its headers, the text part,
+/// the HTML part and the closing delimiter — so it can stand as the whole
+/// body or as the first part of a `multipart/mixed`.
+fn append_alternative_entity(message: &mut String, text: &str, html: &str) {
+    const ALTERNATIVE: &str = "=_TorroMail_alt_1";
+    message.push_str(&format!(
+        "Content-Type: multipart/alternative; boundary=\"{ALTERNATIVE}\"\r\n\r\n"
+    ));
+    for (media_type, content) in [("text/plain", text), ("text/html", html)] {
+        message.push_str(&format!("--{ALTERNATIVE}\r\n"));
+        message.push_str(&format!("Content-Type: {media_type}; charset=utf-8\r\n"));
+        message.push_str("Content-Transfer-Encoding: quoted-printable\r\n\r\n");
+        message.push_str(&mime::encode_quoted_printable(content));
+    }
+    message.push_str(&format!("--{ALTERNATIVE}--\r\n"));
 }
 
 fn append_plain_text_part(message: &mut String, body: &str) {
