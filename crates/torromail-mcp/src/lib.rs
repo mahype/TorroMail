@@ -3087,24 +3087,50 @@ fn draft_bodies(arguments: &Value) -> Result<(String, Option<&str>), ToolFailure
             ));
         }
     };
-    if !arguments["body"].as_str().unwrap_or_default().is_empty() {
+    let body_given = match arguments.get("body") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(body)) => !body.is_empty(),
+        Some(_) => true,
+    };
+    if body_given {
         return Err(ToolFailure::InvalidParams(
             "send either body or html_body; with html_body TorroMail derives the plain-text part"
                 .into(),
         ));
     }
     let text = torromail_core::html_to_plain_text(html);
-    // Zero-width and soft-hyphen characters survive whitespace folding but
-    // show nothing.
-    let invisible = |c: char| {
-        c.is_whitespace() || matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
-    };
-    if text.chars().all(invisible) {
+    if text.chars().all(is_invisible) {
         return Err(ToolFailure::InvalidParams(
             "html_body contains no readable text".into(),
         ));
     }
     Ok((text, Some(html)))
+}
+
+/// Characters that survive whitespace folding but render as nothing: controls,
+/// zero-width and directional formatting marks, fillers, the blank braille
+/// pattern, variation selectors and tag characters.
+fn is_invisible(character: char) -> bool {
+    character.is_whitespace()
+        || character.is_control()
+        || matches!(
+            character,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        )
 }
 
 /// Parse the only attachment source TorroMail accepts: bytes carried by the

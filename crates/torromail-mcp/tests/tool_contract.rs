@@ -981,8 +981,12 @@ fn html_body_is_refused_with_body_blank_html_or_no_readable_text() {
             "html_body contains no readable text",
         ),
         (
-            serde_json::json!({"html_body": "<p>&#8203;\u{200B}\u{FEFF}</p>"}),
+            serde_json::json!({"html_body": "<p>&#8203;\u{200B}\u{FEFF}\u{200E}\u{202E}\u{2800}\u{E0041}</p>"}),
             "html_body contains no readable text",
+        ),
+        (
+            serde_json::json!({"body": 5, "html_body": "<p>Text</p>"}),
+            "send either body or html_body",
         ),
     ];
 
