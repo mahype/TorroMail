@@ -57,7 +57,8 @@ Direct write tools (no approval, gated by the mark permission):
 Prepared action tools:
 
 - `mail_create_draft` — accepts optional MIME attachments as standard padded
-  base64, never as a local path or URL.
+  base64, never as a local path or URL, and an optional `html_body` instead of
+  `body` for a formatted message.
 - `mail_prepare_send`
 - `mail_prepare_move`
 - `mail_prepare_delete`
@@ -296,7 +297,7 @@ names, media types, and byte sizes, but never their encoded content.
 
 ## Outgoing Attachments
 
-`mail_create_draft` composes the text body and all attachments atomically, then
+`mail_create_draft` composes the body and all attachments atomically, then
 appends the complete RFC 5322 message with the `\Draft` flag. The destination
 comes from the server's `\Drafts` mailbox attribute in `LIST`,
 `LIST (SPECIAL-USE)`, or `XLIST`. If no attribute is reported, TorroMail uses
@@ -308,6 +309,17 @@ SELECT before use. Without NAMESPACE it uses the empty-name LIST hierarchy root;
 unknown namespaces fail with an actionable setup error. With
 attachments the message is `multipart/mixed`; every binary
 part uses base64 transfer encoding and an RFC 2231 UTF-8 filename.
+
+With `html_body` the body is `multipart/alternative`: a `text/plain` part,
+then the `text/html` part, both UTF-8 and quoted-printable so long HTML lines
+stay within the 998-byte line limit of RFC 5322. With attachments that
+alternative is the first part of the `multipart/mixed`. TorroMail derives the
+plain-text part from the HTML (tags dropped, link targets named as ` <url>`)
+and refuses a separate `body`, so the text the person approves is the text the
+message carries; HTML without readable text is refused. The HTML is not
+sanitized, and `cid:` images (`multipart/related`) are not supported. Without
+`html_body` the message keeps its plain-text shape byte for byte, so drafts in
+the journal keep their idempotency and fingerprint.
 
 The same lookup applies to Sent, Archive, Junk, and Trash using their IMAP
 special-use attributes and existing common folder names. An account can
@@ -363,7 +375,8 @@ Inspect the provider before explicitly creating a new draft with a new key.
 
 The GUI and MCP both use `send_service`; the app's `--send-action` bridge lists,
 rejects and confirms the same persistent operations. The GUI preview shows the
-sender, full envelope, subject, body and attachment summaries. Send approvals
+sender, full envelope, subject, body and attachment summaries; for an HTML
+draft the body is the derived plain text, never raw HTML. Send approvals
 retain the five-minute TTL. Move/delete preparations remain session-local.
 
 Each account chooses `sent_copy_strategy`: `imap` (the migration/default),

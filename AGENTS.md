@@ -144,7 +144,12 @@ Prepared action tools:
   without IMAP. Both modes are gated by the drafts right. Optional attachments travel
   as standard padded base64 with a filename and optional media type; paths and
   URLs are never accepted. At most 20 attachments and 20 MiB of finished MIME
-  data are allowed.
+  data are allowed. Optional `html_body` makes the message
+  `multipart/alternative` (text and HTML, both quoted-printable; nested in
+  `multipart/mixed` with attachments). TorroMail derives the plain-text part
+  from the HTML itself, naming link targets as ` <url>`, and that text is what
+  the person approves; `body` is then refused, as is HTML without readable
+  text. Without `html_body` the message stays plain text, byte for byte.
 - `mail_prepare_move` — holds a move for confirmation; gated by the move right.
   `target_role` can select the account's Archive or Junk folder instead of an
   explicit `target_mailbox`.
